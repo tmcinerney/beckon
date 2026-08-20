@@ -20,6 +20,8 @@ use tao::event_loop::{ControlFlow, EventLoopBuilder};
 
 const SOURCE: &str = "beckond";
 const KEY_IDS: [&str; 10] = ["f1", "f2", "f3", "f4", "f5", "f6", "f7", "f8", "f9", "f10"];
+const CONFIG_VERSION: u32 = 1;
+const STATE_VERSION: u32 = 1;
 
 #[derive(Parser)]
 #[command(about = "Bind Herdr panes to Glove80 Beckon keys")]
@@ -30,6 +32,13 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum CommandLine {
+    /// Create a commented configuration template without overwriting an existing file.
+    Init,
+    /// Validate the Beckon configuration file.
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommand,
+    },
     /// Run the local single-writer binding daemon.
     Daemon,
     /// Bind a pane to a Beckon key. Defaults to $HERDR_PANE_ID.
@@ -40,6 +49,11 @@ enum CommandLine {
     Status,
     /// Log the ten Beckon-layer function-key events until interrupted.
     ListenKeys,
+}
+
+#[derive(Subcommand)]
+enum ConfigCommand {
+    Check,
 }
 
 #[derive(Args)]
@@ -100,8 +114,46 @@ struct Pane {
     tokens: Option<std::collections::BTreeMap<String, String>>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Config {
+    config_version: u32,
+    #[serde(default)]
+    focus: FocusConfig,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FocusConfig {
+    /// Executable followed by arguments. It runs before `herdr agent focus`.
+    command: Option<Vec<String>>,
+}
+
+#[derive(Debug, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct BindingState {
+    state_version: u32,
+    #[serde(default)]
+    bindings: Vec<Binding>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct Binding {
+    key: String,
+    pane_id: String,
+}
+
 fn main() -> Result<()> {
     match Cli::parse().command {
+        CommandLine::Init => init_config(),
+        CommandLine::Config {
+            command: ConfigCommand::Check,
+        } => {
+            load_config()?;
+            println!("{} is valid", config_path().display());
+            Ok(())
+        }
         CommandLine::Daemon => daemon(),
         CommandLine::Bind(args) => client(Request::Bind {
             pane_id: current_pane(args.pane.pane)?,
@@ -115,12 +167,181 @@ fn main() -> Result<()> {
     }
 }
 
+fn config_dir() -> PathBuf {
+    env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
+        .unwrap_or_else(env::temp_dir)
+        .join("beckon")
+}
+
+fn config_path() -> PathBuf {
+    config_dir().join("config.toml")
+}
+
+fn init_config() -> Result<()> {
+    let path = config_path();
+    if path.exists() {
+        bail!(
+            "{} already exists; Beckon will not overwrite it",
+            path.display()
+        );
+    }
+    fs::create_dir_all(config_dir())
+        .with_context(|| format!("create {}", config_dir().display()))?;
+    fs::write(&path, DEFAULT_CONFIG).with_context(|| format!("write {}", path.display()))?;
+    println!("created {}", path.display());
+    Ok(())
+}
+
+fn load_config() -> Result<Config> {
+    let path = config_path();
+    let contents = fs::read_to_string(&path).with_context(|| {
+        format!(
+            "read {} (run `beckon init` to create a configuration template)",
+            path.display()
+        )
+    })?;
+    let config: Config =
+        toml::from_str(&contents).with_context(|| format!("parse {}", path.display()))?;
+    if config.config_version != CONFIG_VERSION {
+        bail!(
+            "{} has config_version {}; this Beckon version supports {}",
+            path.display(),
+            config.config_version,
+            CONFIG_VERSION
+        );
+    }
+    if let Some(command) = &config.focus.command
+        && command.is_empty()
+    {
+        bail!("focus.command must contain an executable when set");
+    }
+    Ok(config)
+}
+
+const DEFAULT_CONFIG: &str = r#"# Beckon's portable settings. Machine-specific focus behavior is optional.
+config_version = 1
+
+# Run this before Beckon focuses a Herdr agent pane. Leave commented out when
+# Ghostty is already frontmost. Use an executable and its arguments, not a shell
+# string, so no shell quoting or interpolation is involved.
+# [focus]
+# command = ["/Users/you/.config/beckon/focus-ghostty"]
+"#;
+
 fn state_dir() -> PathBuf {
     env::var_os("XDG_STATE_HOME")
         .map(PathBuf::from)
         .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/state")))
         .unwrap_or_else(env::temp_dir)
         .join("beckon")
+}
+
+fn bindings_path() -> PathBuf {
+    state_dir().join("bindings.json")
+}
+
+fn load_binding_state() -> Result<Option<BindingState>> {
+    let path = bindings_path();
+    if !path.exists() {
+        return Ok(None);
+    }
+    let contents = fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+    let state: BindingState =
+        serde_json::from_str(&contents).with_context(|| format!("parse {}", path.display()))?;
+    if state.state_version != STATE_VERSION {
+        bail!(
+            "{} has state_version {}; this Beckon version supports {}",
+            path.display(),
+            state.state_version,
+            STATE_VERSION
+        );
+    }
+    validate_bindings(&state.bindings)?;
+    Ok(Some(state))
+}
+
+fn save_binding_state(state: &BindingState) -> Result<()> {
+    validate_bindings(&state.bindings)?;
+    let directory = state_dir();
+    fs::create_dir_all(&directory).with_context(|| format!("create {}", directory.display()))?;
+    let path = bindings_path();
+    let temporary = directory.join(format!(".bindings-{}.tmp", std::process::id()));
+    let contents = serde_json::to_vec_pretty(state)?;
+    fs::write(&temporary, contents).with_context(|| format!("write {}", temporary.display()))?;
+    fs::rename(&temporary, &path).with_context(|| format!("replace {}", path.display()))?;
+    Ok(())
+}
+
+fn validate_bindings(bindings: &[Binding]) -> Result<()> {
+    for binding in bindings {
+        valid_key(&binding.key)?;
+        if binding.pane_id.is_empty() {
+            bail!("a binding has an empty pane_id");
+        }
+    }
+    for (index, binding) in bindings.iter().enumerate() {
+        if bindings[index + 1..]
+            .iter()
+            .any(|other| other.key == binding.key || other.pane_id == binding.pane_id)
+        {
+            bail!("bindings must have unique keys and pane IDs");
+        }
+    }
+    Ok(())
+}
+
+fn import_or_load_binding_state(panes: &[Pane]) -> Result<BindingState> {
+    if let Some(state) = load_binding_state()? {
+        return Ok(state);
+    }
+
+    // A one-time migration preserves prototype/manual fkey tokens. Later token
+    // changes never become authoritative; state is durable across Herdr restarts.
+    let bindings = panes
+        .iter()
+        .filter_map(|pane| {
+            binding(pane).map(|key| Binding {
+                key: key.to_string(),
+                pane_id: pane.pane_id.clone(),
+            })
+        })
+        .collect::<Vec<_>>();
+    let state = BindingState {
+        state_version: STATE_VERSION,
+        bindings,
+    };
+    save_binding_state(&state)?;
+    Ok(state)
+}
+
+fn reconcile_bindings(panes: &[Pane]) -> Result<BindingState> {
+    let imported_tokens = load_binding_state()?.is_none();
+    let mut state = import_or_load_binding_state(panes)?;
+    state
+        .bindings
+        .retain(|binding| panes.iter().any(|pane| pane.pane_id == binding.pane_id));
+    save_binding_state(&state)?;
+
+    for pane in panes {
+        match state
+            .bindings
+            .iter()
+            .find(|binding| binding.pane_id == pane.pane_id)
+        {
+            Some(expected) if binding(pane) != Some(expected.key.as_str()) => {
+                write_token(&pane.pane_id, TokenWrite::Set(expected.key.clone()))?;
+            }
+            // Only remove orphaned tokens after the one-time migration. During
+            // migration, every valid fkey token was deliberately imported.
+            None if !imported_tokens && binding(pane).is_some() => {
+                write_token(&pane.pane_id, TokenWrite::Clear)?;
+            }
+            _ => {}
+        }
+    }
+    Ok(state)
 }
 
 fn listen_keys() -> Result<()> {
@@ -290,51 +511,69 @@ fn binding(pane: &Pane) -> Option<&str> {
 
 fn bind(pane_id: &str, requested_key: Option<&str>) -> Result<Value> {
     let panes = panes()?;
-    let pane = panes
+    panes
         .iter()
         .find(|pane| pane.pane_id == pane_id)
         .context("pane no longer exists")?;
+    let mut state = reconcile_bindings(&panes)?;
     let key = match requested_key {
         Some(key) => valid_key(key)?.to_string(),
-        None => first_free_key(&panes)
+        None => first_free_key(&state.bindings)
             .context("no Beckon keys are free")?
             .to_string(),
     };
 
-    if let Some(owner) = panes
-        .iter()
-        .find(|candidate| binding(candidate) == Some(key.as_str()))
+    if let Some(owner) = state.bindings.iter().find(|candidate| candidate.key == key)
+        && owner.pane_id != pane_id
     {
-        if owner.pane_id != pane_id {
-            bail!("{key} is already bound to {}", owner.pane_id);
-        }
+        bail!("{key} is already bound to {}", owner.pane_id);
     }
-    if binding(pane) == Some(key.as_str()) {
+    if state
+        .bindings
+        .iter()
+        .any(|binding| binding.pane_id == pane_id && binding.key == key)
+    {
         return Ok(json!({"pane_id": pane_id, "key": key, "changed": false}));
     }
-    if binding(pane).is_some() {
-        write_token(pane_id, false)?;
-    }
-    write_token(pane_id, true_with_key(&key))?;
+    state.bindings.retain(|binding| binding.pane_id != pane_id);
+    state.bindings.push(Binding {
+        key: key.clone(),
+        pane_id: pane_id.to_string(),
+    });
+    save_binding_state(&state)?;
+    write_token(pane_id, TokenWrite::Set(key.clone()))?;
     Ok(json!({"pane_id": pane_id, "key": key, "changed": true}))
 }
 
 fn release(pane_id: &str) -> Result<Value> {
-    let pane = panes()?
-        .into_iter()
+    let panes = panes()?;
+    panes
+        .iter()
         .find(|pane| pane.pane_id == pane_id)
         .context("pane no longer exists")?;
-    if binding(&pane).is_none() {
+    let mut state = reconcile_bindings(&panes)?;
+    let before = state.bindings.len();
+    state.bindings.retain(|binding| binding.pane_id != pane_id);
+    if state.bindings.len() == before {
         return Ok(json!({"pane_id": pane_id, "changed": false}));
     }
-    write_token(pane_id, false)?;
+    save_binding_state(&state)?;
+    write_token(pane_id, TokenWrite::Clear)?;
     Ok(json!({"pane_id": pane_id, "changed": true}))
 }
 
 fn status() -> Result<Value> {
-    let mut bindings: Vec<_> = panes()?
+    let panes = panes()?;
+    let state = reconcile_bindings(&panes)?;
+    let mut bindings: Vec<_> = state
+        .bindings
         .into_iter()
-        .filter_map(|pane| binding(&pane).map(|key| json!({"key": key, "pane": pane})))
+        .filter_map(|binding| {
+            panes
+                .iter()
+                .find(|pane| pane.pane_id == binding.pane_id)
+                .map(|pane| json!({"key": binding.key, "pane": pane}))
+        })
         .collect();
     bindings.sort_by(|left, right| left["key"].as_str().cmp(&right["key"].as_str()));
     Ok(json!({"bindings": bindings}))
@@ -361,16 +600,6 @@ enum TokenWrite {
     Set(String),
     Clear,
 }
-impl From<bool> for TokenWrite {
-    fn from(value: bool) -> Self {
-        assert!(!value);
-        Self::Clear
-    }
-}
-fn true_with_key(key: &str) -> TokenWrite {
-    TokenWrite::Set(key.to_string())
-}
-
 fn valid_key(key: &str) -> Result<&str> {
     KEY_IDS
         .iter()
@@ -379,10 +608,10 @@ fn valid_key(key: &str) -> Result<&str> {
         .context("key must be f1 through f10")
 }
 
-fn first_free_key(panes: &[Pane]) -> Option<&'static str> {
+fn first_free_key(bindings: &[Binding]) -> Option<&'static str> {
     KEY_IDS
         .into_iter()
-        .find(|key| !panes.iter().any(|pane| binding(pane) == Some(*key)))
+        .find(|key| !bindings.iter().any(|binding| binding.key == *key))
 }
 
 #[cfg(test)]
@@ -391,14 +620,25 @@ mod tests {
 
     #[test]
     fn chooses_the_first_unbound_key() {
-        let pane = Pane {
+        let binding = Binding {
+            key: "f2".into(),
             pane_id: "p1".into(),
-            agent_status: "idle".into(),
-            agent: None,
-            label: None,
-            cwd: None,
-            tokens: None,
         };
-        assert_eq!(first_free_key(&[pane]), Some("f1"));
+        assert_eq!(first_free_key(&[binding]), Some("f1"));
+    }
+
+    #[test]
+    fn rejects_duplicate_binding_keys() {
+        let bindings = vec![
+            Binding {
+                key: "f1".into(),
+                pane_id: "p1".into(),
+            },
+            Binding {
+                key: "f1".into(),
+                pane_id: "p2".into(),
+            },
+        ];
+        assert!(validate_bindings(&bindings).is_err());
     }
 }

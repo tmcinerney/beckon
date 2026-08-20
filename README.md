@@ -3,14 +3,37 @@
 Beckon binds selected Herdr agent panes to Glove80 keys for glanceable state
 and direct navigation.
 
-## Current gate
+## Current state
 
-The initial executable registers global F13 and F14 hotkeys on macOS and logs
-presses. It validates the navigation transport before Herdr, HID, or firmware
-code is added.
+The current executable has the manual registration foundation:
 
-Run it with:
+- `beckon bind [--key f1]` binds `$HERDR_PANE_ID` through the local daemon.
+- `beckon release` clears that binding.
+- `beckon status` shows bindings and their current Herdr pane data.
+- `beckon listen-keys` records the ten Beckon-layer key events.
+
+Bindings are persisted in `$XDG_STATE_HOME/beckon/bindings.json` (falling back
+to `~/.local/state/beckon`). Herdr's `fkey` pane token is a visible mirror for
+the sidebar, not the source of truth: Herdr does not restore token metadata
+after its server restarts.
+
+Create and validate the optional machine-specific configuration with:
 
 ```sh
-devenv shell -- cargo run
+devenv shell -- cargo run -- init
+devenv shell -- cargo run -- config check
 ```
+
+This creates `$XDG_CONFIG_HOME/beckon/config.toml` (falling back to
+`~/.config/beckon/config.toml`) without overwriting an existing file.
+
+For the current manual-bind spike, start the daemon then bind from a Herdr
+pane:
+
+```sh
+devenv shell -- cargo run -- daemon
+devenv shell -- cargo run -- bind --key f1
+```
+
+The daemon currently owns binding writes only. Focus-on-keypress and LED state
+delivery are the next milestones.
