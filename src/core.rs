@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -34,6 +35,10 @@ pub struct Pane {
     #[serde(default)]
     pub cwd: Option<String>,
     #[serde(default)]
+    pub terminal_title: Option<String>,
+    #[serde(default)]
+    pub terminal_title_stripped: Option<String>,
+    #[serde(default)]
     pub focused: bool,
     #[serde(default)]
     pub tokens: BTreeMap<String, String>,
@@ -43,6 +48,41 @@ impl Pane {
     pub fn fkey(&self) -> Option<&str> {
         self.tokens.get("fkey").map(String::as_str)
     }
+
+    /// Resolve a useful title without modifying the pane. Agent TUIs normally
+    /// expose their current task through the stripped terminal title; a manual
+    /// label remains the next explicit fallback.
+    pub fn display_title(&self) -> String {
+        self.terminal_title_stripped
+            .as_deref()
+            .or(self.label.as_deref())
+            .or(self.terminal_title.as_deref())
+            .filter(|title| !title.trim().is_empty())
+            .map(str::trim)
+            .map(str::to_owned)
+            .or_else(|| {
+                self.cwd.as_deref().and_then(|cwd| {
+                    Path::new(cwd)
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .filter(|name| !name.is_empty())
+                        .map(str::to_owned)
+                })
+            })
+            .unwrap_or_else(|| "untitled pane".into())
+    }
+}
+
+/// Presentation data for every currently live pane, including unbound panes.
+/// This deliberately contains resolved values so clients never need to infer a
+/// missing `fkey` token as an unbound state.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct PanePresentation {
+    pub pane_id: String,
+    pub title: String,
+    pub binding: String,
+    pub agent_status: String,
+    pub focused: bool,
 }
 
 /// Durable storage for the binding ledger. The ledger, not Herdr metadata, is
@@ -184,6 +224,32 @@ impl<'a> BindingService<'a> {
             .collect::<Vec<_>>();
         bindings.sort_by(|left, right| left.0.key.cmp(&right.0.key));
         Ok(bindings)
+    }
+
+    pub fn panes(&self) -> Result<Vec<PanePresentation>> {
+        let panes = self.panes.panes()?;
+        let state = self.reconcile_panes(&panes)?;
+        let mut presentation = panes
+            .into_iter()
+            .map(|pane| {
+                let binding = state
+                    .bindings
+                    .iter()
+                    .find(|binding| binding.pane_id == pane.pane_id)
+                    .map(|binding| binding.key.to_ascii_uppercase())
+                    .unwrap_or_else(|| "unbound".into());
+                let title = pane.display_title();
+                PanePresentation {
+                    pane_id: pane.pane_id,
+                    title,
+                    binding,
+                    agent_status: pane.agent_status,
+                    focused: pane.focused,
+                }
+            })
+            .collect::<Vec<_>>();
+        presentation.sort_by(|left, right| left.pane_id.cmp(&right.pane_id));
+        Ok(presentation)
     }
 
     pub fn pane_for_key(&self, key: &str) -> Result<String> {
@@ -329,6 +395,8 @@ mod tests {
             agent: None,
             label: None,
             cwd: None,
+            terminal_title: None,
+            terminal_title_stripped: None,
             focused: false,
             tokens: BTreeMap::new(),
         }
@@ -356,6 +424,38 @@ mod tests {
         assert_eq!(result.key, "f1");
         assert!(!result.changed);
         assert_eq!(panes.panes().unwrap()[0].fkey(), Some("f1"));
+    }
+
+    #[test]
+    fn presents_every_pane_with_title_and_explicit_unbound_state() {
+        let store = MemoryStore::default();
+        let mut bound = pane("p1");
+        bound.terminal_title_stripped = Some(" Inspect task ".into());
+        let mut unbound = pane("p2");
+        unbound.cwd = Some("/code/feature-pane-presentation".into());
+        let panes = FakePanes(RefCell::new(vec![bound, unbound]));
+        let service = BindingService::new(&store, &panes);
+        service.bind("p1", Some("f4")).unwrap();
+
+        assert_eq!(
+            service.panes().unwrap(),
+            vec![
+                PanePresentation {
+                    pane_id: "p1".into(),
+                    title: "Inspect task".into(),
+                    binding: "F4".into(),
+                    agent_status: "idle".into(),
+                    focused: false,
+                },
+                PanePresentation {
+                    pane_id: "p2".into(),
+                    title: "feature-pane-presentation".into(),
+                    binding: "unbound".into(),
+                    agent_status: "idle".into(),
+                    focused: false,
+                },
+            ]
+        );
     }
 
     #[test]

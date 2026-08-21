@@ -111,6 +111,8 @@ mod tests {
             agent: None,
             label: None,
             cwd: None,
+            terminal_title: None,
+            terminal_title_stripped: None,
             focused: false,
             tokens: BTreeMap::new(),
         }
