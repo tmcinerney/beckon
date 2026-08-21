@@ -11,7 +11,7 @@ use std::{
 use anyhow::{Context, Result, bail};
 use beckon::{
     config,
-    core::{BindingService, PaneDirectory},
+    core::{BindingService, BindingState, BindingStore, PaneDirectory, STATE_VERSION},
     focus::{CommandFocus, FocusAdapter},
     herdr::{HerdrCli, LivePaneDirectory},
     hid::{self, Status, StatusSnapshot},
@@ -411,6 +411,8 @@ fn daemon() -> Result<()> {
     // AIDEV-NOTE: macOS requires global-hotkey and Tao's event loop on the main
     // thread. Socket polling keeps binding mutation serialized in this daemon.
     let herdr = LivePaneDirectory::start()?;
+    let mut display = hid::RenderSink::new(hid::UsbStatusWriter);
+    let mut last_display_error = None;
     let event_loop = EventLoopBuilder::new().build();
     let manager = GlobalHotKeyManager::new().context("initialize macOS global hotkeys")?;
     let labels = register_hotkeys(&manager)?;
@@ -421,6 +423,16 @@ fn daemon() -> Result<()> {
         while let Ok((stream, _)) = listener.accept() {
             if let Err(error) = handle_connection(stream, &herdr) {
                 eprintln!("request failed: {error:#}");
+            }
+        }
+        match publish_display(&config, &herdr, &mut display) {
+            Ok(_) => last_display_error = None,
+            Err(error) => {
+                let error = format!("{error:#}");
+                if last_display_error.as_deref() != Some(error.as_str()) {
+                    eprintln!("update keyboard status display: {error}");
+                    last_display_error = Some(error);
+                }
             }
         }
         while let Ok(event) = receiver.try_recv() {
@@ -449,6 +461,40 @@ fn daemon() -> Result<()> {
         }
         let _keep_manager_registered = &manager;
     })
+}
+
+/// Read the durable binding ledger without mutating it, combine it with the
+/// live pane cache, and send a new transport snapshot only when it matters.
+/// Binding reconciliation remains a CLI/request operation; polling it here
+/// would rewrite the state file and Herdr metadata on every event-loop tick.
+fn publish_display<D, W>(
+    config: &config::Config,
+    panes: &D,
+    display: &mut hid::RenderSink<W>,
+) -> Result<bool>
+where
+    D: PaneDirectory,
+    W: hid::StatusWriter,
+{
+    let store = JsonBindingStore::from_environment();
+    let state = store.load()?.unwrap_or(BindingState {
+        state_version: STATE_VERSION,
+        bindings: Vec::new(),
+    });
+    let panes_by_id = panes.panes()?;
+    let bindings = state
+        .bindings
+        .into_iter()
+        .filter_map(|binding| {
+            panes_by_id
+                .iter()
+                .find(|pane| pane.pane_id == binding.pane_id)
+                .cloned()
+                .map(|pane| (binding, pane))
+        })
+        .collect::<Vec<_>>();
+    let plan = beckon::render::render(&config.display, &bindings)?;
+    display.publish(&plan)
 }
 
 fn handle_connection<D: PaneDirectory>(mut stream: UnixStream, panes: &D) -> Result<()> {

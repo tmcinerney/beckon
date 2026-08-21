@@ -11,6 +11,8 @@ The current executable has the manual registration foundation:
 - `beckon release` clears that binding.
 - `beckon status` shows bindings and their current Herdr pane data.
 - `beckon listen-keys` records the ten Beckon-layer key events.
+- `beckond` renders its live Herdr pane cache to the wired Glove80 status
+  endpoint, retrying automatically after a keyboard reconnect.
 - `beckon preview` shows the declarative LED plan without writing keyboard HID
   frames; `beckon preview --all-states` shows every supported state treatment.
 
@@ -39,16 +41,15 @@ devenv shell -- cargo run -- bind --key f1
 
 The daemon owns binding writes and global keypress navigation. If `focus.command`
 is set, it runs before `herdr agent focus`; this is where a user integrates their
-terminal and window manager. LED state delivery is the next milestone. `preview`
-is deliberately truthful about that boundary: it renders plans for inspection,
-not a simulated or real keyboard update.
+terminal and window manager. `preview` remains deliberately read-only: it
+renders plans for inspection, not a simulated or real keyboard update.
 
 ## USB status transport diagnostic
 
 The `v0.2.0-rc.1` Beckon firmware exposes a USB-only, status-only vendor HID
-endpoint on the left (split-central) half. It is not connected to the daemon or
-the renderer yet. The diagnostic commands make that physical protocol gate
-explicit:
+endpoint on the left (split-central) half. `beckond` uses the same strictly
+selected endpoint for normal live status delivery. The diagnostic commands stay
+explicit, for physical protocol checks only:
 
 ```sh
 # Read-only discovery and open test.

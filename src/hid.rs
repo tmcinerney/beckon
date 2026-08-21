@@ -1,13 +1,17 @@
-//! USB-only diagnostic access to the Beckon status transport.
+//! USB-only Beckon status transport and its explicit diagnostic commands.
 //!
-//! This module intentionally has no dependency on the daemon or render plan.
-//! It exists to prove the host-to-keyboard protocol before automated status
-//! delivery is enabled.
+//! The daemon depends only on the narrow [`StatusWriter`] boundary; manual
+//! protocol diagnostics remain explicit CLI actions.
 
-use std::{ffi::CStr, fmt, str::FromStr};
+use std::{collections::BTreeMap, ffi::CStr, fmt, str::FromStr};
 
 use anyhow::{Context, Result, bail};
 use hidapi::{DeviceInfo, HidApi, HidDevice};
+
+use crate::{
+    core::KEY_IDS,
+    render::{AgentState, RenderPlan},
+};
 
 pub const VENDOR_USAGE_PAGE: u16 = 0xFF60;
 pub const STATUS_USAGE: u16 = 0x0061;
@@ -66,6 +70,97 @@ impl FromStr for Status {
 pub struct StatusSnapshot {
     pub sequence: u8,
     pub slots: [Status; SLOT_COUNT],
+}
+
+/// The narrow output boundary used by the daemon. Keeping it small lets the
+/// state-to-transport policy be tested without a physical HID device.
+pub trait StatusWriter {
+    fn write_snapshot(&mut self, snapshot: StatusSnapshot) -> Result<()>;
+}
+
+/// The real USB writer. It opens the strict Glove80 endpoint for every state
+/// change, which makes unplug/replug recovery an ordinary subsequent write.
+#[derive(Default)]
+pub struct UsbStatusWriter;
+
+impl StatusWriter for UsbStatusWriter {
+    fn write_snapshot(&mut self, snapshot: StatusSnapshot) -> Result<()> {
+        send(snapshot)
+    }
+}
+
+/// Convert hardware-neutral render plans into protocol snapshots and avoid
+/// rewriting the keyboard until its ten meaningful states change.
+///
+/// A failed write intentionally does not update `last_slots`, so the daemon
+/// retries on its next normal render pass after a keyboard reconnects.
+pub struct RenderSink<W> {
+    writer: W,
+    last_slots: Option<[Status; SLOT_COUNT]>,
+    next_sequence: u8,
+}
+
+impl<W> RenderSink<W>
+where
+    W: StatusWriter,
+{
+    pub fn new(writer: W) -> Self {
+        Self {
+            writer,
+            last_slots: None,
+            next_sequence: 0,
+        }
+    }
+
+    /// Returns whether a USB snapshot was written.
+    pub fn publish(&mut self, plan: &RenderPlan) -> Result<bool> {
+        let slots = slots_for_plan(plan)?;
+        if self.last_slots == Some(slots) {
+            return Ok(false);
+        }
+        let snapshot = StatusSnapshot {
+            sequence: self.next_sequence,
+            slots,
+        };
+        self.writer.write_snapshot(snapshot)?;
+        self.last_slots = Some(slots);
+        self.next_sequence = self.next_sequence.wrapping_add(1);
+        Ok(true)
+    }
+
+    pub fn into_inner(self) -> W {
+        self.writer
+    }
+}
+
+fn slots_for_plan(plan: &RenderPlan) -> Result<[Status; SLOT_COUNT]> {
+    let renders = plan
+        .keys
+        .iter()
+        .map(|render| (render.key.as_str(), render))
+        .collect::<BTreeMap<_, _>>();
+    if plan.keys.len() != SLOT_COUNT || renders.len() != SLOT_COUNT {
+        bail!("render plan must contain exactly {SLOT_COUNT} Beckon keys");
+    }
+    let mut slots = [Status::Unbound; SLOT_COUNT];
+    for (index, key) in KEY_IDS.into_iter().enumerate() {
+        let render = renders
+            .get(key)
+            .with_context(|| format!("render plan omitted {key}"))?;
+        slots[index] = status_for_state(render.state);
+    }
+    Ok(slots)
+}
+
+fn status_for_state(state: Option<AgentState>) -> Status {
+    match state {
+        None => Status::Unbound,
+        Some(AgentState::Idle) => Status::Idle,
+        Some(AgentState::Working) => Status::Working,
+        Some(AgentState::Blocked) => Status::Blocked,
+        Some(AgentState::Done) => Status::Done,
+        Some(AgentState::Unknown) => Status::Unknown,
+    }
 }
 
 impl StatusSnapshot {
@@ -204,7 +299,10 @@ fn write_exact(device: &HidDevice, report: &[u8]) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
+
     use super::*;
+    use crate::render::{KeyRender, Motion, Rgb};
 
     #[test]
     fn encodes_complete_snapshot_with_zeroed_reserved_bytes() {
@@ -235,5 +333,95 @@ mod tests {
     fn parses_only_protocol_status_names() {
         assert_eq!("working".parse::<Status>(), Ok(Status::Working));
         assert!("paused".parse::<Status>().is_err());
+    }
+
+    #[derive(Default)]
+    struct RecordingWriter {
+        writes: Vec<StatusSnapshot>,
+        failures: VecDeque<bool>,
+    }
+
+    impl StatusWriter for RecordingWriter {
+        fn write_snapshot(&mut self, snapshot: StatusSnapshot) -> Result<()> {
+            if self.failures.pop_front().unwrap_or(false) {
+                bail!("simulated disconnected keyboard");
+            }
+            self.writes.push(snapshot);
+            Ok(())
+        }
+    }
+
+    fn plan(states: [Option<AgentState>; SLOT_COUNT]) -> RenderPlan {
+        RenderPlan {
+            keys: KEY_IDS
+                .into_iter()
+                .zip(states)
+                .map(|(key, state)| KeyRender {
+                    key: key.into(),
+                    state,
+                    colour: "#000000".parse::<Rgb>().unwrap(),
+                    brightness: 0.0,
+                    motion: Motion::Steady,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn render_sink_translates_and_deduplicates_meaningful_states() {
+        let mut sink = RenderSink::new(RecordingWriter::default());
+        let working = plan([
+            Some(AgentState::Working),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        ]);
+
+        assert!(sink.publish(&working).unwrap());
+        assert!(!sink.publish(&working).unwrap());
+
+        let writer = sink.into_inner();
+        assert_eq!(writer.writes.len(), 1);
+        assert_eq!(writer.writes[0].sequence, 0);
+        assert_eq!(writer.writes[0].slots[0], Status::Working);
+        assert!(
+            writer.writes[0].slots[1..]
+                .iter()
+                .all(|status| *status == Status::Unbound)
+        );
+    }
+
+    #[test]
+    fn render_sink_retries_a_snapshot_after_a_disconnect() {
+        let writer = RecordingWriter {
+            failures: VecDeque::from([true, false]),
+            ..Default::default()
+        };
+        let mut sink = RenderSink::new(writer);
+        let idle = plan([
+            Some(AgentState::Idle),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        ]);
+
+        assert!(sink.publish(&idle).is_err());
+        assert!(sink.publish(&idle).unwrap());
+
+        let writer = sink.into_inner();
+        assert_eq!(writer.writes.len(), 1);
+        assert_eq!(writer.writes[0].sequence, 0);
     }
 }
