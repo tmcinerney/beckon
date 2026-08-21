@@ -97,6 +97,9 @@ pub trait BindingStore {
 pub trait PaneDirectory {
     fn panes(&self) -> Result<Vec<Pane>>;
     fn write_fkey(&self, pane_id: &str, key: Option<&str>) -> Result<()>;
+    /// Publish Beckon-owned display tokens without changing a pane's title or
+    /// other metadata owned by a user or agent integration.
+    fn write_presentation_tokens(&self, pane_id: &str, binding: &str) -> Result<()>;
     fn focus_pane(&self, pane_id: &str) -> Result<()>;
     fn send_keys(&self, pane_id: &str, keys: &[&str]) -> Result<()>;
 }
@@ -376,6 +379,10 @@ mod tests {
                 Some(key) => pane.tokens.insert("fkey".into(), key.into()),
                 None => pane.tokens.remove("fkey"),
             };
+            Ok(())
+        }
+
+        fn write_presentation_tokens(&self, _pane_id: &str, _binding: &str) -> Result<()> {
             Ok(())
         }
         fn focus_pane(&self, _pane_id: &str) -> Result<()> {

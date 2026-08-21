@@ -12,7 +12,9 @@ use anyhow::{Context, Result, bail};
 use beckon::{
     action::RepeatPressConfirm,
     config,
-    core::{BindingService, BindingState, BindingStore, PaneDirectory, STATE_VERSION},
+    core::{
+        BindingService, BindingState, BindingStore, PaneDirectory, PanePresentation, STATE_VERSION,
+    },
     focus::{CommandFocus, FocusAdapter},
     herdr::{HerdrCli, LivePaneDirectory},
     hid::{self, Status, StatusSnapshot},
@@ -481,6 +483,8 @@ fn daemon() -> Result<()> {
     let herdr = LivePaneDirectory::start()?;
     let mut display = hid::RenderSink::new(hid::UsbStatusWriter);
     let mut last_display_error = None;
+    let mut presentation = PresentationPublisher::default();
+    let mut last_presentation_error = None;
     let event_loop = EventLoopBuilder::new().build();
     let manager = GlobalHotKeyManager::new().context("initialize macOS global hotkeys")?;
     let labels = register_hotkeys(&manager)?;
@@ -501,6 +505,16 @@ fn daemon() -> Result<()> {
                 if last_display_error.as_deref() != Some(error.as_str()) {
                     eprintln!("update keyboard status display: {error}");
                     last_display_error = Some(error);
+                }
+            }
+        }
+        match presentation.sync(&herdr) {
+            Ok(_) => last_presentation_error = None,
+            Err(error) => {
+                let error = format!("{error:#}");
+                if last_presentation_error.as_deref() != Some(error.as_str()) {
+                    eprintln!("update Herdr pane presentation: {error}");
+                    last_presentation_error = Some(error);
                 }
             }
         }
@@ -574,6 +588,45 @@ fn daemon() -> Result<()> {
         }
         let _keep_manager_registered = &manager;
     })
+}
+
+/// Publishes Beckon-owned sidebar tokens only when a pane appears or its
+/// binding changes. Pane IDs are immutable, so including them in the one
+/// update keeps the sidebar independent of missing-token fallbacks.
+#[derive(Default)]
+struct PresentationPublisher {
+    published_bindings: BTreeMap<String, String>,
+}
+
+impl PresentationPublisher {
+    fn sync<D: PaneDirectory>(&mut self, panes: &D) -> Result<bool> {
+        let store = JsonBindingStore::from_environment();
+        let presentation = BindingService::new(&store, panes).panes()?;
+        self.publish(panes, presentation)
+    }
+
+    fn publish<D: PaneDirectory>(
+        &mut self,
+        panes: &D,
+        presentation: Vec<PanePresentation>,
+    ) -> Result<bool> {
+        let mut changed = false;
+        let live = presentation
+            .iter()
+            .map(|pane| pane.pane_id.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        self.published_bindings
+            .retain(|pane_id, _| live.contains(pane_id.as_str()));
+        for pane in presentation {
+            if self.published_bindings.get(&pane.pane_id) == Some(&pane.binding) {
+                continue;
+            }
+            panes.write_presentation_tokens(&pane.pane_id, &pane.binding)?;
+            self.published_bindings.insert(pane.pane_id, pane.binding);
+            changed = true;
+        }
+        Ok(changed)
+    }
 }
 
 /// Read the durable binding ledger without mutating it, combine it with the
@@ -696,6 +749,8 @@ fn pane_is_focused<D: PaneDirectory>(panes: &D, pane_id: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
+
     use super::*;
     use clap::CommandFactory;
 
@@ -733,6 +788,68 @@ mod tests {
         assert!(help.contains("read-only"));
         assert!(help.contains("ordinary keyboard"));
         assert!(help.contains("control Herdr agents"));
+    }
+
+    #[derive(Default)]
+    struct RecordingDirectory {
+        writes: RefCell<Vec<(String, String)>>,
+    }
+
+    impl PaneDirectory for RecordingDirectory {
+        fn panes(&self) -> Result<Vec<beckon::core::Pane>> {
+            Ok(Vec::new())
+        }
+
+        fn write_fkey(&self, _pane_id: &str, _key: Option<&str>) -> Result<()> {
+            Ok(())
+        }
+
+        fn write_presentation_tokens(&self, pane_id: &str, binding: &str) -> Result<()> {
+            self.writes
+                .borrow_mut()
+                .push((pane_id.into(), binding.into()));
+            Ok(())
+        }
+
+        fn focus_pane(&self, _pane_id: &str) -> Result<()> {
+            Ok(())
+        }
+
+        fn send_keys(&self, _pane_id: &str, _keys: &[&str]) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn presentation_tokens_publish_once_and_on_binding_change() {
+        let directory = RecordingDirectory::default();
+        let mut publisher = PresentationPublisher::default();
+        let pane = |binding: &str| PanePresentation {
+            pane_id: "w:p1".into(),
+            title: "task".into(),
+            binding: binding.into(),
+            agent_status: "idle".into(),
+            focused: false,
+        };
+
+        assert!(
+            publisher
+                .publish(&directory, vec![pane("unbound")])
+                .unwrap()
+        );
+        assert!(
+            !publisher
+                .publish(&directory, vec![pane("unbound")])
+                .unwrap()
+        );
+        assert!(publisher.publish(&directory, vec![pane("F4")]).unwrap());
+        assert_eq!(
+            *directory.writes.borrow(),
+            vec![
+                ("w:p1".into(), "unbound".into()),
+                ("w:p1".into(), "F4".into()),
+            ]
+        );
     }
 
     #[test]

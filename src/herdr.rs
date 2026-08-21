@@ -51,6 +51,10 @@ impl PaneDirectory for LivePaneDirectory {
         self.commands.write_fkey(pane_id, key)
     }
 
+    fn write_presentation_tokens(&self, pane_id: &str, binding: &str) -> Result<()> {
+        self.commands.write_presentation_tokens(pane_id, binding)
+    }
+
     fn focus_pane(&self, pane_id: &str) -> Result<()> {
         HerdrSocket::from_environment().focus_pane(pane_id)
     }
@@ -205,6 +209,24 @@ impl PaneDirectory for HerdrCli {
         if !output.status.success() {
             bail!(
                 "token update failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        Ok(())
+    }
+
+    fn write_presentation_tokens(&self, pane_id: &str, binding: &str) -> Result<()> {
+        let output = Command::new("herdr")
+            .args(["pane", "report-metadata", pane_id, "--source", SOURCE])
+            .arg("--token")
+            .arg(format!("beckon_binding={binding}"))
+            .arg("--token")
+            .arg(format!("beckon_pane_id={pane_id}"))
+            .output()
+            .context("write Beckon presentation tokens")?;
+        if !output.status.success() {
+            bail!(
+                "presentation token update failed: {}",
                 String::from_utf8_lossy(&output.stderr).trim()
             );
         }
