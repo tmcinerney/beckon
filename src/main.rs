@@ -13,7 +13,7 @@ use beckon::{
     config,
     core::{BindingService, PaneDirectory},
     focus::{CommandFocus, FocusAdapter},
-    herdr::LivePaneDirectory,
+    herdr::{HerdrCli, LivePaneDirectory},
     state::JsonBindingStore,
 };
 use clap::{Args, Parser, Subcommand};
@@ -49,6 +49,8 @@ enum CommandLine {
     Release(PaneArgs),
     /// Print every current Beckon binding as JSON.
     Status,
+    /// Print the hardware-neutral LED plan. This does not write to a keyboard.
+    Preview(PreviewArgs),
     /// Log the ten Beckon-layer function-key events until interrupted.
     ListenKeys,
 }
@@ -70,6 +72,16 @@ struct BindArgs {
 struct PaneArgs {
     #[arg(long)]
     pane: Option<String>,
+}
+
+#[derive(Args)]
+struct PreviewArgs {
+    /// Show one example for every agent state without querying Herdr.
+    #[arg(long)]
+    all_states: bool,
+    /// Emit the render plan as JSON.
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -111,8 +123,36 @@ fn main() -> Result<()> {
             pane_id: current_pane(args.pane)?,
         }),
         CommandLine::Status => client(Request::Status),
+        CommandLine::Preview(args) => preview(args),
         CommandLine::ListenKeys => listen_keys(),
     }
+}
+
+fn preview(args: PreviewArgs) -> Result<()> {
+    let config = config::load()?;
+    let plan = if args.all_states {
+        beckon::render::all_state_examples(&config.display)?
+    } else {
+        let store = JsonBindingStore::from_environment();
+        let herdr = HerdrCli;
+        let bindings = BindingService::new(&store, &herdr);
+        beckon::render::render(&config.display, &bindings.status()?)?
+    };
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&plan)?);
+    } else {
+        println!("Preview only: no keyboard HID frames are written.");
+        for key in plan.keys {
+            let state = key.state.map_or("unbound".to_string(), |state| {
+                format!("{state:?}").to_lowercase()
+            });
+            println!(
+                "{}\t{state}\t{}\t{:.1}\t{:?}",
+                key.key, key.colour, key.brightness, key.motion
+            );
+        }
+    }
+    Ok(())
 }
 
 fn listen_keys() -> Result<()> {

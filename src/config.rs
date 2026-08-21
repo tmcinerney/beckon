@@ -3,6 +3,8 @@ use std::{env, fs, path::PathBuf};
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
+use crate::render::DisplayConfig;
+
 const CONFIG_VERSION: u32 = 1;
 
 #[derive(Debug, Deserialize)]
@@ -11,6 +13,8 @@ pub struct Config {
     config_version: u32,
     #[serde(default)]
     pub focus: FocusConfig,
+    #[serde(default)]
+    pub display: DisplayConfig,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -66,6 +70,7 @@ pub fn load() -> Result<Config> {
     {
         bail!("focus.command must contain an executable when set");
     }
+    config.display.validate()?;
     Ok(config)
 }
 
@@ -77,4 +82,10 @@ config_version = 1
 # string, so no shell quoting or interpolation is involved.
 # [focus]
 # command = ["/Users/you/.config/beckon/focus-ghostty"]
+
+# Display settings have safe defaults. Override these only to tune the physical
+# keyboard once Beckon has a compatible LED firmware.
+# [display.states.working]
+# brightness = 0.6
+# motion = "breathe"
 "#;

@@ -11,6 +11,8 @@ The current executable has the manual registration foundation:
 - `beckon release` clears that binding.
 - `beckon status` shows bindings and their current Herdr pane data.
 - `beckon listen-keys` records the ten Beckon-layer key events.
+- `beckon preview` shows the declarative LED plan without writing keyboard HID
+  frames; `beckon preview --all-states` shows every supported state treatment.
 
 Bindings are persisted in `$XDG_STATE_HOME/beckon/bindings.json` (falling back
 to `~/.local/state/beckon`). Herdr's `fkey` pane token is a visible mirror for
@@ -37,7 +39,9 @@ devenv shell -- cargo run -- bind --key f1
 
 The daemon owns binding writes and global keypress navigation. If `focus.command`
 is set, it runs before `herdr agent focus`; this is where a user integrates their
-terminal and window manager. LED state delivery is the next milestone.
+terminal and window manager. LED state delivery is the next milestone. `preview`
+is deliberately truthful about that boundary: it renders plans for inspection,
+not a simulated or real keyboard update.
 
 For OmniWM and one visible Ghostty window, copy
 `examples/omniwm-focus-ghostty.sh` to `~/.config/beckon/focus-ghostty`, make it
