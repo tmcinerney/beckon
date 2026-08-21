@@ -108,7 +108,7 @@ struct HidSendArgs {
     #[arg(long)]
     sequence: u8,
     /// Exactly ten comma-separated states, F1 through F10.
-    #[arg(long, value_delimiter = ',', num_args = 10)]
+    #[arg(long, value_delimiter = ',', num_args = 1..)]
     states: Vec<Status>,
 }
 
@@ -514,4 +514,31 @@ fn focus_key<D: PaneDirectory>(key: &str, config: &config::Config, panes: &D) ->
     let pane_id = bindings.pane_for_key(key)?;
     CommandFocus::new(&config.focus).focus_terminal()?;
     panes.focus_pane(&pane_id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_comma_separated_hid_states() {
+        let cli = Cli::try_parse_from([
+            "beckon",
+            "hid",
+            "send",
+            "--sequence",
+            "2",
+            "--states",
+            "working,unknown,unbound,unbound,unbound,unbound,unbound,unbound,unbound,unbound",
+        ])
+        .unwrap();
+        let CommandLine::Hid {
+            command: HidCommand::Send(args),
+        } = cli.command
+        else {
+            panic!("expected HID send command");
+        };
+        assert_eq!(args.sequence, 2);
+        assert_eq!(args.states.len(), hid::SLOT_COUNT);
+    }
 }
