@@ -159,6 +159,14 @@ fn key_event_line(key: &str, source: &str) -> String {
     )
 }
 
+fn focus_result_line(key: &str, result: &str) -> String {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock is before Unix epoch")
+        .as_millis();
+    format!("{timestamp}\t{key}\tfocus-{result}\tdaemon\n")
+}
+
 fn append_key_event(line: &str) -> Result<()> {
     let path = key_event_log_path();
     let directory = path.parent().expect("key event log has a parent");
@@ -271,8 +279,20 @@ fn daemon() -> Result<()> {
                 if let Err(error) = append_key_event(&key_event_line(key, "daemon")) {
                     eprintln!("record {key}: {error:#}");
                 }
-                if let Err(error) = focus_key(key, &config) {
-                    eprintln!("focus {key}: {error:#}");
+                match focus_key(key, &config) {
+                    Ok(()) => {
+                        if let Err(error) = append_key_event(&focus_result_line(key, "ok")) {
+                            eprintln!("record focus {key}: {error:#}");
+                        }
+                    }
+                    Err(error) => {
+                        if let Err(record_error) =
+                            append_key_event(&focus_result_line(key, "error"))
+                        {
+                            eprintln!("record focus {key}: {record_error:#}");
+                        }
+                        eprintln!("focus {key}: {error:#}");
+                    }
                 }
             }
         }
