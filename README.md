@@ -38,3 +38,16 @@ devenv shell -- cargo run -- bind --key f1
 The daemon owns binding writes and global keypress navigation. If `focus.command`
 is set, it runs before `herdr agent focus`; this is where a user integrates their
 terminal and window manager. LED state delivery is the next milestone.
+
+For OmniWM and one visible Ghostty window, copy
+`examples/omniwm-focus-ghostty.sh` to `~/.config/beckon/focus-ghostty`, make it
+executable, then add this to `config.toml`:
+
+```toml
+[focus]
+command = ["/Users/you/.config/beckon/focus-ghostty"]
+```
+
+The script re-queries OmniWM on every press because its opaque window IDs are
+session-scoped. It uses `window navigate`, which brings Ghostty to its workspace
+rather than merely focusing it on an already-visible workspace.
