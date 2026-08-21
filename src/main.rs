@@ -226,10 +226,7 @@ fn hid_command(command: HidCommand) -> Result<()> {
                         states.len()
                     )
                 })?;
-            hid::send(StatusSnapshot {
-                sequence: args.sequence,
-                slots,
-            })?;
+            hid::send(StatusSnapshot::for_manual_send(args.sequence, slots))?;
             println!(
                 "Sent valid Beckon status snapshot sequence {}.",
                 args.sequence
@@ -267,7 +264,7 @@ fn preview(args: PreviewArgs) -> Result<()> {
             });
             println!(
                 "{}\t{state}\t{}\t{:.1}\t{:?}",
-                key.key, key.colour, key.brightness, key.motion
+                key.key, key.color, key.brightness, key.motion
             );
         }
     }

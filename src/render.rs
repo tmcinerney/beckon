@@ -101,19 +101,20 @@ impl AgentState {
 #[serde(deny_unknown_fields)]
 pub struct KeyDisplay {
     pub id: String,
-    pub colour: Rgb,
+    #[serde(alias = "colour")]
+    pub color: Rgb,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct StateTreatment {
     pub brightness: f32,
     pub motion: Motion,
-    #[serde(default)]
-    pub colour: Option<Rgb>,
+    #[serde(alias = "colour")]
+    pub color: Rgb,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct StateTreatments {
     pub idle: StateTreatment,
@@ -126,17 +127,23 @@ pub struct StateTreatments {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DisplayConfig {
+    /// A user-visible name, resolved only on the host. The firmware receives
+    /// concrete treatments and therefore has no knowledge of named themes.
+    #[serde(default = "default_theme_name")]
+    pub theme: String,
+    /// User-defined themes overlay the built-in themes of the same name.
+    #[serde(default)]
+    pub themes: BTreeMap<String, StateTreatments>,
     #[serde(default = "default_keys")]
     pub keys: Vec<KeyDisplay>,
-    #[serde(default = "default_states")]
-    pub states: StateTreatments,
 }
 
 impl Default for DisplayConfig {
     fn default() -> Self {
         Self {
+            theme: default_theme_name(),
+            themes: BTreeMap::new(),
             keys: default_keys(),
-            states: default_states(),
         }
     }
 }
@@ -161,40 +168,70 @@ impl DisplayConfig {
                 bail!("display.keys must configure {key} exactly once");
             }
         }
-        for (name, treatment) in self.state_treatments() {
+        let theme = self.selected_theme()?;
+        for (name, treatment) in state_treatments(theme) {
             if !(0.0..=1.0).contains(&treatment.brightness) {
-                bail!("display.states.{name}.brightness must be between 0.0 and 1.0");
+                bail!(
+                    "display.themes.{}.{}.brightness must be between 0.0 and 1.0",
+                    self.theme,
+                    name
+                );
             }
         }
         Ok(())
     }
 
-    fn state_treatments(&self) -> [(&str, &StateTreatment); 5] {
-        [
-            ("idle", &self.states.idle),
-            ("working", &self.states.working),
-            ("blocked", &self.states.blocked),
-            ("done", &self.states.done),
-            ("unknown", &self.states.unknown),
-        ]
+    pub fn selected_theme(&self) -> Result<StateTreatments> {
+        let mut themes = built_in_themes();
+        themes.extend(self.themes.clone());
+        themes.remove(&self.theme).ok_or_else(|| {
+            anyhow::anyhow!(
+                "display.theme {:?} is not defined; available themes: {}",
+                self.theme,
+                themes.keys().cloned().collect::<Vec<_>>().join(", ")
+            )
+        })
     }
 
-    fn treatment(&self, state: AgentState) -> &StateTreatment {
-        match state {
-            AgentState::Idle => &self.states.idle,
-            AgentState::Working => &self.states.working,
-            AgentState::Blocked => &self.states.blocked,
-            AgentState::Done => &self.states.done,
-            AgentState::Unknown => &self.states.unknown,
-        }
+    fn treatment(&self, state: AgentState) -> Result<StateTreatment> {
+        let theme = self.selected_theme()?;
+        Ok(match state {
+            AgentState::Idle => theme.idle,
+            AgentState::Working => theme.working,
+            AgentState::Blocked => theme.blocked,
+            AgentState::Done => theme.done,
+            AgentState::Unknown => theme.unknown,
+        })
     }
+}
+
+impl StateTreatments {
+    pub fn ordered(&self) -> [StateTreatment; 5] {
+        [
+            self.idle,
+            self.working,
+            self.blocked,
+            self.done,
+            self.unknown,
+        ]
+    }
+}
+
+fn state_treatments(theme: StateTreatments) -> [(&'static str, StateTreatment); 5] {
+    [
+        ("idle", theme.idle),
+        ("working", theme.working),
+        ("blocked", theme.blocked),
+        ("done", theme.done),
+        ("unknown", theme.unknown),
+    ]
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct KeyRender {
     pub key: String,
     pub state: Option<AgentState>,
-    pub colour: Rgb,
+    pub color: Rgb,
     pub brightness: f32,
     pub motion: Motion,
 }
@@ -202,10 +239,12 @@ pub struct KeyRender {
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct RenderPlan {
     pub keys: Vec<KeyRender>,
+    pub treatments: StateTreatments,
 }
 
 pub fn render(display: &DisplayConfig, bindings: &[(Binding, Pane)]) -> Result<RenderPlan> {
     display.validate()?;
+    let treatments = display.selected_theme()?;
     let panes_by_key = bindings
         .iter()
         .map(|(binding, pane)| (binding.key.as_str(), pane))
@@ -215,22 +254,19 @@ pub fn render(display: &DisplayConfig, bindings: &[(Binding, Pane)]) -> Result<R
         .keys
         .iter()
         .map(|key| match panes_by_key.get(key.id.as_str()) {
-            Some(pane) => render_state(
-                &key.id,
-                key.colour,
-                AgentState::from_herdr(&pane.agent_status),
-                display,
-            ),
+            Some(pane) => {
+                render_state(&key.id, AgentState::from_herdr(&pane.agent_status), display)
+            }
             None => KeyRender {
                 key: key.id.clone(),
                 state: None,
-                colour: key.colour,
+                color: key.color,
                 brightness: 0.0,
                 motion: Motion::Steady,
             },
         })
         .collect();
-    Ok(RenderPlan { keys })
+    Ok(RenderPlan { keys, treatments })
 }
 
 pub fn all_state_examples(display: &DisplayConfig) -> Result<RenderPlan> {
@@ -242,26 +278,23 @@ pub fn all_state_examples(display: &DisplayConfig) -> Result<RenderPlan> {
         AgentState::Done,
         AgentState::Unknown,
     ];
+    let treatments = display.selected_theme()?;
     Ok(RenderPlan {
         keys: states
             .into_iter()
             .zip(display.keys.iter())
-            .map(|(state, key)| render_state(&key.id, key.colour, state, display))
+            .map(|(state, key)| render_state(&key.id, state, display))
             .collect(),
+        treatments,
     })
 }
 
-fn render_state(
-    key: &str,
-    key_colour: Rgb,
-    state: AgentState,
-    display: &DisplayConfig,
-) -> KeyRender {
-    let treatment = display.treatment(state);
+fn render_state(key: &str, state: AgentState, display: &DisplayConfig) -> KeyRender {
+    let treatment = display.treatment(state).expect("validated display theme");
     KeyRender {
         key: key.to_string(),
         state: Some(state),
-        colour: treatment.colour.unwrap_or(key_colour),
+        color: treatment.color,
         brightness: treatment.brightness,
         motion: treatment.motion,
     }
@@ -281,41 +314,58 @@ fn default_keys() -> Vec<KeyDisplay> {
         ("f10", "#14B8A6"),
     ]
     .into_iter()
-    .map(|(id, colour)| KeyDisplay {
+    .map(|(id, color)| KeyDisplay {
         id: id.into(),
-        colour: colour.parse().expect("valid built-in colour"),
+        color: color.parse().expect("valid built-in color"),
     })
     .collect()
 }
 
-fn default_states() -> StateTreatments {
+fn default_theme_name() -> String {
+    "herdr".into()
+}
+
+fn built_in_themes() -> BTreeMap<String, StateTreatments> {
+    [
+        ("herdr".into(), herdr_theme()),
+        ("catppuccin-mocha".into(), catppuccin_mocha_theme()),
+    ]
+    .into_iter()
+    .collect()
+}
+
+fn herdr_theme() -> StateTreatments {
     StateTreatments {
         idle: StateTreatment {
             brightness: 0.2,
             motion: Motion::Steady,
-            colour: None,
+            color: "#3BA0FF".parse().expect("valid built-in color"),
         },
         working: StateTreatment {
             brightness: 0.6,
             motion: Motion::Breathe,
-            colour: None,
+            color: "#F9E2AF".parse().expect("valid built-in color"),
         },
         blocked: StateTreatment {
             brightness: 0.8,
             motion: Motion::Pulse,
-            colour: Some("#FF2B2B".parse().expect("valid built-in colour")),
+            color: "#F38BA8".parse().expect("valid built-in color"),
         },
         done: StateTreatment {
-            brightness: 1.0,
+            brightness: 0.8,
             motion: Motion::Steady,
-            colour: None,
+            color: "#A6E3A1".parse().expect("valid built-in color"),
         },
         unknown: StateTreatment {
-            brightness: 0.1,
+            brightness: 0.3,
             motion: Motion::Flicker,
-            colour: None,
+            color: "#6C7086".parse().expect("valid built-in color"),
         },
     }
+}
+
+fn catppuccin_mocha_theme() -> StateTreatments {
+    herdr_theme()
 }
 
 #[cfg(test)]
@@ -347,7 +397,7 @@ mod tests {
             )],
         )
         .unwrap();
-        assert_eq!(plan.keys[0].colour.to_string(), "#FF2B2B");
+        assert_eq!(plan.keys[0].color.to_string(), "#F38BA8");
         assert_eq!(plan.keys[0].motion, Motion::Pulse);
     }
 

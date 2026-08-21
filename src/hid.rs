@@ -10,7 +10,7 @@ use hidapi::{DeviceInfo, HidApi, HidDevice};
 
 use crate::{
     core::KEY_IDS,
-    render::{AgentState, RenderPlan},
+    render::{AgentState, Motion, RenderPlan, Rgb, StateTreatment},
 };
 
 pub const VENDOR_USAGE_PAGE: u16 = 0xFF60;
@@ -19,7 +19,7 @@ pub const GLOVE80_VENDOR_ID: u16 = 0x16C0;
 pub const GLOVE80_PRODUCT_ID: u16 = 0x27DB;
 pub const REPORT_SIZE: usize = 32;
 pub const SLOT_COUNT: usize = 10;
-pub const PROTOCOL_VERSION: u8 = 1;
+pub const PROTOCOL_VERSION: u8 = 2;
 const SNAPSHOT_MESSAGE_TYPE: u8 = 1;
 
 /// A state value defined by Beckon status transport v1.
@@ -70,6 +70,16 @@ impl FromStr for Status {
 pub struct StatusSnapshot {
     pub sequence: u8,
     pub slots: [Status; SLOT_COUNT],
+    pub treatments: [Treatment; 5],
+}
+
+/// A host-resolved treatment. Named themes stay on the host; this is the
+/// compact, keyboard-agnostic data that firmware needs to render them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Treatment {
+    pub color: Rgb,
+    pub brightness: u8,
+    pub motion: Motion,
 }
 
 /// The narrow output boundary used by the daemon. Keeping it small lets the
@@ -96,7 +106,7 @@ impl StatusWriter for UsbStatusWriter {
 /// retries on its next normal render pass after a keyboard reconnects.
 pub struct RenderSink<W> {
     writer: W,
-    last_slots: Option<[Status; SLOT_COUNT]>,
+    last_snapshot: Option<([Status; SLOT_COUNT], [Treatment; 5])>,
     next_sequence: u8,
 }
 
@@ -107,7 +117,7 @@ where
     pub fn new(writer: W) -> Self {
         Self {
             writer,
-            last_slots: None,
+            last_snapshot: None,
             next_sequence: 0,
         }
     }
@@ -115,21 +125,35 @@ where
     /// Returns whether a USB snapshot was written.
     pub fn publish(&mut self, plan: &RenderPlan) -> Result<bool> {
         let slots = slots_for_plan(plan)?;
-        if self.last_slots == Some(slots) {
+        let treatments = treatments_for_plan(plan);
+        if self.last_snapshot == Some((slots, treatments)) {
             return Ok(false);
         }
         let snapshot = StatusSnapshot {
             sequence: self.next_sequence,
             slots,
+            treatments,
         };
         self.writer.write_snapshot(snapshot)?;
-        self.last_slots = Some(slots);
+        self.last_snapshot = Some((slots, treatments));
         self.next_sequence = self.next_sequence.wrapping_add(1);
         Ok(true)
     }
 
     pub fn into_inner(self) -> W {
         self.writer
+    }
+}
+
+fn treatments_for_plan(plan: &RenderPlan) -> [Treatment; 5] {
+    plan.treatments.ordered().map(treatment_for_render)
+}
+
+fn treatment_for_render(treatment: StateTreatment) -> Treatment {
+    Treatment {
+        color: treatment.color,
+        brightness: (treatment.brightness.clamp(0.0, 1.0) * 255.0).round() as u8,
+        motion: treatment.motion,
     }
 }
 
@@ -164,16 +188,103 @@ fn status_for_state(state: Option<AgentState>) -> Status {
 }
 
 impl StatusSnapshot {
-    /// Encode a transport-v1 output report. All reserved bytes remain zero.
+    /// Produce a valid v2 snapshot for explicit CLI diagnostics. The daemon
+    /// always replaces these defaults with its selected configuration theme.
+    pub fn for_manual_send(sequence: u8, slots: [Status; SLOT_COUNT]) -> Self {
+        Self {
+            sequence,
+            slots,
+            treatments: [
+                Treatment {
+                    color: Rgb {
+                        red: 59,
+                        green: 160,
+                        blue: 255,
+                    },
+                    brightness: 51,
+                    motion: Motion::Steady,
+                },
+                Treatment {
+                    color: Rgb {
+                        red: 249,
+                        green: 226,
+                        blue: 175,
+                    },
+                    brightness: 153,
+                    motion: Motion::Breathe,
+                },
+                Treatment {
+                    color: Rgb {
+                        red: 243,
+                        green: 139,
+                        blue: 168,
+                    },
+                    brightness: 204,
+                    motion: Motion::Pulse,
+                },
+                Treatment {
+                    color: Rgb {
+                        red: 166,
+                        green: 227,
+                        blue: 161,
+                    },
+                    brightness: 204,
+                    motion: Motion::Steady,
+                },
+                Treatment {
+                    color: Rgb {
+                        red: 108,
+                        green: 112,
+                        blue: 134,
+                    },
+                    brightness: 77,
+                    motion: Motion::Flicker,
+                },
+            ],
+        }
+    }
+
+    /// Encode a transport-v2 output report. The ten statuses use 3-bit fields
+    /// so five RGB treatments, brightnesses, and effects fit in 32 bytes.
     pub fn encode(self) -> [u8; REPORT_SIZE] {
         let mut report = [0; REPORT_SIZE];
         report[0] = PROTOCOL_VERSION;
         report[1] = SNAPSHOT_MESSAGE_TYPE;
         report[2] = self.sequence;
         for (index, state) in self.slots.into_iter().enumerate() {
-            report[4 + index] = state as u8;
+            pack_three_bits(&mut report, 32 + index * 3, state as u8);
+        }
+        for (index, treatment) in self.treatments.into_iter().enumerate() {
+            let offset = 8 + index * 3;
+            report[offset] = treatment.color.red;
+            report[offset + 1] = treatment.color.green;
+            report[offset + 2] = treatment.color.blue;
+            report[23 + index] = treatment.brightness;
+            pack_three_bits(
+                &mut report,
+                28 * 8 + index * 3,
+                motion_code(treatment.motion),
+            );
         }
         report
+    }
+}
+
+fn pack_three_bits(report: &mut [u8; REPORT_SIZE], bit: usize, value: u8) {
+    let byte = bit / 8;
+    let offset = bit % 8;
+    report[byte] |= value << offset;
+    if offset > 5 {
+        report[byte + 1] |= value >> (8 - offset);
+    }
+}
+
+fn motion_code(motion: Motion) -> u8 {
+    match motion {
+        Motion::Steady => 0,
+        Motion::Breathe => 1,
+        Motion::Pulse => 2,
+        Motion::Flicker => 3,
     }
 }
 
@@ -269,7 +380,7 @@ pub fn probe() -> Result<Endpoint> {
     }
 }
 
-/// Write one complete, valid v1 snapshot. This function never derives state
+/// Write one complete, valid v2 snapshot. This function never derives state
 /// from Herdr; callers must explicitly construct the payload they intend to
 /// test.
 pub fn send(snapshot: StatusSnapshot) -> Result<()> {
@@ -306,9 +417,9 @@ mod tests {
 
     #[test]
     fn encodes_complete_snapshot_with_zeroed_reserved_bytes() {
-        let report = StatusSnapshot {
-            sequence: 42,
-            slots: [
+        let report = StatusSnapshot::for_manual_send(
+            42,
+            [
                 Status::Unbound,
                 Status::Idle,
                 Status::Working,
@@ -320,13 +431,16 @@ mod tests {
                 Status::Unbound,
                 Status::Unbound,
             ],
-        }
+        )
         .encode();
 
         assert_eq!(report.len(), REPORT_SIZE);
-        assert_eq!(&report[..4], &[1, 1, 42, 0]);
-        assert_eq!(&report[4..14], &[0, 1, 2, 3, 4, 5, 0, 0, 0, 0]);
-        assert!(report[14..].iter().all(|byte| *byte == 0));
+        assert_eq!(&report[..4], &[2, 1, 42, 0]);
+        assert_eq!(&report[4..8], &[0b10001000, 0b11000110, 0b00000010, 0]);
+        assert_eq!(&report[8..11], &[59, 160, 255]);
+        assert_eq!(&report[23..28], &[51, 153, 204, 204, 77]);
+        assert_eq!(&report[28..30], &[0b10001000, 0b00110000]);
+        assert!(report[30..].iter().all(|byte| *byte == 0));
     }
 
     #[test]
@@ -359,11 +473,14 @@ mod tests {
                 .map(|(key, state)| KeyRender {
                     key: key.into(),
                     state,
-                    colour: "#000000".parse::<Rgb>().unwrap(),
+                    color: "#000000".parse::<Rgb>().unwrap(),
                     brightness: 0.0,
                     motion: Motion::Steady,
                 })
                 .collect(),
+            treatments: crate::render::DisplayConfig::default()
+                .selected_theme()
+                .unwrap(),
         }
     }
 
