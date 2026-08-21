@@ -15,12 +15,7 @@
     in
     {
       packages = forAllSystems (pkgs: {
-        default = pkgs.rustPlatform.buildRustPackage {
-          pname = "beckon";
-          version = "0.1.0";
-          src = ./.;
-          cargoLock.lockFile = ./Cargo.lock;
-        };
+        default = pkgs.callPackage ./nix/package.nix { };
       });
 
       checks = forAllSystems (pkgs: {
@@ -40,5 +35,10 @@
       });
 
       formatter = forAllSystems (pkgs: pkgs.nixfmt);
+
+      homeManagerModules = {
+        beckon = import ./nix/home-manager.nix;
+        default = self.homeManagerModules.beckon;
+      };
     };
 }
