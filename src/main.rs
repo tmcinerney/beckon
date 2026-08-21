@@ -80,7 +80,8 @@ you are deliberately recovering or developing the service."
 \n\
 Run this in the pane being registered, or provide `--pane <pane-id>`. Specify\n\
 `--key f1` through `--key f10` to choose a key. Omitting --key deliberately uses\n\
-the first available key. Beckon never auto-registers panes or agents."
+the first available key, except that an already-bound pane keeps its existing\n\
+key. Beckon never auto-registers panes or agents."
     )]
     Bind(BindArgs),
     /// Clear a pane's Beckon binding. Defaults to $HERDR_PANE_ID; --key works from any pane.

@@ -77,6 +77,21 @@ impl<'a> BindingService<'a> {
             bail!("pane no longer exists");
         }
         let mut state = self.reconcile_panes(&panes)?;
+        // Implicit registration must be idempotent. A repeated `beckon bind`
+        // from the same pane keeps its current key; only an explicit --key can
+        // intentionally move it.
+        if requested_key.is_none()
+            && let Some(existing) = state
+                .bindings
+                .iter()
+                .find(|binding| binding.pane_id == pane_id)
+        {
+            return Ok(BindResult {
+                key: existing.key.clone(),
+                pane_id: pane_id.to_string(),
+                changed: false,
+            });
+        }
         let key = match requested_key {
             Some(key) => valid_key(key)?.to_string(),
             None => first_free_key(&state.bindings)
@@ -326,6 +341,20 @@ mod tests {
         let service = BindingService::new(&store, &panes);
         let result = service.bind("p1", None).unwrap();
         assert_eq!(result.key, "f1");
+        assert_eq!(panes.panes().unwrap()[0].fkey(), Some("f1"));
+    }
+
+    #[test]
+    fn implicit_rebind_keeps_the_existing_key() {
+        let store = MemoryStore::default();
+        let panes = FakePanes(RefCell::new(vec![pane("p1"), pane("p2")]));
+        let service = BindingService::new(&store, &panes);
+        assert_eq!(service.bind("p1", None).unwrap().key, "f1");
+        assert_eq!(service.bind("p2", None).unwrap().key, "f2");
+
+        let result = service.bind("p1", None).unwrap();
+        assert_eq!(result.key, "f1");
+        assert!(!result.changed);
         assert_eq!(panes.panes().unwrap()[0].fkey(), Some("f1"));
     }
 
