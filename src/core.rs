@@ -21,7 +21,7 @@ pub struct BindingState {
     pub bindings: Vec<Binding>,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
 pub struct Pane {
     pub pane_id: String,
     pub agent_status: String,
