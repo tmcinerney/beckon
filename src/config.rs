@@ -37,6 +37,8 @@ pub struct ConfirmConfig {
     pub enabled: bool,
     #[serde(default = "default_repeat_press_ms")]
     pub repeat_press_ms: u64,
+    #[serde(default = "default_confirm_keys")]
+    pub keys: Vec<String>,
 }
 
 impl Default for ConfirmConfig {
@@ -44,12 +46,17 @@ impl Default for ConfirmConfig {
         Self {
             enabled: false,
             repeat_press_ms: default_repeat_press_ms(),
+            keys: default_confirm_keys(),
         }
     }
 }
 
 fn default_repeat_press_ms() -> u64 {
     750
+}
+
+fn default_confirm_keys() -> Vec<String> {
+    vec!["enter".into()]
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -191,6 +198,16 @@ pub fn load() -> Result<Config> {
     if config.actions.confirm.repeat_press_ms == 0 {
         bail!("actions.confirm.repeat_press_ms must be greater than zero");
     }
+    if config.actions.confirm.keys.is_empty()
+        || config
+            .actions
+            .confirm
+            .keys
+            .iter()
+            .any(|key| key.trim().is_empty())
+    {
+        bail!("actions.confirm.keys must contain one or more logical Herdr key names");
+    }
     config.display.validate()?;
     Ok(config)
 }
@@ -224,6 +241,7 @@ config_version = 2
 # [actions.confirm]
 # enabled = true
 # repeat_press_ms = 750
+# keys = ["enter"]
 
 # The selected theme is resolved by Beckon and sent to the keyboard as concrete
 # colors and effects. Firmware never receives a theme name.
@@ -270,6 +288,21 @@ colour = "#112233"
         let config = parse("config_version = 2").unwrap();
         assert!(!config.actions.confirm.enabled);
         assert_eq!(config.actions.confirm.repeat_press_ms, 750);
+        assert_eq!(config.actions.confirm.keys, ["enter"]);
+    }
+
+    #[test]
+    fn confirmation_allows_a_user_selected_logical_key_sequence() {
+        let config = parse(
+            r#"
+config_version = 2
+[actions.confirm]
+enabled = true
+keys = ["ctrl+c"]
+"#,
+        )
+        .unwrap();
+        assert_eq!(config.actions.confirm.keys, ["ctrl+c"]);
     }
 
     #[test]

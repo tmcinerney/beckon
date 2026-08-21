@@ -518,7 +518,14 @@ fn daemon() -> Result<()> {
                         confirm.take_if_ready(key, pane_id, pane_is_focused(&herdr, pane_id), now)
                     });
                 if confirmed {
-                    let result = target.and_then(|pane_id| herdr.send_keys(&pane_id, &["enter"]));
+                    let keys = config
+                        .actions
+                        .confirm
+                        .keys
+                        .iter()
+                        .map(String::as_str)
+                        .collect::<Vec<_>>();
+                    let result = target.and_then(|pane_id| herdr.send_keys(&pane_id, &keys));
                     match result {
                         Ok(()) => {
                             if let Err(error) =
