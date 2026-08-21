@@ -92,7 +92,7 @@ This changes only the local Beckon binding and the pane's visible fkey token; it
 does not close a pane or control an agent."
     )]
     Release(ReleaseArgs),
-    /// Print every current Beckon binding and its current Herdr state as JSON.
+    /// Print every live Herdr pane with its resolved title and Beckon binding.
     Status,
     /// Print the hardware-neutral LED plan. This does not write to a keyboard.
     Preview(PreviewArgs),
@@ -666,7 +666,8 @@ fn dispatch<D: PaneDirectory>(request: Request, panes: &D) -> Result<Value> {
             "bindings": bindings.status()?.into_iter().map(|(binding, pane)| json!({
                 "key": binding.key,
                 "pane": pane,
-            })).collect::<Vec<_>>()
+            })).collect::<Vec<_>>(),
+            "panes": bindings.panes()?,
         })),
     }
 }
