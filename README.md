@@ -95,9 +95,11 @@ press that sends Enter, add this to `config.toml` and restart `beckond`:
 [actions.confirm]
 enabled = true
 repeat_press_ms = 750
+keys = ["enter"]
 ```
 
 The first press focuses the selected bound pane. A second press of the same key
 within the window sends Herdr's logical `enter` key only when that exact pane is
-still focused. This can confirm an agent or tool prompt, so enable it only when
-that behavior is intended.
+still focused. `keys` is passed to Herdr as logical key names, which Herdr
+validates before writing anything. This can confirm an agent or tool prompt, so
+enable it only when that behavior is intended.
