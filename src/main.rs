@@ -116,21 +116,11 @@ fn main() -> Result<()> {
 }
 
 fn listen_keys() -> Result<()> {
-    let store = JsonBindingStore::from_environment();
-    fs::create_dir_all(store.directory())
-        .with_context(|| format!("create {}", store.directory().display()))?;
-    let log_path = store.directory().join("key-events.log");
-    let mut log = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_path)
-        .with_context(|| format!("open {}", log_path.display()))?;
-
     let event_loop = EventLoopBuilder::new().build();
     let manager = GlobalHotKeyManager::new().context("initialize macOS global hotkeys")?;
     let labels = register_hotkeys(&manager)?;
     eprintln!("Listening for Beckon F keys. Press Control-C to stop.");
-    eprintln!("Logging presses to {}", log_path.display());
+    eprintln!("Logging presses to {}", key_event_log_path().display());
     let receiver = GlobalHotKeyEvent::receiver();
     event_loop.run(move |_event, _, control_flow| {
         *control_flow = ControlFlow::Wait;
@@ -141,19 +131,46 @@ fn listen_keys() -> Result<()> {
             let Some(key) = labels.get(&event.id) else {
                 continue;
             };
-            let timestamp = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .expect("system clock is before Unix epoch")
-                .as_millis();
-            let line = format!("{timestamp}\t{key}\t{}\n", hotkey_description(key));
+            let line = key_event_line(key, "listener");
             print!("{line}");
             let _ = std::io::stdout().flush();
-            if let Err(error) = log.write_all(line.as_bytes()).and_then(|_| log.flush()) {
-                eprintln!("write {}: {error}", log_path.display());
+            if let Err(error) = append_key_event(&line) {
+                eprintln!("record key event: {error:#}");
             }
         }
         let _keep_manager_registered = &manager;
     })
+}
+
+fn key_event_log_path() -> PathBuf {
+    JsonBindingStore::from_environment()
+        .directory()
+        .join("key-events.log")
+}
+
+fn key_event_line(key: &str, source: &str) -> String {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock is before Unix epoch")
+        .as_millis();
+    format!(
+        "{timestamp}\t{key}\t{}\t{source}\n",
+        hotkey_description(key)
+    )
+}
+
+fn append_key_event(line: &str) -> Result<()> {
+    let path = key_event_log_path();
+    let directory = path.parent().expect("key event log has a parent");
+    fs::create_dir_all(directory).with_context(|| format!("create {}", directory.display()))?;
+    let mut log = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .with_context(|| format!("open {}", path.display()))?;
+    log.write_all(line.as_bytes())
+        .and_then(|_| log.flush())
+        .with_context(|| format!("write {}", path.display()))
 }
 
 fn register_hotkeys(manager: &GlobalHotKeyManager) -> Result<BTreeMap<u32, &'static str>> {
@@ -250,9 +267,13 @@ fn daemon() -> Result<()> {
         while let Ok(event) = receiver.try_recv() {
             if event.state == HotKeyState::Pressed
                 && let Some(key) = labels.get(&event.id)
-                && let Err(error) = focus_key(key, &config)
             {
-                eprintln!("focus {key}: {error:#}");
+                if let Err(error) = append_key_event(&key_event_line(key, "daemon")) {
+                    eprintln!("record {key}: {error:#}");
+                }
+                if let Err(error) = focus_key(key, &config) {
+                    eprintln!("focus {key}: {error:#}");
+                }
             }
         }
         let _keep_manager_registered = &manager;
