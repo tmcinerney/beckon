@@ -15,6 +15,41 @@ pub struct Config {
     pub focus: FocusConfig,
     #[serde(default)]
     pub display: DisplayConfig,
+    #[serde(default)]
+    pub actions: ActionsConfig,
+}
+
+/// Deliberately opt-in actions that can send input to a bound pane.
+///
+/// Beckon's default remains display and navigation only. A user must enable an
+/// action explicitly because it can have effects inside an agent session.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ActionsConfig {
+    #[serde(default)]
+    pub confirm: ConfirmConfig,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConfirmConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_repeat_press_ms")]
+    pub repeat_press_ms: u64,
+}
+
+impl Default for ConfirmConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            repeat_press_ms: default_repeat_press_ms(),
+        }
+    }
+}
+
+fn default_repeat_press_ms() -> u64 {
+    750
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -91,6 +126,7 @@ impl ConfigV1 {
             config_version: CONFIG_VERSION,
             focus: self.focus,
             display,
+            actions: ActionsConfig::default(),
         }
     }
 }
@@ -152,6 +188,9 @@ pub fn load() -> Result<Config> {
     {
         bail!("focus.command must contain an executable when set");
     }
+    if config.actions.confirm.repeat_press_ms == 0 {
+        bail!("actions.confirm.repeat_press_ms must be greater than zero");
+    }
     config.display.validate()?;
     Ok(config)
 }
@@ -178,6 +217,13 @@ config_version = 2
 # string, so no shell quoting or interpolation is involved.
 # [focus]
 # command = ["/Users/you/.config/beckon/focus-ghostty"]
+
+# Optional: repeat the same bound F key within this window after Beckon has
+# focused it to send Enter to that pane. Disabled by default because Enter can
+# confirm whatever is selected in an agent UI.
+# [actions.confirm]
+# enabled = true
+# repeat_press_ms = 750
 
 # The selected theme is resolved by Beckon and sent to the keyboard as concrete
 # colors and effects. Firmware never receives a theme name.
@@ -216,6 +262,14 @@ colour = "#112233"
         assert_eq!(theme.working.brightness, 0.4);
         assert_eq!(theme.working.motion, Motion::Pulse);
         assert_eq!(theme.working.color.to_string(), "#112233");
+        assert!(!config.actions.confirm.enabled);
+    }
+
+    #[test]
+    fn confirmation_is_disabled_unless_explicitly_enabled() {
+        let config = parse("config_version = 2").unwrap();
+        assert!(!config.actions.confirm.enabled);
+        assert_eq!(config.actions.confirm.repeat_press_ms, 750);
     }
 
     #[test]

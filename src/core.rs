@@ -34,6 +34,8 @@ pub struct Pane {
     #[serde(default)]
     pub cwd: Option<String>,
     #[serde(default)]
+    pub focused: bool,
+    #[serde(default)]
     pub tokens: BTreeMap<String, String>,
 }
 
@@ -56,6 +58,7 @@ pub trait PaneDirectory {
     fn panes(&self) -> Result<Vec<Pane>>;
     fn write_fkey(&self, pane_id: &str, key: Option<&str>) -> Result<()>;
     fn focus_pane(&self, pane_id: &str) -> Result<()>;
+    fn send_keys(&self, pane_id: &str, keys: &[&str]) -> Result<()>;
 }
 
 pub struct BindingService<'a> {
@@ -297,6 +300,10 @@ mod tests {
         fn focus_pane(&self, _pane_id: &str) -> Result<()> {
             Ok(())
         }
+
+        fn send_keys(&self, _pane_id: &str, _keys: &[&str]) -> Result<()> {
+            Ok(())
+        }
     }
 
     fn pane(id: &str) -> Pane {
@@ -307,6 +314,7 @@ mod tests {
             agent: None,
             label: None,
             cwd: None,
+            focused: false,
             tokens: BTreeMap::new(),
         }
     }
