@@ -5,11 +5,12 @@ use std::{
     io::{BufRead, BufReader, ErrorKind, Write},
     os::unix::net::{UnixListener, UnixStream},
     path::PathBuf,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result, bail};
 use beckon::{
+    action::RepeatPressConfirm,
     config,
     core::{BindingService, BindingState, BindingStore, PaneDirectory, STATE_VERSION},
     focus::{CommandFocus, FocusAdapter},
@@ -31,9 +32,10 @@ use tao::event_loop::{ControlFlow, EventLoopBuilder};
     name = "beckon",
     version,
     about = "Bind selected Herdr panes to Glove80 Beckon keys",
-    long_about = "Beckon is a local, display-and-navigation-only companion for Herdr.\n\
+    long_about = "Beckon is a local, display-and-navigation-first companion for Herdr.\n\
 It can bind an explicitly selected pane to an F key, show bindings, and focus a\n\
-bound pane. It never sends agent input, approves tools, or answers prompts.",
+bound pane. It never sends agent input, approves tools, or answers prompts unless\n\
+the optional repeat-press confirmation action is explicitly enabled.",
     after_help = "AGENT WORKFLOW:\n\
   1. Run `beckon status` to inspect currently occupied keys.\n\
   2. In the intended Herdr pane, run `beckon bind --key f3`; omit --key only\n\
@@ -482,6 +484,7 @@ fn daemon() -> Result<()> {
     let manager = GlobalHotKeyManager::new().context("initialize macOS global hotkeys")?;
     let labels = register_hotkeys(&manager)?;
     let receiver = GlobalHotKeyEvent::receiver();
+    let mut confirm = RepeatPressConfirm::default();
     event_loop.run(move |_event, _, control_flow| {
         *control_flow =
             ControlFlow::WaitUntil(std::time::Instant::now() + Duration::from_millis(50));
@@ -507,19 +510,56 @@ fn daemon() -> Result<()> {
                 if let Err(error) = append_key_event(&key_event_line(key, "daemon")) {
                     eprintln!("record {key}: {error:#}");
                 }
-                match focus_key(key, &config, &herdr) {
-                    Ok(()) => {
-                        if let Err(error) = append_key_event(&focus_result_line(key, "ok")) {
-                            eprintln!("record focus {key}: {error:#}");
+                let now = Instant::now();
+                let target = pane_for_key(key, &herdr);
+                let confirmed = config.actions.confirm.enabled
+                    && target.as_ref().is_ok_and(|pane_id| {
+                        confirm.take_if_ready(key, pane_id, pane_is_focused(&herdr, pane_id), now)
+                    });
+                if confirmed {
+                    let result = target.and_then(|pane_id| herdr.send_keys(&pane_id, &["enter"]));
+                    match result {
+                        Ok(()) => {
+                            if let Err(error) =
+                                append_key_event(&focus_result_line(key, "confirm-ok"))
+                            {
+                                eprintln!("record confirmation {key}: {error:#}");
+                            }
+                        }
+                        Err(error) => {
+                            if let Err(record_error) =
+                                append_key_event(&focus_result_line(key, "confirm-error"))
+                            {
+                                eprintln!("record confirmation {key}: {record_error:#}");
+                            }
+                            eprintln!("confirm {key}: {error:#}");
                         }
                     }
-                    Err(error) => {
-                        if let Err(record_error) =
-                            append_key_event(&focus_result_line(key, "error"))
-                        {
-                            eprintln!("record focus {key}: {record_error:#}");
+                } else {
+                    match focus_key(key, &config, &herdr) {
+                        Ok(()) => {
+                            if config.actions.confirm.enabled
+                                && let Ok(pane_id) = target
+                            {
+                                confirm.arm(
+                                    key,
+                                    &pane_id,
+                                    Duration::from_millis(config.actions.confirm.repeat_press_ms),
+                                    now,
+                                );
+                            }
+                            if let Err(error) = append_key_event(&focus_result_line(key, "ok")) {
+                                eprintln!("record focus {key}: {error:#}");
+                            }
                         }
-                        eprintln!("focus {key}: {error:#}");
+                        Err(error) => {
+                            if let Err(record_error) =
+                                append_key_event(&focus_result_line(key, "error"))
+                            {
+                                eprintln!("record focus {key}: {record_error:#}");
+                            }
+                            eprintln!("focus {key}: {error:#}");
+                        }
                     }
                 }
             }
@@ -624,11 +664,25 @@ fn dispatch<D: PaneDirectory>(request: Request, panes: &D) -> Result<Value> {
 }
 
 fn focus_key<D: PaneDirectory>(key: &str, config: &config::Config, panes: &D) -> Result<()> {
-    let store = JsonBindingStore::from_environment();
-    let bindings = BindingService::new(&store, panes);
-    let pane_id = bindings.pane_for_key(key)?;
+    let pane_id = pane_for_key(key, panes)?;
     CommandFocus::new(&config.focus).focus_terminal()?;
     panes.focus_pane(&pane_id)
+}
+
+fn pane_for_key<D: PaneDirectory>(key: &str, panes: &D) -> Result<String> {
+    let store = JsonBindingStore::from_environment();
+    BindingService::new(&store, panes).pane_for_key(key)
+}
+
+fn pane_is_focused<D: PaneDirectory>(panes: &D, pane_id: &str) -> bool {
+    panes
+        .panes()
+        .map(|panes| {
+            panes
+                .into_iter()
+                .any(|pane| pane.pane_id == pane_id && pane.focused)
+        })
+        .unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -650,7 +704,7 @@ mod tests {
     fn root_help_explains_agent_workflow_and_safety_boundary() {
         let help = help_for(&[]);
         assert!(help.contains("AGENT WORKFLOW:"));
-        assert!(help.contains("never sends agent input, approves tools, or answers prompts"));
+        assert!(help.contains("optional repeat-press confirmation action is explicitly enabled"));
         assert!(help.contains("beckond"));
     }
 

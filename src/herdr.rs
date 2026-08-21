@@ -54,6 +54,10 @@ impl PaneDirectory for LivePaneDirectory {
     fn focus_pane(&self, pane_id: &str) -> Result<()> {
         HerdrSocket::from_environment().focus_pane(pane_id)
     }
+
+    fn send_keys(&self, pane_id: &str, keys: &[&str]) -> Result<()> {
+        HerdrSocket::from_environment().send_keys(pane_id, keys)
+    }
 }
 
 /// Raw Herdr's Unix-domain socket transport. This is deliberately a narrow
@@ -132,6 +136,21 @@ impl HerdrSocket {
         Ok(())
     }
 
+    /// Send validated logical key names to one exact pane. This is used only
+    /// by explicitly enabled actions; ordinary Beckon navigation never sends
+    /// input to agents or shells.
+    pub fn send_keys(&self, pane_id: &str, keys: &[&str]) -> Result<()> {
+        let response = self.request(json!({
+            "id": "beckond:pane-send-keys",
+            "method": "pane.send_keys",
+            "params": {"pane_id": pane_id, "keys": keys}
+        }))?;
+        if let Some(error) = response.get("error") {
+            bail!("Herdr pane send_keys failed: {error}");
+        }
+        Ok(())
+    }
+
     fn request(&self, request: Value) -> Result<Value> {
         let mut stream = self.connect()?;
         writeln!(stream, "{}", serde_json::to_string(&request)?)?;
@@ -194,6 +213,10 @@ impl PaneDirectory for HerdrCli {
 
     fn focus_pane(&self, pane_id: &str) -> Result<()> {
         HerdrSocket::from_environment().focus_pane(pane_id)
+    }
+
+    fn send_keys(&self, pane_id: &str, keys: &[&str]) -> Result<()> {
+        HerdrSocket::from_environment().send_keys(pane_id, keys)
     }
 }
 
@@ -288,6 +311,39 @@ mod tests {
         fs::remove_file(path).unwrap();
         assert_eq!(panes.len(), 1);
         assert_eq!(panes[0].pane_id, "p1");
+    }
+
+    #[test]
+    fn sends_logical_keys_to_an_explicit_pane() {
+        let path = std::env::temp_dir().join(format!(
+            "beckon-herdr-keys-test-{}-{}.sock",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let listener = UnixListener::bind(&path).unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut request)
+                .unwrap();
+            let request: Value = serde_json::from_str(&request).unwrap();
+            assert_eq!(request["method"], "pane.send_keys");
+            assert_eq!(
+                request["params"],
+                json!({"pane_id": "w:p1", "keys": ["enter"]})
+            );
+            writeln!(stream, r#"{{"result":{{"type":"pane_send_keys"}}}}"#).unwrap();
+        });
+
+        HerdrSocket::new(path.clone())
+            .send_keys("w:p1", &["enter"])
+            .unwrap();
+        server.join().unwrap();
+        fs::remove_file(path).unwrap();
     }
 
     #[test]

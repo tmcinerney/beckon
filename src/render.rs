@@ -380,6 +380,7 @@ mod tests {
             agent: None,
             label: None,
             cwd: None,
+            focused: false,
             tokens: BTreeMap::new(),
         }
     }

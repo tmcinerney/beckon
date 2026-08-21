@@ -83,3 +83,19 @@ command = ["/Users/you/.config/beckon/focus-ghostty"]
 The script re-queries OmniWM on every press because its opaque window IDs are
 session-scoped. It uses `window navigate`, which brings Ghostty to its workspace
 rather than merely focusing it on an already-visible workspace.
+
+## Optional repeat-press confirmation
+
+By default Beckon never sends input to a pane. To deliberately enable a repeat
+press that sends Enter, add this to `config.toml` and restart `beckond`:
+
+```toml
+[actions.confirm]
+enabled = true
+repeat_press_ms = 750
+```
+
+The first press focuses the selected bound pane. A second press of the same key
+within the window sends Herdr's logical `enter` key only when that exact pane is
+still focused. This can confirm an agent or tool prompt, so enable it only when
+that behavior is intended.
