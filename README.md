@@ -43,6 +43,32 @@ terminal and window manager. LED state delivery is the next milestone. `preview`
 is deliberately truthful about that boundary: it renders plans for inspection,
 not a simulated or real keyboard update.
 
+## USB status transport diagnostic
+
+The `v0.2.0-rc.1` Beckon firmware exposes a USB-only, status-only vendor HID
+endpoint on the left (split-central) half. It is not connected to the daemon or
+the renderer yet. The diagnostic commands make that physical protocol gate
+explicit:
+
+```sh
+# Read-only discovery and open test.
+devenv shell -- cargo run -- hid list
+devenv shell -- cargo run -- hid probe
+
+# A deliberate valid ten-key snapshot, F1 through F10.
+devenv shell -- cargo run -- hid send --sequence 1 \
+  --states idle,working,blocked,done,unknown,unbound,unbound,unbound,unbound,unbound
+
+# Deliberately malformed 31-byte report; the firmware must ignore it.
+devenv shell -- cargo run -- hid send-malformed --confirm
+```
+
+These commands select only Glove80 `16C0:27DB`, usage page `0xFF60`, usage
+`0x61`. They require one matching wired endpoint and never target the ordinary
+keyboard HID interface.
+They do not change LEDs in this firmware increment; a successful valid write
+only proves the status transport boundary.
+
 For OmniWM and one visible Ghostty window, copy
 `examples/omniwm-focus-ghostty.sh` to `~/.config/beckon/focus-ghostty`, make it
 executable, then add this to `config.toml`:

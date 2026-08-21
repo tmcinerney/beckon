@@ -14,6 +14,7 @@ use beckon::{
     core::{BindingService, PaneDirectory},
     focus::{CommandFocus, FocusAdapter},
     herdr::{HerdrCli, LivePaneDirectory},
+    hid::{self, Status, StatusSnapshot},
     state::JsonBindingStore,
 };
 use clap::{Args, Parser, Subcommand};
@@ -51,6 +52,11 @@ enum CommandLine {
     Status,
     /// Print the hardware-neutral LED plan. This does not write to a keyboard.
     Preview(PreviewArgs),
+    /// Inspect or explicitly test the USB-only Beckon status endpoint.
+    Hid {
+        #[command(subcommand)]
+        command: HidCommand,
+    },
     /// Log the ten Beckon-layer function-key events until interrupted.
     ListenKeys,
 }
@@ -82,6 +88,35 @@ struct PreviewArgs {
     /// Emit the render plan as JSON.
     #[arg(long)]
     json: bool,
+}
+
+#[derive(Subcommand)]
+enum HidCommand {
+    /// List matching USB vendor HID interfaces without opening or writing them.
+    List,
+    /// Open the one matching USB vendor interface without writing keyboard state.
+    Probe,
+    /// Send one caller-supplied, valid 32-byte status snapshot.
+    Send(HidSendArgs),
+    /// Send a malformed short report to verify firmware rejection.
+    SendMalformed(HidMalformedArgs),
+}
+
+#[derive(Args)]
+struct HidSendArgs {
+    /// Snapshot sequence number (0 through 255).
+    #[arg(long)]
+    sequence: u8,
+    /// Exactly ten comma-separated states, F1 through F10.
+    #[arg(long, value_delimiter = ',', num_args = 10)]
+    states: Vec<Status>,
+}
+
+#[derive(Args)]
+struct HidMalformedArgs {
+    /// Required acknowledgement because this deliberately sends an invalid report.
+    #[arg(long)]
+    confirm: bool,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -124,7 +159,71 @@ fn main() -> Result<()> {
         }),
         CommandLine::Status => client(Request::Status),
         CommandLine::Preview(args) => preview(args),
+        CommandLine::Hid { command } => hid_command(command),
         CommandLine::ListenKeys => listen_keys(),
+    }
+}
+
+fn hid_command(command: HidCommand) -> Result<()> {
+    match command {
+        HidCommand::List => {
+            let endpoints = hid::list()?;
+            if endpoints.is_empty() {
+                println!(
+                    "No Beckon USB status endpoints found (expected {:04X}:{:04X}, usage page 0x{:04X}, usage 0x{:04X}).",
+                    hid::GLOVE80_VENDOR_ID,
+                    hid::GLOVE80_PRODUCT_ID,
+                    hid::VENDOR_USAGE_PAGE,
+                    hid::STATUS_USAGE
+                );
+            } else {
+                for endpoint in endpoints {
+                    println!(
+                        "{:04X}:{:04X}\tinterface={}\t{}",
+                        endpoint.vendor_id,
+                        endpoint.product_id,
+                        endpoint.interface_number,
+                        endpoint.path
+                    );
+                }
+            }
+            Ok(())
+        }
+        HidCommand::Probe => {
+            let endpoint = hid::probe()?;
+            println!(
+                "Opened Beckon USB status endpoint {:04X}:{:04X} interface {} at {}",
+                endpoint.vendor_id, endpoint.product_id, endpoint.interface_number, endpoint.path
+            );
+            Ok(())
+        }
+        HidCommand::Send(args) => {
+            let slots: [Status; hid::SLOT_COUNT] =
+                args.states.try_into().map_err(|states: Vec<_>| {
+                    anyhow::anyhow!(
+                        "expected {} states for F1 through F10, received {}",
+                        hid::SLOT_COUNT,
+                        states.len()
+                    )
+                })?;
+            hid::send(StatusSnapshot {
+                sequence: args.sequence,
+                slots,
+            })?;
+            println!(
+                "Sent valid Beckon status snapshot sequence {}.",
+                args.sequence
+            );
+            Ok(())
+        }
+        HidCommand::SendMalformed(args) => {
+            if !args.confirm {
+                bail!("refusing to send a malformed report without --confirm");
+            }
+            hid::send_malformed()?;
+            println!("Sent deliberate malformed Beckon status report.");
+            Ok(())
+        }
     }
 }
 
