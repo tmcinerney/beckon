@@ -8,6 +8,8 @@ and direct navigation.
 The current executable has the manual registration foundation:
 
 - `beckon bind [--key f1]` binds `$HERDR_PANE_ID` through the local daemon.
+  Repeating it without `--key` is idempotent: an already-bound pane keeps its
+  existing key.
 - `beckon release` clears the binding for the current pane; `beckon release --key f2`
   clears F2 from anywhere.
 - `beckon status` shows bindings and their current Herdr pane data.
