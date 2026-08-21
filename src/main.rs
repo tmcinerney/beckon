@@ -27,7 +27,24 @@ use serde_json::{Value, json};
 use tao::event_loop::{ControlFlow, EventLoopBuilder};
 
 #[derive(Parser)]
-#[command(about = "Bind Herdr panes to Glove80 Beckon keys")]
+#[command(
+    name = "beckon",
+    version,
+    about = "Bind selected Herdr panes to Glove80 Beckon keys",
+    long_about = "Beckon is a local, display-and-navigation-only companion for Herdr.\n\
+It can bind an explicitly selected pane to an F key, show bindings, and focus a\n\
+bound pane. It never sends agent input, approves tools, or answers prompts.",
+    after_help = "AGENT WORKFLOW:\n\
+  1. Run `beckon status` to inspect currently occupied keys.\n\
+  2. In the intended Herdr pane, run `beckon bind --key f3`; omit --key only\n\
+     when first-free assignment is intended.\n\
+  3. From any context, run `beckon release --key f3` to clear that key.\n\
+\n\
+The `beckond` command is an installed PATH wrapper for `beckon daemon`. Normally\n\
+Home Manager starts it. Start it manually only for local development or recovery.\n\
+Use `beckon hid` only for wired firmware diagnostics; its write commands affect\n\
+LED status display, never ordinary keyboard input."
+)]
 struct Cli {
     #[command(subcommand)]
     command: CommandLine,
@@ -36,23 +53,53 @@ struct Cli {
 #[derive(Subcommand)]
 enum CommandLine {
     /// Create a commented configuration template without overwriting an existing file.
+    #[command(
+        long_about = "Create the optional machine-local configuration template.\n\
+This is safe to run repeatedly: it refuses to overwrite an existing file."
+    )]
     Init,
     /// Validate the Beckon configuration file.
     Config {
         #[command(subcommand)]
         command: ConfigCommand,
     },
-    /// Run the local single-writer binding daemon.
+    /// Run the local single-writer binding daemon (normally invoked as beckond).
+    #[command(
+        long_about = "Run Beckon's local daemon. It serializes binding changes, follows Herdr\n\
+pane state, renders LEDs, and handles global key navigation.\n\
+\n\
+Normally Home Manager runs this as `beckond`; do not start a second copy unless\n\
+you are deliberately recovering or developing the service."
+    )]
     Daemon,
-    /// Bind a pane to a Beckon key. Defaults to $HERDR_PANE_ID.
+    /// Explicitly bind a selected pane to a Beckon key. Defaults to $HERDR_PANE_ID.
+    #[command(
+        long_about = "Explicitly register one Herdr pane with one physical Beckon key.\n\
+\n\
+Run this in the pane being registered, or provide `--pane <pane-id>`. Specify\n\
+`--key f1` through `--key f10` to choose a key. Omitting --key deliberately uses\n\
+the first available key. Beckon never auto-registers panes or agents."
+    )]
     Bind(BindArgs),
     /// Clear a pane's Beckon binding. Defaults to $HERDR_PANE_ID; --key works from any pane.
+    #[command(
+        long_about = "Remove a Beckon registration. Run this in the bound pane, provide\n\
+`--pane <pane-id>`, or use `--key f1` through `--key f10` from anywhere.\n\
+This changes only the local Beckon binding and the pane's visible fkey token; it\n\
+does not close a pane or control an agent."
+    )]
     Release(ReleaseArgs),
-    /// Print every current Beckon binding as JSON.
+    /// Print every current Beckon binding and its current Herdr state as JSON.
     Status,
     /// Print the hardware-neutral LED plan. This does not write to a keyboard.
     Preview(PreviewArgs),
     /// Inspect or explicitly test the USB-only Beckon status endpoint.
+    #[command(
+        long_about = "Inspect or test the wired, vendor-specific Glove80 status endpoint.\n\
+`list` and `probe` are read-only. `send` changes only status LEDs.\n\
+`send-malformed --confirm` intentionally sends a rejected test frame. None of\n\
+these commands write ordinary keyboard input or control Herdr agents."
+    )]
     Hid {
         #[command(subcommand)]
         command: HidCommand,
@@ -63,6 +110,7 @@ enum CommandLine {
 
 #[derive(Subcommand)]
 enum ConfigCommand {
+    /// Parse the configuration without starting the daemon or changing state.
     Check,
 }
 
@@ -586,6 +634,43 @@ fn focus_key<D: PaneDirectory>(key: &str, config: &config::Config, panes: &D) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::CommandFactory;
+
+    fn help_for(args: &[&str]) -> String {
+        let mut command = Cli::command();
+        let command = args.iter().fold(&mut command, |command, name| {
+            command.find_subcommand_mut(name).unwrap()
+        });
+        let mut output = Vec::new();
+        command.write_long_help(&mut output).unwrap();
+        String::from_utf8(output).unwrap()
+    }
+
+    #[test]
+    fn root_help_explains_agent_workflow_and_safety_boundary() {
+        let help = help_for(&[]);
+        assert!(help.contains("AGENT WORKFLOW:"));
+        assert!(help.contains("never sends agent input, approves tools, or answers prompts"));
+        assert!(help.contains("beckond"));
+    }
+
+    #[test]
+    fn binding_and_release_help_explain_explicit_registration() {
+        let bind_help = help_for(&["bind"]);
+        assert!(bind_help.contains("Beckon never auto-registers panes or agents"));
+        assert!(bind_help.contains("--key f1"));
+
+        let release_help = help_for(&["release"]);
+        assert!(release_help.contains("does not close a pane or control an agent"));
+    }
+
+    #[test]
+    fn hid_help_explains_its_narrow_hardware_boundary() {
+        let help = help_for(&["hid"]);
+        assert!(help.contains("read-only"));
+        assert!(help.contains("ordinary keyboard"));
+        assert!(help.contains("control Herdr agents"));
+    }
 
     #[test]
     fn parses_comma_separated_hid_states() {

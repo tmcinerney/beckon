@@ -1,4 +1,5 @@
 {
+  makeWrapper,
   rustPlatform,
 }:
 
@@ -7,6 +8,14 @@ rustPlatform.buildRustPackage {
   version = "0.1.0";
   src = ../.;
   cargoLock.lockFile = ../Cargo.lock;
+  nativeBuildInputs = [ makeWrapper ];
+
+  # `beckond` is intentionally a wrapper rather than a second Rust binary: the
+  # CLI and daemon share one versioned implementation, while the conventional
+  # daemon name remains directly invokable from a user's PATH.
+  postInstall = ''
+    makeWrapper "$out/bin/beckon" "$out/bin/beckond" --add-flags "daemon"
+  '';
 
   meta.mainProgram = "beckon";
 }
