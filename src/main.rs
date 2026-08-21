@@ -13,7 +13,7 @@ use beckon::{
     config,
     core::{BindingService, PaneDirectory},
     focus::{CommandFocus, FocusAdapter},
-    herdr::HerdrCli,
+    herdr::LivePaneDirectory,
     state::JsonBindingStore,
 };
 use clap::{Args, Parser, Subcommand};
@@ -271,6 +271,7 @@ fn daemon() -> Result<()> {
 
     // AIDEV-NOTE: macOS requires global-hotkey and Tao's event loop on the main
     // thread. Socket polling keeps binding mutation serialized in this daemon.
+    let herdr = LivePaneDirectory::start()?;
     let event_loop = EventLoopBuilder::new().build();
     let manager = GlobalHotKeyManager::new().context("initialize macOS global hotkeys")?;
     let labels = register_hotkeys(&manager)?;
@@ -279,7 +280,7 @@ fn daemon() -> Result<()> {
         *control_flow =
             ControlFlow::WaitUntil(std::time::Instant::now() + Duration::from_millis(50));
         while let Ok((stream, _)) = listener.accept() {
-            if let Err(error) = handle_connection(stream) {
+            if let Err(error) = handle_connection(stream, &herdr) {
                 eprintln!("request failed: {error:#}");
             }
         }
@@ -290,7 +291,7 @@ fn daemon() -> Result<()> {
                 if let Err(error) = append_key_event(&key_event_line(key, "daemon")) {
                     eprintln!("record {key}: {error:#}");
                 }
-                match focus_key(key, &config) {
+                match focus_key(key, &config, &herdr) {
                     Ok(()) => {
                         if let Err(error) = append_key_event(&focus_result_line(key, "ok")) {
                             eprintln!("record focus {key}: {error:#}");
@@ -311,11 +312,11 @@ fn daemon() -> Result<()> {
     })
 }
 
-fn handle_connection(mut stream: UnixStream) -> Result<()> {
+fn handle_connection<D: PaneDirectory>(mut stream: UnixStream, panes: &D) -> Result<()> {
     let mut line = String::new();
     BufReader::new(stream.try_clone()?).read_line(&mut line)?;
     let response = match serde_json::from_str::<Request>(&line) {
-        Ok(request) => match dispatch(request) {
+        Ok(request) => match dispatch(request, panes) {
             Ok(data) => Response::Ok { data },
             Err(error) => Response::Error {
                 message: error.to_string(),
@@ -349,10 +350,9 @@ fn client(request: Request) -> Result<()> {
     }
 }
 
-fn dispatch(request: Request) -> Result<Value> {
+fn dispatch<D: PaneDirectory>(request: Request, panes: &D) -> Result<Value> {
     let store = JsonBindingStore::from_environment();
-    let herdr = HerdrCli;
-    let bindings = BindingService::new(&store, &herdr);
+    let bindings = BindingService::new(&store, panes);
     match request {
         Request::Bind { pane_id, key } => Ok(serde_json::to_value(
             bindings.bind(&pane_id, key.as_deref())?,
@@ -369,11 +369,10 @@ fn dispatch(request: Request) -> Result<Value> {
     }
 }
 
-fn focus_key(key: &str, config: &config::Config) -> Result<()> {
+fn focus_key<D: PaneDirectory>(key: &str, config: &config::Config, panes: &D) -> Result<()> {
     let store = JsonBindingStore::from_environment();
-    let herdr = HerdrCli;
-    let bindings = BindingService::new(&store, &herdr);
+    let bindings = BindingService::new(&store, panes);
     let pane_id = bindings.pane_for_key(key)?;
     CommandFocus::new(&config.focus).focus_terminal()?;
-    herdr.focus_agent(&pane_id)
+    panes.focus_agent(&pane_id)
 }

@@ -81,7 +81,8 @@ impl HerdrSocket {
     pub fn panes(&self) -> Result<Vec<Pane>> {
         let response = self.request(json!({
             "id": "beckond:pane-list",
-            "type": "pane.list"
+            "method": "pane.list",
+            "params": {}
         }))?;
         serde_json::from_value::<PaneListResponse>(response)
             .map(|response| response.result.panes)
@@ -94,13 +95,13 @@ impl HerdrSocket {
         let mut stream = self.connect()?;
         let subscription = json!({
             "id": "beckond:pane-events",
-            "type": "events.subscribe",
-            "subscriptions": [
+            "method": "events.subscribe",
+            "params": {"subscriptions": [
                 {"type": "pane.created"},
                 {"type": "pane.updated"},
                 {"type": "pane.closed"},
                 {"type": "pane.exited"}
-            ]
+            ]}
         });
         writeln!(stream, "{}", serde_json::to_string(&subscription)?)?;
         stream.flush()?;
@@ -218,7 +219,7 @@ fn decode_pane_event(line: &str) -> Result<Option<PaneEvent>> {
     let value: Value = serde_json::from_str(line)?;
     let event: HerdrEvent = serde_json::from_value(
         value
-            .get("event")
+            .get("data")
             .or_else(|| value.get("result"))
             .cloned()
             .unwrap_or(value),
@@ -269,7 +270,8 @@ mod tests {
                 .read_line(&mut request)
                 .unwrap();
             let request: Value = serde_json::from_str(&request).unwrap();
-            assert_eq!(request["type"], "pane.list");
+            assert_eq!(request["method"], "pane.list");
+            assert_eq!(request["params"], json!({}));
             writeln!(
                 stream,
                 r#"{{"result":{{"panes":[{{"pane_id":"p1","agent_status":"idle"}}]}}}}"#
@@ -287,7 +289,7 @@ mod tests {
     #[test]
     fn decodes_updated_event_with_full_pane() {
         let event = decode_pane_event(
-            r#"{"type":"pane_updated","pane":{"pane_id":"w:p","agent_status":"working"}}"#,
+            r#"{"event":"pane_updated","data":{"type":"pane_updated","pane":{"pane_id":"w:p","agent_status":"working"}}}"#,
         )
         .unwrap();
         assert!(
@@ -297,13 +299,19 @@ mod tests {
 
     #[test]
     fn decodes_wrapped_closed_event() {
-        let event =
-            decode_pane_event(r#"{"result":{"type":"pane_closed","pane_id":"w:p"}}"#).unwrap();
+        let event = decode_pane_event(
+            r#"{"event":"pane_closed","data":{"type":"pane_closed","pane_id":"w:p"}}"#,
+        )
+        .unwrap();
         assert_eq!(event, Some(PaneEvent::Remove("w:p".into())));
     }
 
     #[test]
     fn ignores_non_pane_events() {
-        assert_eq!(decode_pane_event(r#"{"type":"subscribed"}"#).unwrap(), None);
+        assert_eq!(
+            decode_pane_event(r#"{"id":"subscription","result":{"type":"subscription_started"}}"#)
+                .unwrap(),
+            None
+        );
     }
 }
