@@ -128,6 +128,28 @@ impl<'a> BindingService<'a> {
         Ok(true)
     }
 
+    /// Release a binding by physical key without requiring the caller to be
+    /// inside the target pane.
+    pub fn release_key(&self, key: &str) -> Result<Option<String>> {
+        let key = valid_key(key)?;
+        let panes = self.panes.panes()?;
+        let mut state = self.reconcile_panes(&panes)?;
+        let Some(binding) = state
+            .bindings
+            .iter()
+            .find(|binding| binding.key == key)
+            .cloned()
+        else {
+            return Ok(None);
+        };
+        state
+            .bindings
+            .retain(|candidate| candidate.key != binding.key);
+        self.store.save(&state)?;
+        self.panes.write_fkey(&binding.pane_id, None)?;
+        Ok(Some(binding.pane_id))
+    }
+
     pub fn status(&self) -> Result<Vec<(Binding, Pane)>> {
         let panes = self.panes.panes()?;
         let state = self.reconcile_panes(&panes)?;
@@ -312,5 +334,17 @@ mod tests {
             },
         ];
         assert!(validate_bindings(&bindings).is_err());
+    }
+
+    #[test]
+    fn releases_a_binding_by_key() {
+        let store = MemoryStore::default();
+        let panes = FakePanes(RefCell::new(vec![pane("p1")]));
+        let service = BindingService::new(&store, &panes);
+        service.bind("p1", Some("f2")).unwrap();
+
+        assert_eq!(service.release_key("f2").unwrap(), Some("p1".into()));
+        assert_eq!(panes.panes().unwrap()[0].fkey(), None);
+        assert!(service.status().unwrap().is_empty());
     }
 }

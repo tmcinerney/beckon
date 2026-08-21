@@ -8,7 +8,8 @@ and direct navigation.
 The current executable has the manual registration foundation:
 
 - `beckon bind [--key f1]` binds `$HERDR_PANE_ID` through the local daemon.
-- `beckon release` clears that binding.
+- `beckon release` clears the binding for the current pane; `beckon release --key f2`
+  clears F2 from anywhere.
 - `beckon status` shows bindings and their current Herdr pane data.
 - `beckon listen-keys` records the ten Beckon-layer key events.
 - `beckond` renders its live Herdr pane cache to the wired Glove80 status

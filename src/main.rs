@@ -46,8 +46,8 @@ enum CommandLine {
     Daemon,
     /// Bind a pane to a Beckon key. Defaults to $HERDR_PANE_ID.
     Bind(BindArgs),
-    /// Clear a pane's Beckon binding. Defaults to $HERDR_PANE_ID.
-    Release(PaneArgs),
+    /// Clear a pane's Beckon binding. Defaults to $HERDR_PANE_ID; --key works from any pane.
+    Release(ReleaseArgs),
     /// Print every current Beckon binding as JSON.
     Status,
     /// Print the hardware-neutral LED plan. This does not write to a keyboard.
@@ -78,6 +78,15 @@ struct BindArgs {
 struct PaneArgs {
     #[arg(long)]
     pane: Option<String>,
+}
+
+#[derive(Args)]
+struct ReleaseArgs {
+    /// Clear the binding assigned to this physical key from any pane.
+    #[arg(long)]
+    key: Option<String>,
+    #[command(flatten)]
+    pane: PaneArgs,
 }
 
 #[derive(Args)]
@@ -126,8 +135,11 @@ enum Request {
         pane_id: String,
         key: Option<String>,
     },
-    Release {
+    ReleasePane {
         pane_id: String,
+    },
+    ReleaseKey {
+        key: String,
     },
     Status,
 }
@@ -154,9 +166,17 @@ fn main() -> Result<()> {
             pane_id: current_pane(args.pane.pane)?,
             key: args.key,
         }),
-        CommandLine::Release(args) => client(Request::Release {
-            pane_id: current_pane(args.pane)?,
-        }),
+        CommandLine::Release(args) => match args.key {
+            Some(key) => {
+                if args.pane.pane.is_some() {
+                    bail!("--key and --pane cannot be used together");
+                }
+                client(Request::ReleaseKey { key })
+            }
+            None => client(Request::ReleasePane {
+                pane_id: current_pane(args.pane.pane)?,
+            }),
+        },
         CommandLine::Status => client(Request::Status),
         CommandLine::Preview(args) => preview(args),
         CommandLine::Hid { command } => hid_command(command),
@@ -542,8 +562,12 @@ fn dispatch<D: PaneDirectory>(request: Request, panes: &D) -> Result<Value> {
         Request::Bind { pane_id, key } => Ok(serde_json::to_value(
             bindings.bind(&pane_id, key.as_deref())?,
         )?),
-        Request::Release { pane_id } => {
+        Request::ReleasePane { pane_id } => {
             Ok(json!({"pane_id": pane_id, "changed": bindings.release(&pane_id)?}))
+        }
+        Request::ReleaseKey { key } => {
+            let pane_id = bindings.release_key(&key)?;
+            Ok(json!({"key": key, "pane_id": pane_id, "changed": pane_id.is_some()}))
         }
         Request::Status => Ok(json!({
             "bindings": bindings.status()?.into_iter().map(|(binding, pane)| json!({
@@ -586,5 +610,15 @@ mod tests {
         };
         assert_eq!(args.sequence, 2);
         assert_eq!(args.states.len(), hid::SLOT_COUNT);
+    }
+
+    #[test]
+    fn parses_release_by_key_without_a_pane() {
+        let cli = Cli::try_parse_from(["beckon", "release", "--key", "f2"]).unwrap();
+        let CommandLine::Release(args) = cli.command else {
+            panic!("expected release command");
+        };
+        assert_eq!(args.key.as_deref(), Some("f2"));
+        assert!(args.pane.pane.is_none());
     }
 }
