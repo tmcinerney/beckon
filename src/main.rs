@@ -233,13 +233,24 @@ fn current_pane(explicit: Option<String>) -> Result<String> {
 fn socket_path() -> PathBuf {
     env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(env::temp_dir)
-        .join("beckon.sock")
+        .map(|directory| directory.join("beckon.sock"))
+        // A launchd service and an interactive shell can have distinct TMPDIRs.
+        // State is the stable local fallback for this single-user daemon.
+        .unwrap_or_else(|| {
+            JsonBindingStore::from_environment()
+                .directory()
+                .join("beckon.sock")
+        })
 }
 
 fn daemon() -> Result<()> {
     let config = config::load()?;
     let path = socket_path();
+    if let Some(directory) = path.parent()
+        && directory == JsonBindingStore::from_environment().directory()
+    {
+        JsonBindingStore::from_environment().ensure_directory()?;
+    }
     if path.exists() {
         match UnixStream::connect(&path) {
             Ok(_) => bail!("beckond is already listening on {}", path.display()),

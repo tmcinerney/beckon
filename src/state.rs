@@ -1,4 +1,4 @@
-use std::{env, fs, path::PathBuf};
+use std::{env, fs, os::unix::fs::PermissionsExt, path::PathBuf};
 
 use anyhow::{Context, Result, bail};
 
@@ -22,6 +22,14 @@ impl JsonBindingStore {
 
     pub fn directory(&self) -> &std::path::Path {
         self.path.parent().expect("bindings path has a parent")
+    }
+
+    pub fn ensure_directory(&self) -> Result<()> {
+        fs::create_dir_all(self.directory())
+            .with_context(|| format!("create {}", self.directory().display()))?;
+        fs::set_permissions(self.directory(), fs::Permissions::from_mode(0o700))
+            .with_context(|| format!("protect {}", self.directory().display()))?;
+        Ok(())
     }
 }
 
@@ -48,8 +56,7 @@ impl BindingStore for JsonBindingStore {
 
     fn save(&self, state: &BindingState) -> Result<()> {
         validate_bindings(&state.bindings)?;
-        fs::create_dir_all(self.directory())
-            .with_context(|| format!("create {}", self.directory().display()))?;
+        self.ensure_directory()?;
         let temporary = self
             .directory()
             .join(format!(".bindings-{}.tmp", std::process::id()));
@@ -58,6 +65,8 @@ impl BindingStore for JsonBindingStore {
             .with_context(|| format!("write {}", temporary.display()))?;
         fs::rename(&temporary, &self.path)
             .with_context(|| format!("replace {}", self.path.display()))?;
+        fs::set_permissions(&self.path, fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("protect {}", self.path.display()))?;
         Ok(())
     }
 }
