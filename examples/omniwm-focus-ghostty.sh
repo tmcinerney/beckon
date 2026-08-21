@@ -5,6 +5,10 @@
 
 set -euo pipefail
 
+# `navigate` updates OmniWM's managed-window focus. macOS app activation is a
+# separate concern when Beckon is running in the background, so activate first.
+open -a Ghostty
+
 window_id="$(
   omniwmctl query windows --app Ghostty --format json |
     jq -er '
