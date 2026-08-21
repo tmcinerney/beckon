@@ -325,6 +325,7 @@ mod tests {
     fn pane(status: &str) -> Pane {
         Pane {
             pane_id: "p1".into(),
+            revision: 0,
             agent_status: status.into(),
             agent: None,
             label: None,

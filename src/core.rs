@@ -24,6 +24,8 @@ pub struct BindingState {
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
 pub struct Pane {
     pub pane_id: String,
+    #[serde(default)]
+    pub revision: u64,
     pub agent_status: String,
     #[serde(default)]
     pub agent: Option<String>,
@@ -278,6 +280,7 @@ mod tests {
     fn pane(id: &str) -> Pane {
         Pane {
             pane_id: id.into(),
+            revision: 0,
             agent_status: "idle".into(),
             agent: None,
             label: None,
