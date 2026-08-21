@@ -53,7 +53,7 @@ pub trait BindingStore {
 pub trait PaneDirectory {
     fn panes(&self) -> Result<Vec<Pane>>;
     fn write_fkey(&self, pane_id: &str, key: Option<&str>) -> Result<()>;
-    fn focus_agent(&self, pane_id: &str) -> Result<()>;
+    fn focus_pane(&self, pane_id: &str) -> Result<()>;
 }
 
 pub struct BindingService<'a> {
@@ -270,7 +270,7 @@ mod tests {
             };
             Ok(())
         }
-        fn focus_agent(&self, _pane_id: &str) -> Result<()> {
+        fn focus_pane(&self, _pane_id: &str) -> Result<()> {
             Ok(())
         }
     }

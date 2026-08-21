@@ -414,5 +414,5 @@ fn focus_key<D: PaneDirectory>(key: &str, config: &config::Config, panes: &D) ->
     let bindings = BindingService::new(&store, panes);
     let pane_id = bindings.pane_for_key(key)?;
     CommandFocus::new(&config.focus).focus_terminal()?;
-    panes.focus_agent(&pane_id)
+    panes.focus_pane(&pane_id)
 }

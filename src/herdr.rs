@@ -51,8 +51,8 @@ impl PaneDirectory for LivePaneDirectory {
         self.commands.write_fkey(pane_id, key)
     }
 
-    fn focus_agent(&self, pane_id: &str) -> Result<()> {
-        self.commands.focus_agent(pane_id)
+    fn focus_pane(&self, pane_id: &str) -> Result<()> {
+        HerdrSocket::from_environment().focus_pane(pane_id)
     }
 }
 
@@ -118,6 +118,20 @@ impl HerdrSocket {
         }
     }
 
+    /// Focus is a pane operation, whether that pane hosts a recognized agent
+    /// or an ordinary shell. Agent focus rejects the latter.
+    pub fn focus_pane(&self, pane_id: &str) -> Result<()> {
+        let response = self.request(json!({
+            "id": "beckond:pane-focus",
+            "method": "pane.focus",
+            "params": {"pane_id": pane_id}
+        }))?;
+        if let Some(error) = response.get("error") {
+            bail!("Herdr pane focus failed: {error}");
+        }
+        Ok(())
+    }
+
     fn request(&self, request: Value) -> Result<Value> {
         let mut stream = self.connect()?;
         writeln!(stream, "{}", serde_json::to_string(&request)?)?;
@@ -178,18 +192,8 @@ impl PaneDirectory for HerdrCli {
         Ok(())
     }
 
-    fn focus_agent(&self, pane_id: &str) -> Result<()> {
-        let output = Command::new("herdr")
-            .args(["agent", "focus", pane_id])
-            .output()
-            .context("run herdr agent focus")?;
-        if !output.status.success() {
-            bail!(
-                "herdr agent focus failed: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            );
-        }
-        Ok(())
+    fn focus_pane(&self, pane_id: &str) -> Result<()> {
+        HerdrSocket::from_environment().focus_pane(pane_id)
     }
 }
 
