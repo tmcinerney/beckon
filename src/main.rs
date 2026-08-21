@@ -1,11 +1,11 @@
 use std::{
     collections::BTreeMap,
     env, fs,
-    io::{BufRead, BufReader, Write},
+    io::{BufRead, BufReader, ErrorKind, Write},
     os::unix::net::{UnixListener, UnixStream},
     path::PathBuf,
     process::Command,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result, bail};
@@ -357,14 +357,7 @@ fn listen_keys() -> Result<()> {
     // macOS requires this event loop and the hotkey manager on its main thread.
     let event_loop = EventLoopBuilder::new().build();
     let manager = GlobalHotKeyManager::new().context("initialize macOS global hotkeys")?;
-    let mut labels = BTreeMap::new();
-    for (label, modifiers, code) in beckon_hotkeys() {
-        let hotkey = HotKey::new(modifiers, code);
-        manager
-            .register(hotkey)
-            .with_context(|| format!("register {label}; another application may already own it"))?;
-        labels.insert(hotkey.id(), label);
-    }
+    let labels = register_hotkeys(&manager)?;
 
     eprintln!("Listening for Beckon F keys. Press Control-C to stop.");
     eprintln!("Logging presses to {}", log_path.display());
@@ -375,14 +368,14 @@ fn listen_keys() -> Result<()> {
             if event.state != HotKeyState::Pressed {
                 continue;
             }
-            let Some(label) = labels.get(&event.id) else {
+            let Some(key) = labels.get(&event.id) else {
                 continue;
             };
             let timestamp = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .expect("system clock is before Unix epoch")
                 .as_millis();
-            let line = format!("{timestamp}\t{label}\n");
+            let line = format!("{timestamp}\t{key}\t{}\n", hotkey_description(key));
             print!("{line}");
             let _ = std::io::stdout().flush();
             if let Err(error) = log.write_all(line.as_bytes()).and_then(|_| log.flush()) {
@@ -393,18 +386,46 @@ fn listen_keys() -> Result<()> {
     })
 }
 
+fn register_hotkeys(manager: &GlobalHotKeyManager) -> Result<BTreeMap<u32, &'static str>> {
+    let mut labels = BTreeMap::new();
+    for (key, modifiers, code) in beckon_hotkeys() {
+        let hotkey = HotKey::new(modifiers, code);
+        manager
+            .register(hotkey)
+            .with_context(|| format!("register {key}; another application may already own it"))?;
+        labels.insert(hotkey.id(), key);
+    }
+    Ok(labels)
+}
+
+fn hotkey_description(key: &str) -> &'static str {
+    match key {
+        "f1" => "F16",
+        "f2" => "F17",
+        "f3" => "F18",
+        "f4" => "F19",
+        "f5" => "F20",
+        "f6" => "Shift+F16",
+        "f7" => "Shift+F17",
+        "f8" => "Shift+F18",
+        "f9" => "Shift+F19",
+        "f10" => "Shift+F20",
+        _ => "unknown",
+    }
+}
+
 fn beckon_hotkeys() -> [(&'static str, Option<Modifiers>, Code); 10] {
     [
-        ("f1\tF16", None, Code::F16),
-        ("f2\tF17", None, Code::F17),
-        ("f3\tF18", None, Code::F18),
-        ("f4\tF19", None, Code::F19),
-        ("f5\tF20", None, Code::F20),
-        ("f6\tShift+F16", Some(Modifiers::SHIFT), Code::F16),
-        ("f7\tShift+F17", Some(Modifiers::SHIFT), Code::F17),
-        ("f8\tShift+F18", Some(Modifiers::SHIFT), Code::F18),
-        ("f9\tShift+F19", Some(Modifiers::SHIFT), Code::F19),
-        ("f10\tShift+F20", Some(Modifiers::SHIFT), Code::F20),
+        ("f1", None, Code::F16),
+        ("f2", None, Code::F17),
+        ("f3", None, Code::F18),
+        ("f4", None, Code::F19),
+        ("f5", None, Code::F20),
+        ("f6", Some(Modifiers::SHIFT), Code::F16),
+        ("f7", Some(Modifiers::SHIFT), Code::F17),
+        ("f8", Some(Modifiers::SHIFT), Code::F18),
+        ("f9", Some(Modifiers::SHIFT), Code::F19),
+        ("f10", Some(Modifiers::SHIFT), Code::F20),
     ]
 }
 
@@ -422,25 +443,54 @@ fn socket_path() -> PathBuf {
 }
 
 fn daemon() -> Result<()> {
+    let config = load_config()?;
     let path = socket_path();
     if path.exists() {
-        fs::remove_file(&path)
-            .with_context(|| format!("remove stale socket {}", path.display()))?;
-    }
-    let listener = UnixListener::bind(&path).with_context(|| format!("bind {}", path.display()))?;
-    eprintln!("beckond listening on {}", path.display());
-
-    for stream in listener.incoming() {
-        match stream {
-            Ok(stream) => {
-                if let Err(error) = handle_connection(stream) {
-                    eprintln!("request failed: {error:#}");
-                }
+        match UnixStream::connect(&path) {
+            Ok(_) => bail!("beckond is already listening on {}", path.display()),
+            Err(error) if error.kind() == ErrorKind::ConnectionRefused => {
+                fs::remove_file(&path)
+                    .with_context(|| format!("remove stale socket {}", path.display()))?;
             }
-            Err(error) => eprintln!("accept failed: {error}"),
+            Err(error) => {
+                return Err(error).with_context(|| format!("connect to {}", path.display()));
+            }
         }
     }
-    Ok(())
+    let listener = UnixListener::bind(&path).with_context(|| format!("bind {}", path.display()))?;
+    listener
+        .set_nonblocking(true)
+        .with_context(|| format!("make {} nonblocking", path.display()))?;
+    eprintln!("beckond listening on {}", path.display());
+
+    // global-hotkey requires the manager and macOS event loop to share the main
+    // thread. Polling the local socket here keeps `beckon bind` responsive while
+    // avoiding a second daemon thread that could race state writes.
+    let event_loop = EventLoopBuilder::new().build();
+    let manager = GlobalHotKeyManager::new().context("initialize macOS global hotkeys")?;
+    let labels = register_hotkeys(&manager)?;
+    let receiver = GlobalHotKeyEvent::receiver();
+    event_loop.run(move |_event, _, control_flow| {
+        *control_flow =
+            ControlFlow::WaitUntil(std::time::Instant::now() + Duration::from_millis(50));
+        while let Ok((stream, _)) = listener.accept() {
+            if let Err(error) = handle_connection(stream) {
+                eprintln!("request failed: {error:#}");
+            }
+        }
+        while let Ok(event) = receiver.try_recv() {
+            if event.state != HotKeyState::Pressed {
+                continue;
+            }
+            let Some(key) = labels.get(&event.id) else {
+                continue;
+            };
+            if let Err(error) = focus_key(key, &config) {
+                eprintln!("focus {key}: {error:#}");
+            }
+        }
+        let _keep_manager_registered = &manager;
+    })
 }
 
 fn handle_connection(mut stream: UnixStream) -> Result<()> {
@@ -487,6 +537,50 @@ fn dispatch(request: Request) -> Result<Value> {
         Request::Release { pane_id } => release(&pane_id),
         Request::Status => status(),
     }
+}
+
+fn focus_key(key: &str, config: &Config) -> Result<()> {
+    let panes = panes()?;
+    let state = reconcile_bindings(&panes)?;
+    let binding = state
+        .bindings
+        .iter()
+        .find(|binding| binding.key == key)
+        .with_context(|| format!("{key} is not bound"))?;
+
+    run_focus_command(config)?;
+    focus_agent(&binding.pane_id)
+}
+
+fn run_focus_command(config: &Config) -> Result<()> {
+    let Some(command) = config.focus.command.as_deref() else {
+        return Ok(());
+    };
+    let (program, arguments) = command
+        .split_first()
+        .expect("load_config rejects an empty focus command");
+    let status = Command::new(program)
+        .args(arguments)
+        .status()
+        .with_context(|| format!("run focus command {program}"))?;
+    if !status.success() {
+        bail!("focus command {program} exited with {status}");
+    }
+    Ok(())
+}
+
+fn focus_agent(pane_id: &str) -> Result<()> {
+    let output = Command::new("herdr")
+        .args(["agent", "focus", pane_id])
+        .output()
+        .context("run herdr agent focus")?;
+    if !output.status.success() {
+        bail!(
+            "herdr agent focus failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(())
 }
 
 fn panes() -> Result<Vec<Pane>> {

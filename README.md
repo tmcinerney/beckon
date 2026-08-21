@@ -35,5 +35,6 @@ devenv shell -- cargo run -- daemon
 devenv shell -- cargo run -- bind --key f1
 ```
 
-The daemon currently owns binding writes only. Focus-on-keypress and LED state
-delivery are the next milestones.
+The daemon owns binding writes and global keypress navigation. If `focus.command`
+is set, it runs before `herdr agent focus`; this is where a user integrates their
+terminal and window manager. LED state delivery is the next milestone.
