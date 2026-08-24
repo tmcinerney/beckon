@@ -26,6 +26,57 @@ to `~/.local/state/beckon`). Herdr's `fkey` pane token is a visible mirror for
 the sidebar, not the source of truth: Herdr does not restore token metadata
 after its server restarts.
 
+## Optional MacBook function-key input
+
+Beckon's logical slots (`f1` through `f10`) are separate from their physical
+input source. The default `glove80` profile preserves the Glove80 Beckon layer:
+F16-F20 and Shift+F16-Shift+F20. A MacBook can navigate the same bindings by
+opting into its ordinary function-key row alongside the default Glove80 input:
+
+```toml
+[input]
+profiles = ["glove80", "macbook-function-keys"]
+```
+
+On macOS Ventura or later, turn on **System Settings → Keyboard → Keyboard
+Shortcuts → Function Keys → Use F1, F2, etc. keys as standard function keys**.
+Without that setting, hold Fn/Globe while pressing a key. Fn/Globe then remains
+the way to access the usual brightness, media, and volume controls. This is an
+input-only profile: it focuses existing Beckon bindings, but does not provide
+per-key status lighting. The Glove80 HID display can remain enabled separately.
+
+When `[input]` is absent, Beckon enables only `glove80` for compatibility. An
+existing single `profile = "macbook-function-keys"` setting remains supported.
+Use `profiles` to enable both inputs. They intentionally target the same
+logical bindings, so F1 on either keyboard focuses the pane bound to F1. Both
+sources use macOS global shortcuts, so either works across apps, OmniWM spaces,
+and a plugged-in desktop setup without switching modes.
+
+## Declarative Nix configuration
+
+The bundled Home Manager module can render the configuration rather than
+managing `config.toml` by hand. Beckon owns the configuration version; set only
+the fields you want to configure:
+
+```nix
+{
+  programs.beckon = {
+    enable = true;
+    settings = {
+      input.profiles = [ "glove80" "macbook-function-keys" ];
+      focus.command = [ "/Users/you/.config/beckon/focus-ghostty" ];
+    };
+  };
+
+  services.beckond.enable = true;
+}
+```
+
+An empty `programs.beckon.settings` leaves configuration unmanaged, which is
+the safe default for existing installations. The daemon logs the enabled input
+profiles at startup; a registration conflict identifies the physical shortcut
+and tells you that another application owns it.
+
 Create and validate the optional machine-specific configuration with:
 
 ```sh

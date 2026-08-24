@@ -12,11 +12,91 @@ const CONFIG_VERSION: u32 = 2;
 pub struct Config {
     config_version: u32,
     #[serde(default)]
+    pub input: InputConfig,
+    #[serde(default)]
     pub focus: FocusConfig,
     #[serde(default)]
     pub display: DisplayConfig,
     #[serde(default)]
     pub actions: ActionsConfig,
+}
+
+/// Selects the physical source that invokes Beckon's logical F1 through F10
+/// bindings. This affects navigation only; displays remain independently
+/// configured under `[display]`.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "kebab-case")]
+pub enum InputProfile {
+    /// Glove80's Beckon layer: F16-F20 and Shift+F16-F20. This deliberately
+    /// avoids colliding with macOS's normal function-key behavior.
+    #[default]
+    Glove80,
+    /// The MacBook's physical F1-F10 row. macOS must be configured to emit
+    /// standard function keys before this profile can receive them.
+    MacbookFunctionKeys,
+}
+
+impl InputProfile {
+    /// Stable configuration and diagnostic name for this physical source.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Glove80 => "glove80",
+            Self::MacbookFunctionKeys => "macbook-function-keys",
+        }
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InputConfig {
+    /// Compatibility spelling for selecting exactly one profile. New
+    /// configurations should use `profiles` so multiple physical keyboards
+    /// can activate the same logical Beckon slots concurrently.
+    #[serde(default)]
+    profile: Option<InputProfile>,
+    /// Physical input profiles to enable together. Their shortcuts must be
+    /// distinct, but profiles may map those shortcuts to the same logical
+    /// Beckon slots.
+    #[serde(default)]
+    profiles: Option<Vec<InputProfile>>,
+}
+
+impl InputConfig {
+    /// Resolves the enabled physical input profiles.
+    ///
+    /// Leaving `[input]` absent preserves the original Glove80-only behavior.
+    /// `profile` remains supported for existing configurations, while
+    /// `profiles` permits multiple sources such as a desktop Glove80 and a
+    /// mobile MacBook keyboard.
+    pub fn enabled_profiles(&self) -> Result<Vec<InputProfile>> {
+        if self.profile.is_some() && self.profiles.is_some() {
+            bail!(
+                "input.profile and input.profiles cannot be used together; use input.profiles for multiple inputs"
+            );
+        }
+
+        let profiles = match (self.profile, &self.profiles) {
+            (Some(profile), None) => vec![profile],
+            (None, None) => vec![InputProfile::default()],
+            (None, Some(profiles)) => profiles.clone(),
+            (Some(_), Some(_)) => unreachable!("mixed input configuration is rejected above"),
+        };
+
+        if profiles.is_empty() {
+            bail!("input.profiles must enable at least one profile");
+        }
+
+        let mut seen = std::collections::BTreeSet::new();
+        for profile in &profiles {
+            if !seen.insert(*profile) {
+                bail!(
+                    "input.profiles contains duplicate profile {}",
+                    profile.name()
+                );
+            }
+        }
+        Ok(profiles)
+    }
 }
 
 /// Deliberately opt-in actions that can send input to a bound pane.
@@ -131,6 +211,7 @@ impl ConfigV1 {
         display.themes.insert("legacy-v1".into(), theme);
         Config {
             config_version: CONFIG_VERSION,
+            input: InputConfig::default(),
             focus: self.focus,
             display,
             actions: ActionsConfig::default(),
@@ -208,6 +289,7 @@ pub fn load() -> Result<Config> {
     {
         bail!("actions.confirm.keys must contain one or more logical Herdr key names");
     }
+    config.input.enabled_profiles()?;
     config.display.validate()?;
     Ok(config)
 }
@@ -234,6 +316,15 @@ config_version = 2
 # string, so no shell quoting or interpolation is involved.
 # [focus]
 # command = ["/Users/you/.config/beckon/focus-ghostty"]
+
+# Select the physical input sources for Beckon's logical F1 through F10
+# bindings. The default preserves the Glove80 Beckon-layer mappings:
+# F16-F20, then Shift+F16-Shift+F20. To also navigate with the built-in
+# MacBook keyboard, uncomment this and enable "Use F1, F2, etc. keys as
+# standard function keys" in macOS Keyboard settings. Hold Fn/Globe when you
+# need the normal macOS brightness, media, or volume behavior.
+# [input]
+# profiles = ["glove80", "macbook-function-keys"]
 
 # Optional: repeat the same bound F key within this window after Beckon has
 # focused it to send Enter to that pane. Disabled by default because Enter can
@@ -286,6 +377,10 @@ colour = "#112233"
     #[test]
     fn confirmation_is_disabled_unless_explicitly_enabled() {
         let config = parse("config_version = 2").unwrap();
+        assert_eq!(
+            config.input.enabled_profiles().unwrap(),
+            [InputProfile::Glove80]
+        );
         assert!(!config.actions.confirm.enabled);
         assert_eq!(config.actions.confirm.repeat_press_ms, 750);
         assert_eq!(config.actions.confirm.keys, ["enter"]);
@@ -303,6 +398,74 @@ keys = ["ctrl+c"]
         )
         .unwrap();
         assert_eq!(config.actions.confirm.keys, ["ctrl+c"]);
+    }
+
+    #[test]
+    fn parses_opt_in_macbook_function_key_input() {
+        let config = parse(
+            r#"
+config_version = 2
+[input]
+profile = "macbook-function-keys"
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            config.input.enabled_profiles().unwrap(),
+            [InputProfile::MacbookFunctionKeys]
+        );
+    }
+
+    #[test]
+    fn enables_glove80_and_macbook_inputs_together() {
+        let config = parse(
+            r#"
+config_version = 2
+[input]
+profiles = ["glove80", "macbook-function-keys"]
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            config.input.enabled_profiles().unwrap(),
+            [InputProfile::Glove80, InputProfile::MacbookFunctionKeys]
+        );
+    }
+
+    #[test]
+    fn rejects_ambiguous_or_duplicate_input_profiles() {
+        let mixed = parse(
+            r#"
+config_version = 2
+[input]
+profile = "glove80"
+profiles = ["macbook-function-keys"]
+"#,
+        )
+        .unwrap();
+        assert!(mixed.input.enabled_profiles().is_err());
+
+        let duplicate = parse(
+            r#"
+config_version = 2
+[input]
+profiles = ["glove80", "glove80"]
+"#,
+        )
+        .unwrap();
+        assert!(duplicate.input.enabled_profiles().is_err());
+
+        let empty = parse(
+            r#"
+config_version = 2
+[input]
+profiles = []
+"#,
+        )
+        .unwrap();
+        assert!(empty.input.enabled_profiles().is_err());
     }
 
     #[test]
