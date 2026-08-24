@@ -327,8 +327,9 @@ fn preview(args: PreviewArgs) -> Result<()> {
 }
 
 fn listen_keys() -> Result<()> {
-    // Keep this diagnostic usable before `beckon init`; the daemon itself
-    // requires a complete configuration for focus and display.
+    // Keep this diagnostic usable before `beckon init`: if configuration is
+    // absent it tests the default Glove80 profile. An existing config is still
+    // fully validated before its input profiles are used.
     let input_profiles = if config::path().exists() {
         config::load()?.input.enabled_profiles()?
     } else {

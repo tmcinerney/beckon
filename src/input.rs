@@ -77,7 +77,7 @@ pub trait InputAdapter {
             registrar.register(hotkey).with_context(|| {
                 format!(
                     "register {}; another application may already own it",
-                    binding.key
+                    binding.description
                 )
             })?;
             bindings.insert(hotkey.id(), *binding);
