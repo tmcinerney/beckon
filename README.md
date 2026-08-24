@@ -52,6 +52,31 @@ logical bindings, so F1 on either keyboard focuses the pane bound to F1. Both
 sources use macOS global shortcuts, so either works across apps, OmniWM spaces,
 and a plugged-in desktop setup without switching modes.
 
+## Declarative Nix configuration
+
+The bundled Home Manager module can render the configuration rather than
+managing `config.toml` by hand. Beckon owns the configuration version; set only
+the fields you want to configure:
+
+```nix
+{
+  programs.beckon = {
+    enable = true;
+    settings = {
+      input.profiles = [ "glove80" "macbook-function-keys" ];
+      focus.command = [ "/Users/you/.config/beckon/focus-ghostty" ];
+    };
+  };
+
+  services.beckond.enable = true;
+}
+```
+
+An empty `programs.beckon.settings` leaves configuration unmanaged, which is
+the safe default for existing installations. The daemon logs the enabled input
+profiles at startup; a registration conflict identifies the physical shortcut
+and tells you that another application owns it.
+
 Create and validate the optional machine-specific configuration with:
 
 ```sh

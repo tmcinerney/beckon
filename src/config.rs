@@ -36,6 +36,16 @@ pub enum InputProfile {
     MacbookFunctionKeys,
 }
 
+impl InputProfile {
+    /// Stable configuration and diagnostic name for this physical source.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Glove80 => "glove80",
+            Self::MacbookFunctionKeys => "macbook-function-keys",
+        }
+    }
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InputConfig {

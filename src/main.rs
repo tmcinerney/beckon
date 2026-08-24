@@ -337,6 +337,7 @@ fn listen_keys() -> Result<()> {
     let event_loop = EventLoopBuilder::new().build();
     let manager = GlobalHotKeyManager::new().context("initialize macOS global hotkeys")?;
     let input = register_input(&input_profiles, &manager)?;
+    eprintln!("beckon inputs: {}", input_diagnostic(&input_profiles));
     eprintln!("Listening for Beckon F keys. Press Control-C to stop.");
     eprintln!("Logging presses to {}", key_event_log_path().display());
     let receiver = GlobalHotKeyEvent::receiver();
@@ -385,6 +386,14 @@ fn register_input(
         })
         .collect::<Vec<_>>();
     register_adapters(&adapters, manager)
+}
+
+fn input_diagnostic(profiles: &[InputProfile]) -> String {
+    profiles
+        .iter()
+        .map(|profile| profile.name())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn focus_result_line(key: &str, result: &str) -> String {
@@ -463,7 +472,9 @@ fn daemon() -> Result<()> {
     let mut last_presentation_error = None;
     let event_loop = EventLoopBuilder::new().build();
     let manager = GlobalHotKeyManager::new().context("initialize macOS global hotkeys")?;
-    let input = register_input(&config.input.enabled_profiles()?, &manager)?;
+    let input_profiles = config.input.enabled_profiles()?;
+    let input = register_input(&input_profiles, &manager)?;
+    eprintln!("beckond inputs: {}", input_diagnostic(&input_profiles));
     let receiver = GlobalHotKeyEvent::receiver();
     let mut confirm = RepeatPressConfirm::default();
     event_loop.run(move |_event, _, control_flow| {
@@ -900,5 +911,13 @@ mod tests {
         };
         assert_eq!(args.key.as_deref(), Some("f2"));
         assert!(args.pane.pane.is_none());
+    }
+
+    #[test]
+    fn describes_enabled_input_profiles_at_startup() {
+        assert_eq!(
+            input_diagnostic(&[InputProfile::Glove80, InputProfile::MacbookFunctionKeys]),
+            "glove80, macbook-function-keys"
+        );
     }
 }

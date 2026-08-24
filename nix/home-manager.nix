@@ -18,6 +18,7 @@ let
 
   programCfg = config.programs.beckon;
   serviceCfg = config.services.beckond;
+  toml = pkgs.formats.toml { };
 
   stateDirectory = "${serviceCfg.stateHome}/beckon";
   defaultLogDirectory =
@@ -44,6 +45,24 @@ in
         default = pkgs.callPackage ./package.nix { };
         defaultText = lib.literalExpression "pkgs.callPackage ./nix/package.nix { }";
         description = "The Beckon package to install.";
+      };
+
+      settings = mkOption {
+        type = types.attrs;
+        default = { };
+        example = {
+          input.profiles = [
+            "glove80"
+            "macbook-function-keys"
+          ];
+          focus.command = [ "/Users/you/.config/beckon/focus-ghostty" ];
+        };
+        description = ''
+          Beckon configuration rendered declaratively to
+          <filename>$XDG_CONFIG_HOME/beckon/config.toml</filename>. Beckon
+          supplies <literal>config_version = 2</literal>; leave this empty to
+          manage its TOML configuration outside Home Manager.
+        '';
       };
     };
 
@@ -88,6 +107,16 @@ in
   config = mkMerge [
     (mkIf programCfg.enable {
       home.packages = [ programCfg.package ];
+    })
+
+    (mkIf (programCfg.settings != { }) {
+      xdg.configFile."beckon/config.toml" = {
+        source = toml.generate "beckon-config.toml" (
+          lib.recursiveUpdate programCfg.settings {
+            config_version = 2;
+          }
+        );
+      };
     })
 
     (mkIf serviceCfg.enable {
