@@ -95,7 +95,7 @@ pub fn register_adapters<R: HotkeyRegistrar>(
     adapters: &[&dyn InputAdapter],
     registrar: &R,
 ) -> Result<RegisteredInput> {
-    let mut bindings = BTreeMap::new();
+    let mut planned = Vec::new();
     let mut owners = BTreeMap::new();
 
     for adapter in adapters {
@@ -108,18 +108,19 @@ pub fn register_adapters<R: HotkeyRegistrar>(
                     adapter.name()
                 );
             }
-            bindings.insert(hotkey.id(), *binding);
+            planned.push((hotkey, *binding));
         }
     }
 
-    for binding in bindings.values() {
-        let hotkey = binding.hotkey();
+    let mut bindings = BTreeMap::new();
+    for (hotkey, binding) in planned {
         registrar.register(hotkey).with_context(|| {
             format!(
                 "register {}; another application may already own it",
                 binding.description
             )
         })?;
+        bindings.insert(hotkey.id(), binding);
     }
     Ok(RegisteredInput { bindings })
 }

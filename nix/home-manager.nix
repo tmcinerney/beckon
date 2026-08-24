@@ -48,7 +48,7 @@ in
       };
 
       settings = mkOption {
-        type = types.attrs;
+        type = toml.type;
         default = { };
         example = {
           input.profiles = [

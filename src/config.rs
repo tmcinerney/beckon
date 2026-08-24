@@ -89,7 +89,10 @@ impl InputConfig {
         let mut seen = std::collections::BTreeSet::new();
         for profile in &profiles {
             if !seen.insert(*profile) {
-                bail!("input.profiles contains duplicate profile {profile:?}");
+                bail!(
+                    "input.profiles contains duplicate profile {}",
+                    profile.name()
+                );
             }
         }
         Ok(profiles)
