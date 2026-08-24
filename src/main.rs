@@ -13,7 +13,8 @@ use beckon::{
     action::RepeatPressConfirm,
     config,
     core::{
-        BindingService, BindingState, BindingStore, PaneDirectory, PanePresentation, STATE_VERSION,
+        BindingService, BindingState, BindingStore, PaneDirectory, PanePresentation,
+        PresentationTokenWrite, STATE_VERSION,
     },
     focus::{CommandFocus, FocusAdapter},
     herdr::{HerdrCli, LivePaneDirectory},
@@ -621,9 +622,18 @@ impl PresentationPublisher {
             if self.published_bindings.get(&pane.pane_id) == Some(&pane.binding) {
                 continue;
             }
-            panes.write_presentation_tokens(&pane.pane_id, &pane.binding)?;
-            self.published_bindings.insert(pane.pane_id, pane.binding);
-            changed = true;
+            match panes.write_presentation_tokens(&pane.pane_id, &pane.binding)? {
+                PresentationTokenWrite::Written => {
+                    self.published_bindings.insert(pane.pane_id, pane.binding);
+                    changed = true;
+                }
+                PresentationTokenWrite::PaneGone => {
+                    // A cache snapshot may briefly outlive a pane. Remember the
+                    // definitive server response to avoid retrying on every
+                    // event-loop tick; `retain` removes it after reconciliation.
+                    self.published_bindings.insert(pane.pane_id, pane.binding);
+                }
+            }
         }
         Ok(changed)
     }
@@ -793,6 +803,7 @@ mod tests {
     #[derive(Default)]
     struct RecordingDirectory {
         writes: RefCell<Vec<(String, String)>>,
+        pane_gone: bool,
     }
 
     impl PaneDirectory for RecordingDirectory {
@@ -804,11 +815,19 @@ mod tests {
             Ok(())
         }
 
-        fn write_presentation_tokens(&self, pane_id: &str, binding: &str) -> Result<()> {
+        fn write_presentation_tokens(
+            &self,
+            pane_id: &str,
+            binding: &str,
+        ) -> Result<PresentationTokenWrite> {
             self.writes
                 .borrow_mut()
                 .push((pane_id.into(), binding.into()));
-            Ok(())
+            Ok(if self.pane_gone {
+                PresentationTokenWrite::PaneGone
+            } else {
+                PresentationTokenWrite::Written
+            })
         }
 
         fn focus_pane(&self, _pane_id: &str) -> Result<()> {
@@ -849,6 +868,29 @@ mod tests {
                 ("w:p1".into(), "unbound".into()),
                 ("w:p1".into(), "F4".into()),
             ]
+        );
+    }
+
+    #[test]
+    fn presentation_token_pane_gone_is_an_expected_close_race() {
+        let directory = RecordingDirectory {
+            pane_gone: true,
+            ..Default::default()
+        };
+        let mut publisher = PresentationPublisher::default();
+        let pane = PanePresentation {
+            pane_id: "w:p1".into(),
+            title: "closing task".into(),
+            binding: "F2".into(),
+            agent_status: "working".into(),
+            focused: false,
+        };
+
+        assert!(!publisher.publish(&directory, vec![pane.clone()]).unwrap());
+        assert!(!publisher.publish(&directory, vec![pane]).unwrap());
+        assert_eq!(
+            *directory.writes.borrow(),
+            vec![("w:p1".into(), "F2".into())]
         );
     }
 
