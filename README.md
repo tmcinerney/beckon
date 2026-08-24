@@ -26,6 +26,29 @@ to `~/.local/state/beckon`). Herdr's `fkey` pane token is a visible mirror for
 the sidebar, not the source of truth: Herdr does not restore token metadata
 after its server restarts.
 
+## Optional MacBook function-key input
+
+Beckon's logical slots (`f1` through `f10`) are separate from their physical
+input source. The default `glove80` profile preserves the Glove80 Beckon layer:
+F16-F20 and Shift+F16-Shift+F20. A MacBook can instead navigate the same
+bindings without a Glove80 by opting into its ordinary function-key row:
+
+```toml
+[input]
+profile = "macbook-function-keys"
+```
+
+On macOS Ventura or later, turn on **System Settings → Keyboard → Keyboard
+Shortcuts → Function Keys → Use F1, F2, etc. keys as standard function keys**.
+Without that setting, hold Fn/Globe while pressing a key. Fn/Globe then remains
+the way to access the usual brightness, media, and volume controls. This is an
+input-only profile: it focuses existing Beckon bindings, but does not provide
+per-key status lighting. The Glove80 HID display can remain enabled separately.
+
+Only one input profile is active at a time in this release. This keeps global
+hotkey ownership unambiguous while the core input-adapter boundary is being
+extracted; it does not change the binding or navigation model.
+
 Create and validate the optional machine-specific configuration with:
 
 ```sh

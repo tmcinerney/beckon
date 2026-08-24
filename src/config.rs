@@ -12,11 +12,35 @@ const CONFIG_VERSION: u32 = 2;
 pub struct Config {
     config_version: u32,
     #[serde(default)]
+    pub input: InputConfig,
+    #[serde(default)]
     pub focus: FocusConfig,
     #[serde(default)]
     pub display: DisplayConfig,
     #[serde(default)]
     pub actions: ActionsConfig,
+}
+
+/// Selects the physical source that invokes Beckon's logical F1 through F10
+/// bindings. This affects navigation only; displays remain independently
+/// configured under `[display]`.
+#[derive(Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum InputProfile {
+    /// Glove80's Beckon layer: F16-F20 and Shift+F16-F20. This deliberately
+    /// avoids colliding with macOS's normal function-key behavior.
+    #[default]
+    Glove80,
+    /// The MacBook's physical F1-F10 row. macOS must be configured to emit
+    /// standard function keys before this profile can receive them.
+    MacbookFunctionKeys,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InputConfig {
+    #[serde(default)]
+    pub profile: InputProfile,
 }
 
 /// Deliberately opt-in actions that can send input to a bound pane.
@@ -131,6 +155,7 @@ impl ConfigV1 {
         display.themes.insert("legacy-v1".into(), theme);
         Config {
             config_version: CONFIG_VERSION,
+            input: InputConfig::default(),
             focus: self.focus,
             display,
             actions: ActionsConfig::default(),
@@ -235,6 +260,15 @@ config_version = 2
 # [focus]
 # command = ["/Users/you/.config/beckon/focus-ghostty"]
 
+# Select the physical input source for Beckon's logical F1 through F10
+# bindings. The default preserves the Glove80 Beckon-layer mappings:
+# F16-F20, then Shift+F16-Shift+F20. To navigate with the built-in MacBook
+# keyboard instead, uncomment this and enable "Use F1, F2, etc. keys as
+# standard function keys" in macOS Keyboard settings. Hold Fn/Globe when you
+# need the normal macOS brightness, media, or volume behavior.
+# [input]
+# profile = "macbook-function-keys"
+
 # Optional: repeat the same bound F key within this window after Beckon has
 # focused it to send Enter to that pane. Disabled by default because Enter can
 # confirm whatever is selected in an agent UI.
@@ -286,6 +320,7 @@ colour = "#112233"
     #[test]
     fn confirmation_is_disabled_unless_explicitly_enabled() {
         let config = parse("config_version = 2").unwrap();
+        assert_eq!(config.input.profile, InputProfile::Glove80);
         assert!(!config.actions.confirm.enabled);
         assert_eq!(config.actions.confirm.repeat_press_ms, 750);
         assert_eq!(config.actions.confirm.keys, ["enter"]);
@@ -303,6 +338,20 @@ keys = ["ctrl+c"]
         )
         .unwrap();
         assert_eq!(config.actions.confirm.keys, ["ctrl+c"]);
+    }
+
+    #[test]
+    fn parses_opt_in_macbook_function_key_input() {
+        let config = parse(
+            r#"
+config_version = 2
+[input]
+profile = "macbook-function-keys"
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(config.input.profile, InputProfile::MacbookFunctionKeys);
     }
 
     #[test]

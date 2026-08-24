@@ -127,6 +127,33 @@ impl InputAdapter for Glove80HotkeyInput {
     }
 }
 
+/// The built-in MacBook function-key row.
+///
+/// This adapter deliberately supplies navigation only. macOS must emit
+/// standard F1-F10 events (via its Function Keys setting, or with Fn/Globe)
+/// before these shortcuts can be registered.
+#[derive(Debug, Default)]
+pub struct MacbookFunctionKeyInput;
+
+const MACBOOK_FUNCTION_KEY_BINDINGS: [InputBinding; 10] = [
+    InputBinding::new("f1", "F1", None, Code::F1),
+    InputBinding::new("f2", "F2", None, Code::F2),
+    InputBinding::new("f3", "F3", None, Code::F3),
+    InputBinding::new("f4", "F4", None, Code::F4),
+    InputBinding::new("f5", "F5", None, Code::F5),
+    InputBinding::new("f6", "F6", None, Code::F6),
+    InputBinding::new("f7", "F7", None, Code::F7),
+    InputBinding::new("f8", "F8", None, Code::F8),
+    InputBinding::new("f9", "F9", None, Code::F9),
+    InputBinding::new("f10", "F10", None, Code::F10),
+];
+
+impl InputAdapter for MacbookFunctionKeyInput {
+    fn bindings(&self) -> &'static [InputBinding] {
+        &MACBOOK_FUNCTION_KEY_BINDINGS
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
@@ -176,6 +203,23 @@ mod tests {
             keys,
             vec!["f1", "f2", "f3", "f4", "f5", "f6", "f7", "f8", "f9", "f10"]
         );
+    }
+
+    #[test]
+    fn macbook_adapter_maps_the_standard_function_row() {
+        let registrar = FakeRegistrar::default();
+        let input = MacbookFunctionKeyInput.register(&registrar).unwrap();
+        let registered = registrar.registered.borrow();
+
+        assert_eq!(registered.len(), 10);
+        assert_eq!(
+            input
+                .binding_for_id(registered[0].id())
+                .unwrap()
+                .description,
+            "F1"
+        );
+        assert_eq!(input.binding_for_id(registered[9].id()).unwrap().key, "f10");
     }
 
     #[test]

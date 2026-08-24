@@ -11,7 +11,7 @@ use std::{
 use anyhow::{Context, Result, bail};
 use beckon::{
     action::RepeatPressConfirm,
-    config,
+    config::{self, InputProfile},
     core::{
         BindingService, BindingState, BindingStore, PaneDirectory, PanePresentation,
         PresentationTokenWrite, STATE_VERSION,
@@ -19,7 +19,7 @@ use beckon::{
     focus::{CommandFocus, FocusAdapter},
     herdr::{HerdrCli, LivePaneDirectory},
     hid::{self, Status, StatusSnapshot},
-    input::{Glove80HotkeyInput, InputAdapter},
+    input::{Glove80HotkeyInput, InputAdapter, MacbookFunctionKeyInput, RegisteredInput},
     state::JsonBindingStore,
 };
 use clap::{Args, Parser, Subcommand};
@@ -32,7 +32,7 @@ use tao::event_loop::{ControlFlow, EventLoopBuilder};
 #[command(
     name = "beckon",
     version,
-    about = "Bind selected Herdr panes to Glove80 Beckon keys",
+    about = "Bind selected Herdr panes to Beckon navigation keys",
     long_about = "Beckon is a local, display-and-navigation-first companion for Herdr.\n\
 It can bind an explicitly selected pane to an F key, show bindings, and focus a\n\
 bound pane. It never sends agent input, approves tools, or answers prompts unless\n\
@@ -324,9 +324,16 @@ fn preview(args: PreviewArgs) -> Result<()> {
 }
 
 fn listen_keys() -> Result<()> {
+    // Keep this diagnostic usable before `beckon init`; the daemon itself
+    // requires a complete configuration for focus and display.
+    let input_profile = if config::path().exists() {
+        config::load()?.input.profile
+    } else {
+        InputProfile::default()
+    };
     let event_loop = EventLoopBuilder::new().build();
     let manager = GlobalHotKeyManager::new().context("initialize macOS global hotkeys")?;
-    let input = Glove80HotkeyInput.register(&manager)?;
+    let input = register_input(&input_profile, &manager)?;
     eprintln!("Listening for Beckon F keys. Press Control-C to stop.");
     eprintln!("Logging presses to {}", key_event_log_path().display());
     let receiver = GlobalHotKeyEvent::receiver();
@@ -359,6 +366,16 @@ fn key_event_line(key: &str, description: &str, source: &str) -> String {
         .expect("system clock is before Unix epoch")
         .as_millis();
     format!("{timestamp}\t{key}\t{}\t{source}\n", description)
+}
+
+fn register_input(
+    profile: &InputProfile,
+    manager: &GlobalHotKeyManager,
+) -> Result<RegisteredInput> {
+    match profile {
+        InputProfile::Glove80 => Glove80HotkeyInput.register(manager),
+        InputProfile::MacbookFunctionKeys => MacbookFunctionKeyInput.register(manager),
+    }
 }
 
 fn focus_result_line(key: &str, result: &str) -> String {
@@ -437,7 +454,7 @@ fn daemon() -> Result<()> {
     let mut last_presentation_error = None;
     let event_loop = EventLoopBuilder::new().build();
     let manager = GlobalHotKeyManager::new().context("initialize macOS global hotkeys")?;
-    let input = Glove80HotkeyInput.register(&manager)?;
+    let input = register_input(&config.input.profile, &manager)?;
     let receiver = GlobalHotKeyEvent::receiver();
     let mut confirm = RepeatPressConfirm::default();
     event_loop.run(move |_event, _, control_flow| {
