@@ -92,6 +92,17 @@ pub trait BindingStore {
     fn save(&self, state: &BindingState) -> Result<()>;
 }
 
+/// Result of writing Beckon-only pane presentation metadata.
+///
+/// A pane can close after Beckon's cache observes it but before the metadata
+/// command reaches Herdr. That is expected lifecycle churn, not a failed
+/// sidebar update.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PresentationTokenWrite {
+    Written,
+    PaneGone,
+}
+
 /// The minimal Herdr surface Beckon's binding policy needs. The socket-backed
 /// adapter will replace the current CLI implementation without changing core.
 pub trait PaneDirectory {
@@ -99,7 +110,11 @@ pub trait PaneDirectory {
     fn write_fkey(&self, pane_id: &str, key: Option<&str>) -> Result<()>;
     /// Publish Beckon-owned display tokens without changing a pane's title or
     /// other metadata owned by a user or agent integration.
-    fn write_presentation_tokens(&self, pane_id: &str, binding: &str) -> Result<()>;
+    fn write_presentation_tokens(
+        &self,
+        pane_id: &str,
+        binding: &str,
+    ) -> Result<PresentationTokenWrite>;
     fn focus_pane(&self, pane_id: &str) -> Result<()>;
     fn send_keys(&self, pane_id: &str, keys: &[&str]) -> Result<()>;
 }
@@ -382,8 +397,12 @@ mod tests {
             Ok(())
         }
 
-        fn write_presentation_tokens(&self, _pane_id: &str, _binding: &str) -> Result<()> {
-            Ok(())
+        fn write_presentation_tokens(
+            &self,
+            _pane_id: &str,
+            _binding: &str,
+        ) -> Result<PresentationTokenWrite> {
+            Ok(PresentationTokenWrite::Written)
         }
         fn focus_pane(&self, _pane_id: &str) -> Result<()> {
             Ok(())
@@ -490,5 +509,18 @@ mod tests {
         assert_eq!(service.release_key("f2").unwrap(), Some("p1".into()));
         assert_eq!(panes.panes().unwrap()[0].fkey(), None);
         assert!(service.status().unwrap().is_empty());
+    }
+
+    #[test]
+    fn closing_a_bound_pane_releases_its_key_from_the_ledger() {
+        let store = MemoryStore::default();
+        let panes = FakePanes(RefCell::new(vec![pane("p1")]));
+        let service = BindingService::new(&store, &panes);
+        service.bind("p1", Some("f2")).unwrap();
+
+        panes.0.borrow_mut().clear();
+
+        assert!(service.status().unwrap().is_empty());
+        assert!(store.load().unwrap().unwrap().bindings.is_empty());
     }
 }

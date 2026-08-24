@@ -11,7 +11,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::{
-    core::{Pane, PaneDirectory},
+    core::{Pane, PaneDirectory, PresentationTokenWrite},
     pane_cache::PaneEvent,
 };
 
@@ -51,7 +51,11 @@ impl PaneDirectory for LivePaneDirectory {
         self.commands.write_fkey(pane_id, key)
     }
 
-    fn write_presentation_tokens(&self, pane_id: &str, binding: &str) -> Result<()> {
+    fn write_presentation_tokens(
+        &self,
+        pane_id: &str,
+        binding: &str,
+    ) -> Result<PresentationTokenWrite> {
         self.commands.write_presentation_tokens(pane_id, binding)
     }
 
@@ -215,7 +219,11 @@ impl PaneDirectory for HerdrCli {
         Ok(())
     }
 
-    fn write_presentation_tokens(&self, pane_id: &str, binding: &str) -> Result<()> {
+    fn write_presentation_tokens(
+        &self,
+        pane_id: &str,
+        binding: &str,
+    ) -> Result<PresentationTokenWrite> {
         let output = Command::new("herdr")
             .args(["pane", "report-metadata", pane_id, "--source", SOURCE])
             .arg("--token")
@@ -224,13 +232,14 @@ impl PaneDirectory for HerdrCli {
             .arg(format!("beckon_pane_id={pane_id}"))
             .output()
             .context("write Beckon presentation tokens")?;
-        if !output.status.success() {
-            bail!(
-                "presentation token update failed: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            );
+        if output.status.success() {
+            return Ok(PresentationTokenWrite::Written);
         }
-        Ok(())
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if is_pane_not_found(&stderr) {
+            return Ok(PresentationTokenWrite::PaneGone);
+        }
+        bail!("presentation token update failed: {}", stderr.trim());
     }
 
     fn focus_pane(&self, pane_id: &str) -> Result<()> {
@@ -240,6 +249,19 @@ impl PaneDirectory for HerdrCli {
     fn send_keys(&self, pane_id: &str, keys: &[&str]) -> Result<()> {
         HerdrSocket::from_environment().send_keys(pane_id, keys)
     }
+}
+
+fn is_pane_not_found(stderr: &str) -> bool {
+    serde_json::from_str::<Value>(stderr)
+        .ok()
+        .and_then(|error| {
+            error
+                .pointer("/error/code")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .as_deref()
+        == Some("pane_not_found")
 }
 
 #[derive(Debug, Deserialize)]
@@ -395,5 +417,15 @@ mod tests {
                 .unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn recognizes_structured_pane_not_found_errors() {
+        assert!(is_pane_not_found(
+            r#"{"error":{"code":"pane_not_found","message":"pane w:p no longer exists"}}"#
+        ));
+        assert!(!is_pane_not_found(
+            r#"{"error":{"code":"permission_denied","message":"not allowed"}}"#
+        ));
     }
 }
