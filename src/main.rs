@@ -19,7 +19,10 @@ use beckon::{
     focus::{CommandFocus, FocusAdapter},
     herdr::{HerdrCli, LivePaneDirectory},
     hid::{self, Status, StatusSnapshot},
-    input::{Glove80HotkeyInput, InputAdapter, MacbookFunctionKeyInput, RegisteredInput},
+    input::{
+        Glove80HotkeyInput, InputAdapter, MacbookFunctionKeyInput, RegisteredInput,
+        register_adapters,
+    },
     state::JsonBindingStore,
 };
 use clap::{Args, Parser, Subcommand};
@@ -326,14 +329,14 @@ fn preview(args: PreviewArgs) -> Result<()> {
 fn listen_keys() -> Result<()> {
     // Keep this diagnostic usable before `beckon init`; the daemon itself
     // requires a complete configuration for focus and display.
-    let input_profile = if config::path().exists() {
-        config::load()?.input.profile
+    let input_profiles = if config::path().exists() {
+        config::load()?.input.enabled_profiles()?
     } else {
-        InputProfile::default()
+        vec![InputProfile::default()]
     };
     let event_loop = EventLoopBuilder::new().build();
     let manager = GlobalHotKeyManager::new().context("initialize macOS global hotkeys")?;
-    let input = register_input(&input_profile, &manager)?;
+    let input = register_input(&input_profiles, &manager)?;
     eprintln!("Listening for Beckon F keys. Press Control-C to stop.");
     eprintln!("Logging presses to {}", key_event_log_path().display());
     let receiver = GlobalHotKeyEvent::receiver();
@@ -369,13 +372,19 @@ fn key_event_line(key: &str, description: &str, source: &str) -> String {
 }
 
 fn register_input(
-    profile: &InputProfile,
+    profiles: &[InputProfile],
     manager: &GlobalHotKeyManager,
 ) -> Result<RegisteredInput> {
-    match profile {
-        InputProfile::Glove80 => Glove80HotkeyInput.register(manager),
-        InputProfile::MacbookFunctionKeys => MacbookFunctionKeyInput.register(manager),
-    }
+    let glove80 = Glove80HotkeyInput;
+    let macbook = MacbookFunctionKeyInput;
+    let adapters = profiles
+        .iter()
+        .map(|profile| match profile {
+            InputProfile::Glove80 => &glove80 as &dyn InputAdapter,
+            InputProfile::MacbookFunctionKeys => &macbook as &dyn InputAdapter,
+        })
+        .collect::<Vec<_>>();
+    register_adapters(&adapters, manager)
 }
 
 fn focus_result_line(key: &str, result: &str) -> String {
@@ -454,7 +463,7 @@ fn daemon() -> Result<()> {
     let mut last_presentation_error = None;
     let event_loop = EventLoopBuilder::new().build();
     let manager = GlobalHotKeyManager::new().context("initialize macOS global hotkeys")?;
-    let input = register_input(&config.input.profile, &manager)?;
+    let input = register_input(&config.input.enabled_profiles()?, &manager)?;
     let receiver = GlobalHotKeyEvent::receiver();
     let mut confirm = RepeatPressConfirm::default();
     event_loop.run(move |_event, _, control_flow| {

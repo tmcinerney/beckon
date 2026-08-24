@@ -62,9 +62,15 @@ impl HotkeyRegistrar for GlobalHotKeyManager {
 /// Implementations map physical shortcuts to Beckon's logical key IDs, while
 /// the caller remains responsible for navigation and confirmation behavior.
 pub trait InputAdapter {
+    /// A stable profile name for diagnostics.
+    fn name(&self) -> &'static str;
+
     fn bindings(&self) -> &'static [InputBinding];
 
-    fn register<R: HotkeyRegistrar>(&self, registrar: &R) -> Result<RegisteredInput> {
+    fn register<R: HotkeyRegistrar>(&self, registrar: &R) -> Result<RegisteredInput>
+    where
+        Self: Sized,
+    {
         let mut bindings = BTreeMap::new();
         for binding in self.bindings() {
             let hotkey = binding.hotkey();
@@ -78,6 +84,44 @@ pub trait InputAdapter {
         }
         Ok(RegisteredInput { bindings })
     }
+}
+
+/// Register several physical adapters as one logical input set.
+///
+/// Multiple keyboards may intentionally target the same logical Beckon key,
+/// but no two adapters may claim the same physical macOS shortcut. All
+/// collisions are detected before the first global shortcut is registered.
+pub fn register_adapters<R: HotkeyRegistrar>(
+    adapters: &[&dyn InputAdapter],
+    registrar: &R,
+) -> Result<RegisteredInput> {
+    let mut bindings = BTreeMap::new();
+    let mut owners = BTreeMap::new();
+
+    for adapter in adapters {
+        for binding in adapter.bindings() {
+            let hotkey = binding.hotkey();
+            if let Some(owner) = owners.insert(hotkey.id(), adapter.name()) {
+                anyhow::bail!(
+                    "input shortcut {} is claimed by both {owner} and {}",
+                    binding.description,
+                    adapter.name()
+                );
+            }
+            bindings.insert(hotkey.id(), *binding);
+        }
+    }
+
+    for binding in bindings.values() {
+        let hotkey = binding.hotkey();
+        registrar.register(hotkey).with_context(|| {
+            format!(
+                "register {}; another application may already own it",
+                binding.description
+            )
+        })?;
+    }
+    Ok(RegisteredInput { bindings })
 }
 
 /// A registered input adapter, able to translate system events to logical keys.
@@ -122,6 +166,10 @@ const GLOVE80_BINDINGS: [InputBinding; 10] = [
 ];
 
 impl InputAdapter for Glove80HotkeyInput {
+    fn name(&self) -> &'static str {
+        "glove80"
+    }
+
     fn bindings(&self) -> &'static [InputBinding] {
         &GLOVE80_BINDINGS
     }
@@ -149,6 +197,10 @@ const MACBOOK_FUNCTION_KEY_BINDINGS: [InputBinding; 10] = [
 ];
 
 impl InputAdapter for MacbookFunctionKeyInput {
+    fn name(&self) -> &'static str {
+        "macbook-function-keys"
+    }
+
     fn bindings(&self) -> &'static [InputBinding] {
         &MACBOOK_FUNCTION_KEY_BINDINGS
     }
@@ -220,6 +272,19 @@ mod tests {
             "F1"
         );
         assert_eq!(input.binding_for_id(registered[9].id()).unwrap().key, "f10");
+    }
+
+    #[test]
+    fn adapters_can_register_two_keyboards_for_the_same_logical_slots() {
+        let registrar = FakeRegistrar::default();
+        let glove80 = Glove80HotkeyInput;
+        let macbook = MacbookFunctionKeyInput;
+        let input = register_adapters(&[&glove80, &macbook], &registrar).unwrap();
+        let registered = registrar.registered.borrow();
+
+        assert_eq!(registered.len(), 20);
+        assert_eq!(input.binding_for_id(registered[0].id()).unwrap().key, "f1");
+        assert_eq!(input.binding_for_id(registered[10].id()).unwrap().key, "f1");
     }
 
     #[test]

@@ -107,28 +107,19 @@ or other display sinks. An empty set is valid for a MacBook-only setup.
 
 ## Configuration migration
 
-Bump to config version 3. Version 2 upgrades by inserting the current
-Glove80 input and display defaults, preserving every current installation.
+The initial implementation keeps config version 2 and adds a plural
+`input.profiles` setting. An absent `[input]` section or the legacy singular
+`input.profile` setting keeps its existing behavior. The plural setting lets a
+desktop Glove80 and mobile MacBook remain active simultaneously.
 
 ```toml
 # Default: exact current Glove80 navigation behaviour.
-[[inputs]]
-id = "glove80"
-kind = "macos-global-hotkey"
-profile = "glove80"
-enabled = true
+[input]
+profiles = ["glove80"]
 
-# Opt-in. macOS must deliver standard F keys (Function Keys setting, or Fn).
-[[inputs]]
-id = "macbook"
-kind = "macos-global-hotkey"
-profile = "macbook-function-keys"
-enabled = false
-
-[[displays]]
-id = "glove80"
-kind = "glove80-hid"
-enabled = true
+# Or opt in to both sources. macOS must deliver standard F keys (Function
+# Keys setting, or Fn). Both sources map one-to-one to the same logical slots.
+profiles = ["glove80", "macbook-function-keys"]
 ```
 
 Profiles initially remain fixed, auditable mappings:
@@ -140,12 +131,13 @@ Profiles initially remain fixed, auditable mappings:
 
 Do not expose arbitrary key strings in this first migration. Add per-key
 overrides only after the registration model and collision errors have been used
-in practice. `id` values must be unique; unknown `kind`/`profile` values and
-an input with no enabled registrations are configuration errors.
+in practice. Unknown profile values, duplicate profile names, and mixing the
+legacy `profile` field with `profiles` are configuration errors.
 
-The Glove80 display is separately optional. `inputs.glove80` may be enabled
-without `displays.glove80`, and `macbook` may be enabled alongside it. The
-existing `beckon hid` diagnostic commands remain explicitly Glove80-specific.
+The Glove80 display is separately optional. Its input profile can be enabled
+without a connected display, and `macbook-function-keys` may be enabled
+alongside it. The existing `beckon hid` diagnostic commands remain explicitly
+Glove80-specific.
 
 ## Migration sequence
 
@@ -155,8 +147,9 @@ existing `beckon hid` diagnostic commands remain explicitly Glove80-specific.
    cover its `activate(KeyId)` result paths with unit tests.
 3. Extract the current fixed Glove80 hotkey table into an `InputProfile`; add a
    central macOS router that preserves the current event-loop ownership.
-4. Add `ConfigV2 -> ConfigV3` upgrade and default Glove80 input/display
-   entries. Parse/validate the disabled MacBook profile but do not register it.
+4. Add a backwards-compatible plural input profile setting. Keep an absent
+   input setting and the singular legacy setting equivalent to one Glove80
+   adapter.
 5. Add the MacBook F1–F10 profile. Preflight all registrations, then register
    them as one set. Keep the current Glove80 profile byte-for-byte equivalent.
 6. Wrap the existing `hid::RenderSink<UsbStatusWriter>` in `DisplaySink` and
