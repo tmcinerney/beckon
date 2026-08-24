@@ -3,6 +3,8 @@
 Beckon binds selected Herdr agent panes to Glove80 keys for glanceable state
 and direct navigation.
 
+Licensed under the [MIT License](LICENSE).
+
 ## Current state
 
 The current executable has the manual registration foundation:

@@ -1,4 +1,5 @@
 {
+  lib,
   makeWrapper,
   rustPlatform,
 }:
@@ -17,5 +18,9 @@ rustPlatform.buildRustPackage {
     makeWrapper "$out/bin/beckon" "$out/bin/beckond" --add-flags "daemon"
   '';
 
-  meta.mainProgram = "beckon";
+  meta = {
+    description = "Glove80 state display and Herdr pane navigation";
+    license = lib.licenses.mit;
+    mainProgram = "beckon";
+  };
 }
