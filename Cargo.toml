@@ -1,6 +1,6 @@
 [package]
 name = "beckon"
-version = "0.1.2"
+version = "0.2.0"
 edition = "2024"
 description = "Glove80 state display and Herdr pane navigation"
 license = "MIT"
@@ -15,3 +15,5 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tao = "0.30"
 toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

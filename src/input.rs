@@ -11,6 +11,7 @@ use global_hotkey::{
     GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState,
     hotkey::{Code, HotKey, Modifiers},
 };
+use tracing::debug;
 
 /// One physical shortcut exposed by an input adapter.
 #[derive(Clone, Copy, Debug)]
@@ -74,6 +75,13 @@ pub trait InputAdapter {
         let mut bindings = BTreeMap::new();
         for binding in self.bindings() {
             let hotkey = binding.hotkey();
+            debug!(
+                adapter = self.name(),
+                key = binding.key,
+                physical = binding.description,
+                hotkey_id = hotkey.id(),
+                "register global shortcut"
+            );
             registrar.register(hotkey).with_context(|| {
                 format!(
                     "register {}; another application may already own it",
@@ -114,6 +122,12 @@ pub fn register_adapters<R: HotkeyRegistrar>(
 
     let mut bindings = BTreeMap::new();
     for (hotkey, binding) in planned {
+        debug!(
+            key = binding.key,
+            physical = binding.description,
+            hotkey_id = hotkey.id(),
+            "register global shortcut"
+        );
         registrar.register(hotkey).with_context(|| {
             format!(
                 "register {}; another application may already own it",
