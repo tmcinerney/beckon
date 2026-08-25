@@ -9,6 +9,7 @@ use std::{
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use serde_json::{Value, json};
+use tracing::debug;
 
 use crate::{
     core::{Pane, PaneDirectory, PresentationTokenWrite},
@@ -133,6 +134,7 @@ impl HerdrSocket {
     /// Focus is a pane operation, whether that pane hosts a recognized agent
     /// or an ordinary shell. Agent focus rejects the latter.
     pub fn focus_pane(&self, pane_id: &str) -> Result<()> {
+        debug!(pane_id, socket = %self.path.display(), "send Herdr pane.focus request");
         let response = self.request(json!({
             "id": "beckond:pane-focus",
             "method": "pane.focus",
@@ -141,6 +143,7 @@ impl HerdrSocket {
         if let Some(error) = response.get("error") {
             bail!("Herdr pane focus failed: {error}");
         }
+        debug!(pane_id, "received successful Herdr pane.focus response");
         Ok(())
     }
 

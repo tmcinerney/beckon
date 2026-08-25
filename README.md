@@ -77,6 +77,23 @@ the safe default for existing installations. The daemon logs the enabled input
 profiles at startup; a registration conflict identifies the physical shortcut
 and tells you that another application owns it.
 
+## Input diagnostics
+
+Beckond records the input receipt and final result in
+`$XDG_STATE_HOME/beckon/key-events.log` (or
+`~/.local/state/beckon/key-events.log`). For a complete per-stage trace while
+diagnosing a shortcut, start the daemon with `BECKON_LOG=debug`. It writes
+structured records for global-hotkey registration, event receipt, logical-key
+routing, binding resolution, the configured terminal-focus command, and the
+Herdr `pane.focus` request/response.
+
+When Home Manager runs the service, those records go to its configured
+`services.beckond.logDirectory` (by default,
+`~/.local/state/beckon/logs/beckond.error.log`). A received raw macOS key event
+that never produces a `received global hotkey event` record was consumed before
+Beckon; use a temporary macOS Input Monitoring event tap to inspect that lower
+layer. Beckon does not request that permission for normal navigation.
+
 Create and validate the optional machine-specific configuration with:
 
 ```sh

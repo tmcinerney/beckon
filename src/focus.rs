@@ -1,6 +1,7 @@
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
+use tracing::debug;
 
 use crate::config::FocusConfig;
 
@@ -28,6 +29,11 @@ impl FocusAdapter for CommandFocus<'_> {
         let (program, arguments) = command
             .split_first()
             .expect("configuration rejects an empty focus command");
+        debug!(
+            program,
+            argument_count = arguments.len(),
+            "run terminal focus integration"
+        );
         let status = Command::new(program)
             .args(arguments)
             .status()
@@ -35,6 +41,7 @@ impl FocusAdapter for CommandFocus<'_> {
         if !status.success() {
             bail!("focus command {program} exited with {status}");
         }
+        debug!(program, "terminal focus integration succeeded");
         Ok(())
     }
 }

@@ -30,6 +30,8 @@ use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tao::event_loop::{ControlFlow, EventLoopBuilder};
+use tracing::{debug, info, info_span, warn};
+use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]
 #[command(
@@ -207,6 +209,7 @@ enum Response {
 }
 
 fn main() -> Result<()> {
+    initialize_tracing();
     match Cli::parse().command {
         CommandLine::Init => config::initialize(),
         CommandLine::Config {
@@ -237,6 +240,21 @@ fn main() -> Result<()> {
         CommandLine::Hid { command } => hid_command(command),
         CommandLine::ListenKeys => listen_keys(),
     }
+}
+
+/// Beckond writes structured diagnostics to stderr, which Home Manager's
+/// launchd service persists in its configured `beckond.error.log`. `BECKON_LOG`
+/// accepts normal EnvFilter values, e.g. `BECKON_LOG=debug` while diagnosing an
+/// input issue. Keeping diagnostics opt-in avoids noisy per-key logs normally.
+fn initialize_tracing() {
+    let filter =
+        EnvFilter::try_from_env("BECKON_LOG").unwrap_or_else(|_| EnvFilter::new("beckon=info"));
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_ansi(false)
+        .with_target(false)
+        .compact()
+        .init();
 }
 
 fn hid_command(command: HidCommand) -> Result<()> {
@@ -338,6 +356,7 @@ fn listen_keys() -> Result<()> {
     let event_loop = EventLoopBuilder::new().build();
     let manager = GlobalHotKeyManager::new().context("initialize macOS global hotkeys")?;
     let input = register_input(&input_profiles, &manager)?;
+    info!(profiles = %input_diagnostic(&input_profiles), "input listener registered shortcuts");
     eprintln!("beckon inputs: {}", input_diagnostic(&input_profiles));
     eprintln!("Listening for Beckon F keys. Press Control-C to stop.");
     eprintln!("Logging presses to {}", key_event_log_path().display());
@@ -345,9 +364,16 @@ fn listen_keys() -> Result<()> {
     event_loop.run(move |_event, _, control_flow| {
         *control_flow = ControlFlow::Wait;
         while let Ok(event) = receiver.try_recv() {
+            debug!(hotkey_id = event.id, state = ?event.state, "received global hotkey event");
             let Some(binding) = input.pressed(&event) else {
+                debug!(hotkey_id = event.id, "ignored unowned global hotkey event");
                 continue;
             };
+            info!(
+                key = binding.key,
+                physical = binding.description,
+                "routed input to logical key"
+            );
             let line = key_event_line(binding.key, binding.description, "listener");
             print!("{line}");
             let _ = std::io::stdout().flush();
@@ -475,6 +501,7 @@ fn daemon() -> Result<()> {
     let manager = GlobalHotKeyManager::new().context("initialize macOS global hotkeys")?;
     let input_profiles = config.input.enabled_profiles()?;
     let input = register_input(&input_profiles, &manager)?;
+    info!(profiles = %input_diagnostic(&input_profiles), socket = %path.display(), "daemon registered input shortcuts");
     eprintln!("beckond inputs: {}", input_diagnostic(&input_profiles));
     let receiver = GlobalHotKeyEvent::receiver();
     let mut confirm = RepeatPressConfirm::default();
@@ -507,8 +534,14 @@ fn daemon() -> Result<()> {
             }
         }
         while let Ok(event) = receiver.try_recv() {
+            debug!(hotkey_id = event.id, state = ?event.state, "received global hotkey event");
             if let Some(binding) = input.pressed(&event) {
                 let key = binding.key;
+                info!(
+                    key,
+                    physical = binding.description,
+                    "routed input to logical key"
+                );
                 if let Err(error) =
                     append_key_event(&key_event_line(key, binding.description, "daemon"))
                 {
@@ -521,6 +554,7 @@ fn daemon() -> Result<()> {
                         confirm.take_if_ready(key, pane_id, pane_is_focused(&herdr, pane_id), now)
                     });
                 if confirmed {
+                    info!(key, "repeat press confirmed configured action");
                     let keys = config
                         .actions
                         .confirm
@@ -531,6 +565,7 @@ fn daemon() -> Result<()> {
                     let result = target.and_then(|pane_id| herdr.send_keys(&pane_id, &keys));
                     match result {
                         Ok(()) => {
+                            info!(key, "configured action completed");
                             if let Err(error) =
                                 append_key_event(&focus_result_line(key, "confirm-ok"))
                             {
@@ -538,6 +573,7 @@ fn daemon() -> Result<()> {
                             }
                         }
                         Err(error) => {
+                            warn!(key, error = %format!("{error:#}"), "configured action failed");
                             if let Err(record_error) =
                                 append_key_event(&focus_result_line(key, "confirm-error"))
                             {
@@ -549,6 +585,7 @@ fn daemon() -> Result<()> {
                 } else {
                     match focus_key(key, &config, &herdr) {
                         Ok(()) => {
+                            info!(key, "navigation completed");
                             if config.actions.confirm.enabled
                                 && let Ok(pane_id) = target
                             {
@@ -564,6 +601,7 @@ fn daemon() -> Result<()> {
                             }
                         }
                         Err(error) => {
+                            warn!(key, error = %format!("{error:#}"), "navigation failed");
                             if let Err(record_error) =
                                 append_key_event(&focus_result_line(key, "error"))
                             {
@@ -724,9 +762,16 @@ fn dispatch<D: PaneDirectory>(request: Request, panes: &D) -> Result<Value> {
 }
 
 fn focus_key<D: PaneDirectory>(key: &str, config: &config::Config, panes: &D) -> Result<()> {
+    let span = info_span!("focus_bound_pane", key);
+    let _entered = span.enter();
     let pane_id = pane_for_key(key, panes)?;
+    info!(pane_id, "resolved bound pane");
     CommandFocus::new(&config.focus).focus_terminal()?;
-    panes.focus_pane(&pane_id)
+    info!("terminal focus integration completed");
+    debug!(pane_id, "requesting Herdr pane focus");
+    panes.focus_pane(&pane_id)?;
+    info!(pane_id, "Herdr pane focus completed");
+    Ok(())
 }
 
 fn pane_for_key<D: PaneDirectory>(key: &str, panes: &D) -> Result<String> {
