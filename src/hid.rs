@@ -3,7 +3,13 @@
 //! The daemon depends only on the narrow [`StatusWriter`] boundary; manual
 //! protocol diagnostics remain explicit CLI actions.
 
-use std::{collections::BTreeMap, ffi::CStr, fmt, str::FromStr};
+use std::{
+    collections::BTreeMap,
+    ffi::CStr,
+    fmt,
+    str::FromStr,
+    time::{Duration, Instant},
+};
 
 use anyhow::{Context, Result, bail};
 use hidapi::{DeviceInfo, HidApi, HidDevice};
@@ -102,13 +108,19 @@ impl StatusWriter for UsbStatusWriter {
 /// Convert hardware-neutral render plans into protocol snapshots and avoid
 /// rewriting the keyboard until its ten meaningful states change.
 ///
-/// A failed write intentionally does not update `last_slots`, so the daemon
-/// retries on its next normal render pass after a keyboard reconnects.
+/// A failed write intentionally does not update `last_slots`, so a later
+/// render pass can recover after a keyboard reconnects. Retrying immediately
+/// is prohibitively expensive on macOS: opening hidapi enumerates every HID
+/// device. Keep disconnect recovery responsive without turning an unplugged
+/// keyboard into a busy loop.
 pub struct RenderSink<W> {
     writer: W,
     last_snapshot: Option<([Status; SLOT_COUNT], [Treatment; 5])>,
     next_sequence: u8,
+    retry_after: Option<Instant>,
 }
+
+const DISCONNECTED_RETRY_DELAY: Duration = Duration::from_secs(2);
 
 impl<W> RenderSink<W>
 where
@@ -119,14 +131,25 @@ where
             writer,
             last_snapshot: None,
             next_sequence: 0,
+            retry_after: None,
         }
     }
 
     /// Returns whether a USB snapshot was written.
     pub fn publish(&mut self, plan: &RenderPlan) -> Result<bool> {
+        self.publish_at(plan, Instant::now())
+    }
+
+    fn publish_at(&mut self, plan: &RenderPlan, now: Instant) -> Result<bool> {
         let slots = slots_for_plan(plan)?;
         let treatments = treatments_for_plan(plan);
         if self.last_snapshot == Some((slots, treatments)) {
+            return Ok(false);
+        }
+        if self
+            .retry_after
+            .is_some_and(|retry_after| now < retry_after)
+        {
             return Ok(false);
         }
         let snapshot = StatusSnapshot {
@@ -134,9 +157,13 @@ where
             slots,
             treatments,
         };
-        self.writer.write_snapshot(snapshot)?;
+        if let Err(error) = self.writer.write_snapshot(snapshot) {
+            self.retry_after = Some(now + DISCONNECTED_RETRY_DELAY);
+            return Err(error);
+        }
         self.last_snapshot = Some((slots, treatments));
         self.next_sequence = self.next_sequence.wrapping_add(1);
+        self.retry_after = None;
         Ok(true)
     }
 
@@ -534,8 +561,20 @@ mod tests {
             None,
         ]);
 
-        assert!(sink.publish(&idle).is_err());
-        assert!(sink.publish(&idle).unwrap());
+        let now = Instant::now();
+        assert!(sink.publish_at(&idle, now).is_err());
+        assert!(
+            !sink
+                .publish_at(
+                    &idle,
+                    now + DISCONNECTED_RETRY_DELAY - Duration::from_millis(1)
+                )
+                .unwrap()
+        );
+        assert!(
+            sink.publish_at(&idle, now + DISCONNECTED_RETRY_DELAY)
+                .unwrap()
+        );
 
         let writer = sink.into_inner();
         assert_eq!(writer.writes.len(), 1);
