@@ -29,7 +29,7 @@ use clap::{Args, Parser, Subcommand};
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tao::event_loop::{ControlFlow, EventLoopBuilder};
+use tao::event_loop::{ControlFlow, EventLoop, EventLoopBuilder};
 use tracing::{debug, info, info_span, warn};
 use tracing_subscriber::EnvFilter;
 
@@ -139,6 +139,9 @@ struct PaneArgs {
 
 #[derive(Args)]
 struct ReleaseArgs {
+    /// Clear every Beckon binding. This does not close panes or control agents.
+    #[arg(long, conflicts_with_all = ["key", "pane"])]
+    all: bool,
     /// Clear the binding assigned to this physical key from any pane.
     #[arg(long)]
     key: Option<String>,
@@ -198,6 +201,7 @@ enum Request {
     ReleaseKey {
         key: String,
     },
+    ReleaseAll,
     Status,
 }
 
@@ -224,6 +228,7 @@ fn main() -> Result<()> {
             pane_id: current_pane(args.pane.pane)?,
             key: args.key,
         }),
+        CommandLine::Release(args) if args.all => client(Request::ReleaseAll),
         CommandLine::Release(args) => match args.key {
             Some(key) => {
                 if args.pane.pane.is_some() {
@@ -240,6 +245,21 @@ fn main() -> Result<()> {
         CommandLine::Hid { command } => hid_command(command),
         CommandLine::ListenKeys => listen_keys(),
     }
+}
+
+/// Beckon needs Tao's main-thread event loop for global hotkeys, but it has no
+/// windows or user-facing app surface. Accessory policy keeps a launchd-managed
+/// daemon out of the Dock and application switcher.
+fn background_event_loop() -> EventLoop<()> {
+    let mut event_loop = EventLoopBuilder::new().build();
+    #[cfg(target_os = "macos")]
+    {
+        use tao::platform::macos::{ActivationPolicy, EventLoopExtMacOS};
+
+        event_loop.set_activation_policy(ActivationPolicy::Accessory);
+        event_loop.set_activate_ignoring_other_apps(false);
+    }
+    event_loop
 }
 
 /// Beckond writes structured diagnostics to stderr, which Home Manager's
@@ -353,7 +373,7 @@ fn listen_keys() -> Result<()> {
     } else {
         vec![InputProfile::default()]
     };
-    let event_loop = EventLoopBuilder::new().build();
+    let event_loop = background_event_loop();
     let manager = GlobalHotKeyManager::new().context("initialize macOS global hotkeys")?;
     let input = register_input(&input_profiles, &manager)?;
     info!(profiles = %input_diagnostic(&input_profiles), "input listener registered shortcuts");
@@ -497,7 +517,7 @@ fn daemon() -> Result<()> {
     let mut last_display_error = None;
     let mut presentation = PresentationPublisher::default();
     let mut last_presentation_error = None;
-    let event_loop = EventLoopBuilder::new().build();
+    let event_loop = background_event_loop();
     let manager = GlobalHotKeyManager::new().context("initialize macOS global hotkeys")?;
     let input_profiles = config.input.enabled_profiles()?;
     let input = register_input(&input_profiles, &manager)?;
@@ -751,6 +771,10 @@ fn dispatch<D: PaneDirectory>(request: Request, panes: &D) -> Result<Value> {
             let pane_id = bindings.release_key(&key)?;
             Ok(json!({"key": key, "pane_id": pane_id, "changed": pane_id.is_some()}))
         }
+        Request::ReleaseAll => {
+            let released = bindings.release_all()?;
+            Ok(json!({"released": released.len(), "bindings": released}))
+        }
         Request::Status => Ok(json!({
             "bindings": bindings.status()?.into_iter().map(|(binding, pane)| json!({
                 "key": binding.key,
@@ -957,6 +981,23 @@ mod tests {
         };
         assert_eq!(args.key.as_deref(), Some("f2"));
         assert!(args.pane.pane.is_none());
+    }
+
+    #[test]
+    fn parses_explicit_release_all_without_a_pane() {
+        let cli = Cli::try_parse_from(["beckon", "release", "--all"]).unwrap();
+        let CommandLine::Release(args) = cli.command else {
+            panic!("expected release command");
+        };
+        assert!(args.all);
+        assert!(args.key.is_none());
+        assert!(args.pane.pane.is_none());
+    }
+
+    #[test]
+    fn rejects_release_all_with_a_target() {
+        assert!(Cli::try_parse_from(["beckon", "release", "--all", "--key", "f2"]).is_err());
+        assert!(Cli::try_parse_from(["beckon", "release", "--all", "--pane", "w8:p1"]).is_err());
     }
 
     #[test]

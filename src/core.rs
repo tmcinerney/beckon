@@ -226,6 +226,28 @@ impl<'a> BindingService<'a> {
         Ok(Some(binding.pane_id))
     }
 
+    /// Remove every live Beckon registration. This is intentionally explicit:
+    /// callers must choose `beckon release --all`, rather than an omitted pane
+    /// accidentally affecting other agents.
+    pub fn release_all(&self) -> Result<Vec<Binding>> {
+        let panes = self.panes.panes()?;
+        let mut state = self.reconcile_panes(&panes)?;
+        let released = state.bindings.clone();
+        if released.is_empty() {
+            return Ok(released);
+        }
+
+        // Persist the empty ledger before clearing pane metadata. If a pane
+        // closes during this loop, reconciliation will clear any residual
+        // fkey token on the next successful directory snapshot.
+        state.bindings.clear();
+        self.store.save(&state)?;
+        for binding in &released {
+            self.panes.write_fkey(&binding.pane_id, None)?;
+        }
+        Ok(released)
+    }
+
     pub fn status(&self) -> Result<Vec<(Binding, Pane)>> {
         let panes = self.panes.panes()?;
         let state = self.reconcile_panes(&panes)?;
@@ -509,6 +531,26 @@ mod tests {
         assert_eq!(service.release_key("f2").unwrap(), Some("p1".into()));
         assert_eq!(panes.panes().unwrap()[0].fkey(), None);
         assert!(service.status().unwrap().is_empty());
+    }
+
+    #[test]
+    fn releases_all_bindings_and_their_tokens() {
+        let store = MemoryStore::default();
+        let panes = FakePanes(RefCell::new(vec![pane("p1"), pane("p2")]));
+        let service = BindingService::new(&store, &panes);
+        service.bind("p1", Some("f2")).unwrap();
+        service.bind("p2", Some("f7")).unwrap();
+
+        let released = service.release_all().unwrap();
+        assert_eq!(released.len(), 2);
+        assert!(
+            panes
+                .panes()
+                .unwrap()
+                .iter()
+                .all(|pane| pane.fkey().is_none())
+        );
+        assert!(store.load().unwrap().unwrap().bindings.is_empty());
     }
 
     #[test]
