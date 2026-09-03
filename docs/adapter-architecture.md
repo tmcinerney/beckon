@@ -22,9 +22,10 @@ sink. The existing Glove80 profile continues to map `F16`–`F20` and
 `Shift+F16`–`Shift+F20`; the existing Glove80 HID transport remains its
 optional display sink.
 
-This is deliberately built-in adapter configuration, not a third-party Rust
-plugin ABI. A stable ABI would freeze error handling, lifecycle, and async/main
-thread behavior before Beckon has a second independent hardware backend.
+Built-in adapters use a typed Rust registry. Third-party display integrations
+use the versioned `beckon.display` NDJSON child-process protocol rather than a
+Rust dynamic-library ABI. This keeps the implementation language-independent
+and isolates crashes and blocked I/O from Tao's main-thread event loop.
 
 Output integrations now have a typed in-process registry and a common
 `DisplaySink` lifecycle. This is the extension point for additional built-in
@@ -46,6 +47,9 @@ The runtime is hardware-neutral through the core:
   adapters and isolates their availability and failure state.
 - `display::Glove80UsbDisplay` adapts the hardware-neutral plan to the existing
   `hid::RenderSink<W>`, which de-duplicates reconnect-safe snapshots.
+- `display::ProcessDisplay` supervises a configured external display plugin,
+  coalesces pending updates, and performs bounded child I/O off the hotkey loop.
+- `display_protocol` owns the public, versioned NDJSON schema.
 - `focus::FocusAdapter` isolates terminal/window activation from Herdr pane
   navigation.
 
@@ -63,6 +67,8 @@ src/
   core.rs                 # BindingService, PaneDirectory, logical f1-f10
   input.rs                # built-in profiles and central hotkey router
   display.rs              # DisplaySink registry and failure-isolated fan-out
+  display/process.rs      # supervised external plugin lifecycle and I/O
+  display_protocol.rs     # public versioned NDJSON schema
   focus.rs                # terminal/window activation adapter
   render.rs               # RenderPlan and themes
   hid.rs                  # Glove80 USB protocol and explicit diagnostics
@@ -77,7 +83,7 @@ The display boundary is:
 
 ```rust
 pub trait DisplaySink {
-    fn id(&self) -> &'static str;
+    fn id(&self) -> &str;
     fn publish(&mut self, plan: &RenderPlan) -> anyhow::Result<PublishOutcome>;
 }
 
@@ -144,9 +150,9 @@ adapters = ["glove80-usb"]
 Adapter names are a stable configuration registry, not Rust symbols. Unknown
 or duplicate names fail configuration validation. Additional built-in sinks
 can be registered without changing the core binding or navigation services.
-If external integrations become useful, prefer a versioned child-process
-protocol such as NDJSON over dynamically loading a Rust ABI. That preserves
-crash isolation and allows adapters to be implemented in other languages.
+External plugins are declared under `[[outputs.plugins]]` and receive complete
+render snapshots through the protocol documented in
+`docs/display-plugin-protocol.md`.
 
 ## Migration sequence
 
@@ -219,9 +225,9 @@ Integration/manual checks on macOS:
 4. With all displays disabled or the Glove80 unplugged, input navigation and
    `beckon status` keep working; reconnecting restores the display.
 
-## Non-goals for this increment
+## Non-goals for the adapter architecture
 
-- A third-party dynamically loaded adapter ABI.
+- A third-party dynamically loaded Rust adapter ABI.
 - macOS per-key function-row lighting (there is no supported per-key RGB
   display target comparable to the Glove80 HID firmware).
 - Bluetooth display transport.

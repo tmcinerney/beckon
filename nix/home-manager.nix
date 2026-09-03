@@ -56,6 +56,15 @@ in
             "macbook-function-keys"
           ];
           outputs.adapters = [ "glove80-usb" ];
+          outputs.plugins = [
+            {
+              id = "status-log";
+              command = [
+                "/absolute/path/to/display-plugin-log.py"
+                "/tmp/beckon-display.log"
+              ];
+            }
+          ];
           focus.command = [ "/Users/you/.config/beckon/focus-ghostty" ];
         };
         description = ''

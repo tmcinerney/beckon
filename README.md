@@ -77,9 +77,13 @@ adapters = []
 Each built-in display implements the same hardware-neutral `DisplaySink`
 boundary and receives a `RenderPlan`. Beckon fans out independently, so one
 failed output cannot block another output or navigation. New built-in adapters
-are added to the typed configuration registry. A future out-of-process plugin
-interface should use a versioned protocol rather than exposing an unstable
-Rust dynamic-library ABI.
+are added to the typed configuration registry.
+
+External display plugins use a versioned, one-way NDJSON protocol rather than
+an unstable Rust dynamic-library ABI. They run as supervised child processes,
+receive complete render snapshots, and cannot block the hotkey loop or mutate
+bindings. See [the display plugin protocol](docs/display-plugin-protocol.md)
+and its [minimal logging example](examples/display-plugin-log.py).
 
 ## Declarative Nix configuration
 
@@ -94,6 +98,12 @@ the fields you want to configure:
     settings = {
       input.profiles = [ "glove80" "macbook-function-keys" ];
       outputs.adapters = [ "glove80-usb" ];
+      outputs.plugins = [
+        {
+          id = "status-log";
+          command = [ "/absolute/path/to/display-plugin-log.py" "/tmp/beckon-display.log" ];
+        }
+      ];
       focus.command = [ "/Users/you/.config/beckon/focus-ghostty" ];
     };
   };
