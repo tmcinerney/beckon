@@ -39,37 +39,89 @@ impl OutputAdapter {
     }
 }
 
-/// Selects zero or more independently managed display outputs. An empty list
-/// is a valid Mac-only configuration; the compatibility default preserves the
-/// existing automatic Glove80 USB display behavior.
+/// One trusted external program that consumes Beckon render snapshots.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ProcessOutputPlugin {
+    /// Stable name used in diagnostics. IDs share a namespace with built-in
+    /// adapters and use lowercase kebab-case.
+    pub id: String,
+    /// Executable followed by arguments. Beckon never evaluates this through
+    /// a shell.
+    pub command: Vec<String>,
+}
+
+/// Selects built-in and out-of-process display integrations. An empty
+/// configuration is valid for navigation-only installations.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OutputConfig {
     #[serde(default = "default_output_adapters")]
     pub adapters: Vec<OutputAdapter>,
+    #[serde(default)]
+    pub plugins: Vec<ProcessOutputPlugin>,
 }
 
 impl Default for OutputConfig {
     fn default() -> Self {
         Self {
             adapters: default_output_adapters(),
+            plugins: Vec::new(),
         }
     }
 }
 
 impl OutputConfig {
-    pub fn enabled_adapters(&self) -> Result<&[OutputAdapter]> {
-        let mut seen = std::collections::BTreeSet::new();
+    pub fn validate(&self) -> Result<()> {
+        let mut seen = std::collections::BTreeSet::<&str>::new();
         for adapter in &self.adapters {
-            if !seen.insert(*adapter) {
+            if !seen.insert(adapter.name()) {
                 bail!(
                     "outputs.adapters contains duplicate adapter {}",
                     adapter.name()
                 );
             }
         }
-        Ok(&self.adapters)
+
+        for plugin in &self.plugins {
+            if !valid_plugin_id(&plugin.id) {
+                bail!(
+                    "outputs.plugins id {:?} must use lowercase kebab-case",
+                    plugin.id
+                );
+            }
+            if !seen.insert(&plugin.id) {
+                bail!("outputs contains duplicate id {}", plugin.id);
+            }
+            if plugin
+                .command
+                .first()
+                .is_none_or(|value| value.trim().is_empty())
+            {
+                bail!(
+                    "outputs.plugins entry {} must contain an executable in command",
+                    plugin.id
+                );
+            }
+        }
+        Ok(())
     }
+
+    pub fn ids(&self) -> Vec<&str> {
+        self.adapters
+            .iter()
+            .map(|adapter| adapter.name())
+            .chain(self.plugins.iter().map(|plugin| plugin.id.as_str()))
+            .collect()
+    }
+}
+
+fn valid_plugin_id(id: &str) -> bool {
+    let mut characters = id.chars();
+    matches!(characters.next(), Some('a'..='z'))
+        && characters.all(|character| {
+            character.is_ascii_lowercase() || character.is_ascii_digit() || character == '-'
+        })
 }
 
 fn default_output_adapters() -> Vec<OutputAdapter> {
@@ -346,7 +398,7 @@ pub fn load() -> Result<Config> {
         bail!("actions.confirm.keys must contain one or more logical Herdr key names");
     }
     config.input.enabled_profiles()?;
-    config.outputs.enabled_adapters()?;
+    config.outputs.validate()?;
     config.display.validate()?;
     Ok(config)
 }
@@ -388,6 +440,12 @@ config_version = 2
 # any physical display; a disconnected optional adapter is not an error.
 # [outputs]
 # adapters = ["glove80-usb"]
+
+# Add trusted, long-running display plugins as argv arrays. Beckon sends a
+# versioned NDJSON stream to each plugin's stdin; it does not invoke a shell.
+# [[outputs.plugins]]
+# id = "status-log"
+# command = ["/absolute/path/to/beckon-display-log"]
 
 # Optional: repeat the same bound F key within this window after Beckon has
 # focused it to send Enter to that pane. Disabled by default because Enter can
@@ -444,10 +502,7 @@ colour = "#112233"
             config.input.enabled_profiles().unwrap(),
             [InputProfile::Glove80]
         );
-        assert_eq!(
-            config.outputs.enabled_adapters().unwrap(),
-            [OutputAdapter::Glove80Usb]
-        );
+        assert_eq!(config.outputs.adapters, [OutputAdapter::Glove80Usb]);
         assert!(!config.actions.confirm.enabled);
         assert_eq!(config.actions.confirm.repeat_press_ms, 750);
         assert_eq!(config.actions.confirm.keys, ["enter"]);
@@ -464,7 +519,8 @@ adapters = []
         )
         .unwrap();
 
-        assert!(config.outputs.enabled_adapters().unwrap().is_empty());
+        assert!(config.outputs.adapters.is_empty());
+        assert!(config.outputs.plugins.is_empty());
     }
 
     #[test]
@@ -477,9 +533,83 @@ adapters = ["glove80-usb", "glove80-usb"]
 "#,
         )
         .unwrap();
-        let error = config.outputs.enabled_adapters().unwrap_err();
+        let error = config.outputs.validate().unwrap_err();
 
         assert!(error.to_string().contains("duplicate adapter glove80-usb"));
+    }
+
+    #[test]
+    fn parses_process_display_plugin() {
+        let config = parse(
+            r#"
+config_version = 2
+[outputs]
+adapters = []
+
+[[outputs.plugins]]
+id = "status-log"
+command = ["/usr/bin/tee", "/tmp/beckon.ndjson"]
+"#,
+        )
+        .unwrap();
+
+        config.outputs.validate().unwrap();
+        assert_eq!(config.outputs.ids(), ["status-log"]);
+        assert_eq!(
+            config.outputs.plugins[0].command,
+            ["/usr/bin/tee", "/tmp/beckon.ndjson"]
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_or_colliding_process_display_plugins() {
+        for (contents, expected) in [
+            (
+                r#"
+config_version = 2
+[[outputs.plugins]]
+id = "Status Log"
+command = ["logger"]
+"#,
+                "lowercase kebab-case",
+            ),
+            (
+                r#"
+config_version = 2
+[[outputs.plugins]]
+id = "glove80-usb"
+command = ["logger"]
+"#,
+                "duplicate id glove80-usb",
+            ),
+            (
+                r#"
+config_version = 2
+[outputs]
+adapters = []
+[[outputs.plugins]]
+id = "status-log"
+command = ["logger"]
+[[outputs.plugins]]
+id = "status-log"
+command = ["logger"]
+"#,
+                "duplicate id status-log",
+            ),
+            (
+                r#"
+config_version = 2
+[[outputs.plugins]]
+id = "status-log"
+command = []
+"#,
+                "must contain an executable",
+            ),
+        ] {
+            let config = parse(contents).unwrap();
+            let error = config.outputs.validate().unwrap_err();
+            assert!(error.to_string().contains(expected), "{error:#}");
+        }
     }
 
     #[test]
