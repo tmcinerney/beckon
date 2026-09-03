@@ -1,12 +1,16 @@
-//! Hardware-neutral display fan-out and built-in output adapters.
+//! Hardware-neutral display fan-out and output adapters.
+
+mod process;
 
 use anyhow::Result;
 
 use crate::{
-    config::OutputAdapter,
+    config::{OutputAdapter, OutputConfig},
     hid::{self, StatusWriter, UsbStatusWriter},
     render::RenderPlan,
 };
+
+use process::ProcessDisplay;
 
 /// Result of offering the current render plan to one display integration.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -21,7 +25,7 @@ pub enum PublishOutcome {
 
 /// One independently managed consumer of Beckon's hardware-neutral state.
 pub trait DisplaySink {
-    fn id(&self) -> &'static str;
+    fn id(&self) -> &str;
     fn publish(&mut self, plan: &RenderPlan) -> Result<PublishOutcome>;
 }
 
@@ -51,7 +55,7 @@ impl<W> DisplaySink for Glove80UsbDisplay<W>
 where
     W: StatusWriter,
 {
-    fn id(&self) -> &'static str {
+    fn id(&self) -> &str {
         OutputAdapter::Glove80Usb.name()
     }
 
@@ -70,7 +74,7 @@ where
 /// A newly reportable failure from one display integration.
 #[derive(Debug, PartialEq, Eq)]
 pub struct DisplayFailure {
-    pub adapter: &'static str,
+    pub adapter: String,
     pub message: String,
 }
 
@@ -89,8 +93,10 @@ pub struct DisplaySet {
 }
 
 impl DisplaySet {
-    pub fn from_adapters(adapters: &[OutputAdapter]) -> Self {
-        let sinks = adapters
+    pub fn from_config(config: &OutputConfig) -> Result<Self> {
+        config.validate()?;
+        let mut sinks = config
+            .adapters
             .iter()
             .map(|adapter| match adapter {
                 OutputAdapter::Glove80Usb => {
@@ -101,8 +107,14 @@ impl DisplaySet {
                 sink,
                 last_error: None,
             })
-            .collect();
-        Self { sinks }
+            .collect::<Vec<_>>();
+        for plugin in &config.plugins {
+            sinks.push(ManagedSink {
+                sink: Box::new(ProcessDisplay::new(plugin.clone())?),
+                last_error: None,
+            });
+        }
+        Ok(Self { sinks })
     }
 
     #[cfg(test)]
@@ -128,7 +140,7 @@ impl DisplaySet {
                     let message = format!("{error:#}");
                     if managed.last_error.as_deref() != Some(message.as_str()) {
                         failures.push(DisplayFailure {
-                            adapter: managed.sink.id(),
+                            adapter: managed.sink.id().to_string(),
                             message: message.clone(),
                         });
                         managed.last_error = Some(message);
@@ -154,7 +166,7 @@ mod tests {
     }
 
     impl DisplaySink for FakeSink {
-        fn id(&self) -> &'static str {
+        fn id(&self) -> &str {
             self.id
         }
 

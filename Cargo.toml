@@ -17,3 +17,4 @@ tao = "0.30"
 toml = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tokio = { version = "1", features = ["io-util", "macros", "process", "rt", "sync", "time"] }

@@ -514,8 +514,8 @@ fn daemon() -> Result<()> {
     // AIDEV-NOTE: macOS requires global-hotkey and Tao's event loop on the main
     // thread. Socket polling keeps binding mutation serialized in this daemon.
     let herdr = LivePaneDirectory::start()?;
-    let output_adapters = config.outputs.enabled_adapters()?;
-    let mut displays = DisplaySet::from_adapters(output_adapters);
+    let output_ids = config.outputs.ids();
+    let mut displays = DisplaySet::from_config(&config.outputs)?;
     let mut last_render_error = None;
     let mut presentation = PresentationPublisher::default();
     let mut last_presentation_error = None;
@@ -526,11 +526,7 @@ fn daemon() -> Result<()> {
     info!(profiles = %input_diagnostic(&input_profiles), socket = %path.display(), "daemon registered input shortcuts");
     eprintln!("beckond inputs: {}", input_diagnostic(&input_profiles));
     info!(
-        adapters = %output_adapters
-            .iter()
-            .map(|adapter| adapter.name())
-            .collect::<Vec<_>>()
-            .join(", "),
+        outputs = %output_ids.join(", "),
         "daemon configured display outputs"
     );
     let receiver = GlobalHotKeyEvent::receiver();
