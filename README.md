@@ -1,7 +1,9 @@
 # Beckon
 
-Beckon binds selected Herdr agent panes to Glove80 keys for glanceable state
-and direct navigation.
+Beckon binds selected Herdr agent panes to logical navigation keys and sends
+their state to optional display integrations. Its current inputs support a
+Glove80 and a MacBook function row; its first display integration adds
+glanceable per-key state to a wired Glove80.
 
 Licensed under the [MIT License](LICENSE).
 
@@ -16,8 +18,8 @@ The current executable has the manual registration foundation:
   clears F2 from anywhere.
 - `beckon status` shows bindings and their current Herdr pane data.
 - `beckon listen-keys` records the ten Beckon-layer key events.
-- `beckond` renders its live Herdr pane cache to the wired Glove80 status
-  endpoint, retrying automatically after a keyboard reconnect.
+- `beckond` renders its live Herdr pane cache to zero or more independent
+  display adapters. The optional Glove80 USB adapter reconnects automatically.
 - `beckon preview` shows the declarative LED plan without writing keyboard HID
   frames; `beckon preview --all-states` shows every supported state treatment.
 
@@ -52,6 +54,33 @@ logical bindings, so F1 on either keyboard focuses the pane bound to F1. Both
 sources use macOS global shortcuts, so either works across apps, OmniWM spaces,
 and a plugged-in desktop setup without switching modes.
 
+## Optional display integrations
+
+Inputs and displays are independent. The compatibility default enables the
+wired Glove80 LED adapter when the `[outputs]` section is absent:
+
+```toml
+[outputs]
+adapters = ["glove80-usb"]
+```
+
+The adapter is optional at runtime. Unplugging the keyboard is an expected
+availability state: bindings, MacBook input, Herdr navigation, and other
+display adapters continue working, and reconnecting the keyboard restores LED
+updates. A navigation-only installation can explicitly select no displays:
+
+```toml
+[outputs]
+adapters = []
+```
+
+Each built-in display implements the same hardware-neutral `DisplaySink`
+boundary and receives a `RenderPlan`. Beckon fans out independently, so one
+failed output cannot block another output or navigation. New built-in adapters
+are added to the typed configuration registry. A future out-of-process plugin
+interface should use a versioned protocol rather than exposing an unstable
+Rust dynamic-library ABI.
+
 ## Declarative Nix configuration
 
 The bundled Home Manager module can render the configuration rather than
@@ -64,6 +93,7 @@ the fields you want to configure:
     enable = true;
     settings = {
       input.profiles = [ "glove80" "macbook-function-keys" ];
+      outputs.adapters = [ "glove80-usb" ];
       focus.command = [ "/Users/you/.config/beckon/focus-ghostty" ];
     };
   };

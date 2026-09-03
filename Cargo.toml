@@ -1,8 +1,8 @@
 [package]
 name = "beckon"
-version = "0.2.2"
+version = "0.2.3"
 edition = "2024"
-description = "Glove80 state display and Herdr pane navigation"
+description = "Herdr pane navigation and pluggable status displays"
 license = "MIT"
 publish = false
 

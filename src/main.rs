@@ -16,6 +16,7 @@ use beckon::{
         BindingService, BindingState, BindingStore, PaneDirectory, PanePresentation,
         PresentationTokenWrite, STATE_VERSION,
     },
+    display::DisplaySet,
     focus::{CommandFocus, FocusAdapter},
     herdr::{HerdrCli, LivePaneDirectory},
     hid::{self, Status, StatusSnapshot},
@@ -513,8 +514,9 @@ fn daemon() -> Result<()> {
     // AIDEV-NOTE: macOS requires global-hotkey and Tao's event loop on the main
     // thread. Socket polling keeps binding mutation serialized in this daemon.
     let herdr = LivePaneDirectory::start()?;
-    let mut display = hid::RenderSink::new(hid::UsbStatusWriter);
-    let mut last_display_error = None;
+    let output_adapters = config.outputs.enabled_adapters()?;
+    let mut displays = DisplaySet::from_adapters(output_adapters);
+    let mut last_render_error = None;
     let mut presentation = PresentationPublisher::default();
     let mut last_presentation_error = None;
     let event_loop = background_event_loop();
@@ -523,6 +525,14 @@ fn daemon() -> Result<()> {
     let input = register_input(&input_profiles, &manager)?;
     info!(profiles = %input_diagnostic(&input_profiles), socket = %path.display(), "daemon registered input shortcuts");
     eprintln!("beckond inputs: {}", input_diagnostic(&input_profiles));
+    info!(
+        adapters = %output_adapters
+            .iter()
+            .map(|adapter| adapter.name())
+            .collect::<Vec<_>>()
+            .join(", "),
+        "daemon configured display outputs"
+    );
     let receiver = GlobalHotKeyEvent::receiver();
     let mut confirm = RepeatPressConfirm::default();
     event_loop.run(move |_event, _, control_flow| {
@@ -533,13 +543,21 @@ fn daemon() -> Result<()> {
                 eprintln!("request failed: {error:#}");
             }
         }
-        match publish_display(&config, &herdr, &mut display) {
-            Ok(_) => last_display_error = None,
+        match publish_display(&config, &herdr, &mut displays) {
+            Ok(failures) => {
+                last_render_error = None;
+                for failure in failures {
+                    eprintln!(
+                        "update {} status display: {}",
+                        failure.adapter, failure.message
+                    );
+                }
+            }
             Err(error) => {
                 let error = format!("{error:#}");
-                if last_display_error.as_deref() != Some(error.as_str()) {
-                    eprintln!("update keyboard status display: {error}");
-                    last_display_error = Some(error);
+                if last_render_error.as_deref() != Some(error.as_str()) {
+                    eprintln!("render status display: {error}");
+                    last_render_error = Some(error);
                 }
             }
         }
@@ -689,14 +707,13 @@ impl PresentationPublisher {
 /// live pane cache, and send a new transport snapshot only when it matters.
 /// Binding reconciliation remains a CLI/request operation; polling it here
 /// would rewrite the state file and Herdr metadata on every event-loop tick.
-fn publish_display<D, W>(
+fn publish_display<D>(
     config: &config::Config,
     panes: &D,
-    display: &mut hid::RenderSink<W>,
-) -> Result<bool>
+    displays: &mut DisplaySet,
+) -> Result<Vec<beckon::display::DisplayFailure>>
 where
     D: PaneDirectory,
-    W: hid::StatusWriter,
 {
     let store = JsonBindingStore::from_environment();
     let state = store.load()?.unwrap_or(BindingState {
@@ -716,7 +733,7 @@ where
         })
         .collect::<Vec<_>>();
     let plan = beckon::render::render(&config.display, &bindings)?;
-    display.publish(&plan)
+    Ok(displays.publish(&plan))
 }
 
 fn handle_connection<D: PaneDirectory>(mut stream: UnixStream, panes: &D) -> Result<()> {

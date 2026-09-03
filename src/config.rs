@@ -14,11 +14,66 @@ pub struct Config {
     #[serde(default)]
     pub input: InputConfig,
     #[serde(default)]
+    pub outputs: OutputConfig,
+    #[serde(default)]
     pub focus: FocusConfig,
     #[serde(default)]
     pub display: DisplayConfig,
     #[serde(default)]
     pub actions: ActionsConfig,
+}
+
+/// Built-in output integrations. The stable names form a configuration
+/// registry; they do not expose Beckon's Rust ABI to third-party code.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "kebab-case")]
+pub enum OutputAdapter {
+    Glove80Usb,
+}
+
+impl OutputAdapter {
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Glove80Usb => "glove80-usb",
+        }
+    }
+}
+
+/// Selects zero or more independently managed display outputs. An empty list
+/// is a valid Mac-only configuration; the compatibility default preserves the
+/// existing automatic Glove80 USB display behavior.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OutputConfig {
+    #[serde(default = "default_output_adapters")]
+    pub adapters: Vec<OutputAdapter>,
+}
+
+impl Default for OutputConfig {
+    fn default() -> Self {
+        Self {
+            adapters: default_output_adapters(),
+        }
+    }
+}
+
+impl OutputConfig {
+    pub fn enabled_adapters(&self) -> Result<&[OutputAdapter]> {
+        let mut seen = std::collections::BTreeSet::new();
+        for adapter in &self.adapters {
+            if !seen.insert(*adapter) {
+                bail!(
+                    "outputs.adapters contains duplicate adapter {}",
+                    adapter.name()
+                );
+            }
+        }
+        Ok(&self.adapters)
+    }
+}
+
+fn default_output_adapters() -> Vec<OutputAdapter> {
+    vec![OutputAdapter::Glove80Usb]
 }
 
 /// Selects the physical source that invokes Beckon's logical F1 through F10
@@ -212,6 +267,7 @@ impl ConfigV1 {
         Config {
             config_version: CONFIG_VERSION,
             input: InputConfig::default(),
+            outputs: OutputConfig::default(),
             focus: self.focus,
             display,
             actions: ActionsConfig::default(),
@@ -290,6 +346,7 @@ pub fn load() -> Result<Config> {
         bail!("actions.confirm.keys must contain one or more logical Herdr key names");
     }
     config.input.enabled_profiles()?;
+    config.outputs.enabled_adapters()?;
     config.display.validate()?;
     Ok(config)
 }
@@ -325,6 +382,12 @@ config_version = 2
 # need the normal macOS brightness, media, or volume behavior.
 # [input]
 # profiles = ["glove80", "macbook-function-keys"]
+
+# Select independent display outputs. The compatibility default is the
+# optional Glove80 USB LED adapter. Use an empty list for navigation without
+# any physical display; a disconnected optional adapter is not an error.
+# [outputs]
+# adapters = ["glove80-usb"]
 
 # Optional: repeat the same bound F key within this window after Beckon has
 # focused it to send Enter to that pane. Disabled by default because Enter can
@@ -381,9 +444,42 @@ colour = "#112233"
             config.input.enabled_profiles().unwrap(),
             [InputProfile::Glove80]
         );
+        assert_eq!(
+            config.outputs.enabled_adapters().unwrap(),
+            [OutputAdapter::Glove80Usb]
+        );
         assert!(!config.actions.confirm.enabled);
         assert_eq!(config.actions.confirm.repeat_press_ms, 750);
         assert_eq!(config.actions.confirm.keys, ["enter"]);
+    }
+
+    #[test]
+    fn allows_navigation_without_a_display_output() {
+        let config = parse(
+            r#"
+config_version = 2
+[outputs]
+adapters = []
+"#,
+        )
+        .unwrap();
+
+        assert!(config.outputs.enabled_adapters().unwrap().is_empty());
+    }
+
+    #[test]
+    fn rejects_duplicate_display_outputs() {
+        let config = parse(
+            r#"
+config_version = 2
+[outputs]
+adapters = ["glove80-usb", "glove80-usb"]
+"#,
+        )
+        .unwrap();
+        let error = config.outputs.enabled_adapters().unwrap_err();
+
+        assert!(error.to_string().contains("duplicate adapter glove80-usb"));
     }
 
     #[test]

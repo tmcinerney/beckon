@@ -39,13 +39,13 @@ impl FromStr for Rgb {
     fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
         let hex = value
             .strip_prefix('#')
-            .ok_or_else(|| "colour must use #RRGGBB syntax".to_string())?;
+            .ok_or_else(|| "color must use #RRGGBB syntax".to_string())?;
         if hex.len() != 6 {
-            return Err("colour must use #RRGGBB syntax".to_string());
+            return Err("color must use #RRGGBB syntax".to_string());
         }
         let byte = |range| {
             u8::from_str_radix(&hex[range], 16)
-                .map_err(|_| "colour must use #RRGGBB syntax".to_string())
+                .map_err(|_| "color must use #RRGGBB syntax".to_string())
         };
         Ok(Self {
             red: byte(0..2)?,
@@ -388,7 +388,7 @@ mod tests {
     }
 
     #[test]
-    fn blocked_overrides_the_key_colour() {
+    fn blocked_overrides_the_key_color() {
         let plan = render(
             &DisplayConfig::default(),
             &[(
