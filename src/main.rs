@@ -737,6 +737,7 @@ where
 }
 
 fn handle_connection<D: PaneDirectory>(mut stream: UnixStream, panes: &D) -> Result<()> {
+    configure_client_stream(&stream)?;
     let mut line = String::new();
     BufReader::new(stream.try_clone()?).read_line(&mut line)?;
     let response = match serde_json::from_str::<Request>(&line) {
@@ -751,6 +752,24 @@ fn handle_connection<D: PaneDirectory>(mut stream: UnixStream, panes: &D) -> Res
         },
     };
     writeln!(stream, "{}", serde_json::to_string(&response)?)?;
+    Ok(())
+}
+
+fn configure_client_stream(stream: &UnixStream) -> Result<()> {
+    // AIDEV-NOTE: The nonblocking listener yields nonblocking accepted streams
+    // on macOS. Large status responses otherwise stop at the socket buffer
+    // boundary with EAGAIN. Bound blocking I/O keeps responses atomic without
+    // allowing a stalled local client to freeze the main-thread event loop.
+    stream
+        .set_nonblocking(false)
+        .context("make accepted Beckon client socket blocking")?;
+    let timeout = Some(Duration::from_secs(1));
+    stream
+        .set_read_timeout(timeout)
+        .context("set Beckon client socket read timeout")?;
+    stream
+        .set_write_timeout(timeout)
+        .context("set Beckon client socket write timeout")?;
     Ok(())
 }
 
@@ -833,7 +852,7 @@ fn pane_is_focused<D: PaneDirectory>(panes: &D, pane_id: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::cell::RefCell;
+    use std::{cell::RefCell, thread};
 
     use super::*;
     use clap::CommandFactory;
@@ -1023,5 +1042,29 @@ mod tests {
             input_diagnostic(&[InputProfile::Glove80, InputProfile::MacbookFunctionKeys]),
             "glove80, macbook-function-keys"
         );
+    }
+
+    #[test]
+    fn writes_status_responses_larger_than_the_nonblocking_socket_buffer() {
+        let (mut server, client) = UnixStream::pair().unwrap();
+        server.set_nonblocking(true).unwrap();
+        let response = Response::Ok {
+            data: json!({"panes": "x".repeat(32 * 1024)}),
+        };
+
+        let writer = thread::spawn(move || -> Result<()> {
+            configure_client_stream(&server)?;
+            writeln!(server, "{}", serde_json::to_string(&response)?)?;
+            Ok(())
+        });
+        let mut line = String::new();
+        BufReader::new(client).read_line(&mut line).unwrap();
+
+        writer.join().unwrap().unwrap();
+        assert!(line.len() > 8192);
+        assert!(matches!(
+            serde_json::from_str::<Response>(&line).unwrap(),
+            Response::Ok { .. }
+        ));
     }
 }
