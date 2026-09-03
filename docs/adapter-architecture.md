@@ -1,4 +1,4 @@
-# Adapter architecture: logical Beckon keys
+# Adapter architecture: logical keys and pluggable integrations
 
 ## Decision
 
@@ -24,29 +24,34 @@ optional display sink.
 
 This is deliberately built-in adapter configuration, not a third-party Rust
 plugin ABI. A stable ABI would freeze error handling, lifecycle, and async/main
-thread behaviour before Beckon has a second independent hardware backend.
+thread behavior before Beckon has a second independent hardware backend.
 
-## Current seams and coupling
+Output integrations now have a typed in-process registry and a common
+`DisplaySink` lifecycle. This is the extension point for additional built-in
+hardware or software displays. An unavailable optional output is normal, an
+empty output set is valid, and failures are isolated and de-duplicated per
+adapter.
 
-The binding core is already mostly hardware-neutral:
+## Current seams
+
+The runtime is hardware-neutral through the core:
 
 - `core::BindingService` owns `f1`–`f10`, durable bindings, reconciliation,
   pane close cleanup, and only depends on `BindingStore` and `PaneDirectory`.
 - `render::render` produces a `RenderPlan` with logical keys and resolved
   colors, brightness, and motion. It has no HID coordinates.
-- `hid::RenderSink<W>` already isolates Glove80 report writing behind
-  `StatusWriter` and de-duplicates reconnect-safe snapshots.
+- `input` supplies built-in physical shortcut adapters to one central macOS
+  hotkey router.
+- `display::DisplaySet` fans the render plan out to configured `DisplaySink`
+  adapters and isolates their availability and failure state.
+- `display::Glove80UsbDisplay` adapts the hardware-neutral plan to the existing
+  `hid::RenderSink<W>`, which de-duplicates reconnect-safe snapshots.
+- `focus::FocusAdapter` isolates terminal/window activation from Herdr pane
+  navigation.
 
-The remaining coupling is in `main.rs`:
-
-- `beckon_hotkeys`, `register_hotkeys`, and `hotkey_description` hard-code the
-  Glove80 F16 profile.
-- The daemon constructs exactly one `hid::RenderSink<UsbStatusWriter>` and
-  calls it directly from `publish_display`.
-- `Config` has a `display` section but no input-source or display-sink
-  selection.
-- HID diagnostics and Glove80 vendor constants share the public `hid` module
-  with transport-neutral status semantics.
+The remaining Glove80 coupling is confined to the built-in input profile, USB
+display adapter, and explicit `beckon hid` diagnostics. The binding ledger and
+Herdr integration do not depend on any of them.
 
 ## Minimal module shape
 
@@ -55,15 +60,12 @@ until a second independently packaged backend exists.
 
 ```text
 src/
-  core.rs                 # BindingService, PaneDirectory, KeyId
-  navigation.rs           # activation/focus/repeat-press policy
+  core.rs                 # BindingService, PaneDirectory, logical f1-f10
+  input.rs                # built-in profiles and central hotkey router
+  display.rs              # DisplaySink registry and failure-isolated fan-out
+  focus.rs                # terminal/window activation adapter
   render.rs               # RenderPlan and themes
-  adapters/
-    input.rs              # InputProfile -> logical hotkey registrations
-    macos_hotkeys.rs      # one manager/router, main-thread event integration
-    display.rs            # DisplaySink fan-out boundary
-    glove80.rs            # Glove80 profile + USB HID display adapter
-  hid.rs                  # protocol implementation, private to glove80 adapter
+  hid.rs                  # Glove80 USB protocol and explicit diagnostics
 ```
 
 `KeyId` should become a validated logical newtype or enum while continuing to
@@ -71,23 +73,14 @@ serialize as the existing lowercase strings. That keeps CLI, state-file, and
 Herdr-token compatibility (`fkey=f3`) while preventing adapters from inventing
 unknown slots.
 
-Suggested boundaries:
+The display boundary is:
 
 ```rust
 pub trait DisplaySink {
     fn id(&self) -> &'static str;
-    fn publish(&mut self, plan: &RenderPlan) -> anyhow::Result<bool>;
+    fn publish(&mut self, plan: &RenderPlan) -> anyhow::Result<PublishOutcome>;
 }
 
-pub struct InputRegistration {
-    pub source_id: String,
-    pub hotkey: HotKeySpec,
-    pub key: KeyId,
-}
-
-pub trait InputProfile {
-    fn registrations(&self) -> anyhow::Result<Vec<InputRegistration>>;
-}
 ```
 
 `MacosHotkeyRouter`, not each profile, owns `GlobalHotKeyManager`, the global
@@ -113,7 +106,7 @@ The initial implementation keeps config version 2 and adds a plural
 desktop Glove80 and mobile MacBook remain active simultaneously.
 
 ```toml
-# Default: exact current Glove80 navigation behaviour.
+# Default: exact current Glove80 navigation behavior.
 [input]
 profiles = ["glove80"]
 
@@ -139,6 +132,22 @@ without a connected display, and `macbook-function-keys` may be enabled
 alongside it. The existing `beckon hid` diagnostic commands remain explicitly
 Glove80-specific.
 
+```toml
+# Compatibility default when this section is absent.
+[outputs]
+adapters = ["glove80-usb"]
+
+# For a navigation-only configuration, replace the value with:
+# adapters = []
+```
+
+Adapter names are a stable configuration registry, not Rust symbols. Unknown
+or duplicate names fail configuration validation. Additional built-in sinks
+can be registered without changing the core binding or navigation services.
+If external integrations become useful, prefer a versioned child-process
+protocol such as NDJSON over dynamically loading a Rust ABI. That preserves
+crash isolation and allows adapters to be implemented in other languages.
+
 ## Migration sequence
 
 1. Introduce `KeyId` and convert core/render/HID slot conversion without
@@ -152,12 +161,12 @@ Glove80-specific.
    adapter.
 5. Add the MacBook F1–F10 profile. Preflight all registrations, then register
    them as one set. Keep the current Glove80 profile byte-for-byte equivalent.
-6. Wrap the existing `hid::RenderSink<UsbStatusWriter>` in `DisplaySink` and
-   make daemon rendering fan out to the enabled `DisplaySet`. No display is a
-   supported mode.
+6. **Implemented:** wrap the existing `hid::RenderSink<UsbStatusWriter>` in
+   `DisplaySink` and make daemon rendering fan out to the enabled `DisplaySet`.
+   No display is a supported mode.
 7. Move Glove80-specific constants and CLI diagnostics under the Glove80
    adapter module. Optionally make `hidapi` a `glove80-hid` Cargo feature after
-   the behaviour refactor is stable; this is packaging cleanup, not a blocker
+   the behavior refactor is stable; this is packaging cleanup, not a blocker
    for MacBook input-only support.
 
 ## Collision and lifecycle rules

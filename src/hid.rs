@@ -5,6 +5,7 @@
 
 use std::{
     collections::BTreeMap,
+    error::Error,
     ffi::CStr,
     fmt,
     str::FromStr,
@@ -27,6 +28,28 @@ pub const REPORT_SIZE: usize = 32;
 pub const SLOT_COUNT: usize = 10;
 pub const PROTOCOL_VERSION: u8 = 2;
 const SNAPSHOT_MESSAGE_TYPE: u8 = 1;
+
+/// Expected device-lifecycle condition used by optional display adapters.
+///
+/// Keeping this typed lets the daemon distinguish an unplugged keyboard from
+/// malformed reports and HID failures without matching human-readable text.
+#[derive(Debug)]
+pub(crate) struct StatusEndpointUnavailable;
+
+impl fmt::Display for StatusEndpointUnavailable {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "no Beckon USB status endpoint found (expected {GLOVE80_VENDOR_ID:04X}:{GLOVE80_PRODUCT_ID:04X}, usage page 0x{VENDOR_USAGE_PAGE:04X}, usage 0x{STATUS_USAGE:04X})"
+        )
+    }
+}
+
+impl Error for StatusEndpointUnavailable {}
+
+pub(crate) fn is_status_endpoint_unavailable(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<StatusEndpointUnavailable>().is_some()
+}
 
 /// A state value defined by Beckon status transport v1.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -371,9 +394,7 @@ pub fn open() -> Result<HidDevice> {
         .filter(|info| is_status_endpoint(info))
         .collect::<Vec<_>>();
     match endpoints.as_slice() {
-        [] => bail!(
-            "no Beckon USB status endpoint found (expected {GLOVE80_VENDOR_ID:04X}:{GLOVE80_PRODUCT_ID:04X}, usage page 0x{VENDOR_USAGE_PAGE:04X}, usage 0x{STATUS_USAGE:04X})"
-        ),
+        [] => Err(StatusEndpointUnavailable.into()),
         [endpoint] => api
             .open_path(endpoint.path())
             .context("open Beckon USB status endpoint"),
@@ -392,9 +413,7 @@ pub fn probe() -> Result<Endpoint> {
         .filter(|info| is_status_endpoint(info))
         .collect::<Vec<_>>();
     match endpoints.as_slice() {
-        [] => bail!(
-            "no Beckon USB status endpoint found (expected {GLOVE80_VENDOR_ID:04X}:{GLOVE80_PRODUCT_ID:04X}, usage page 0x{VENDOR_USAGE_PAGE:04X}, usage 0x{STATUS_USAGE:04X})"
-        ),
+        [] => Err(StatusEndpointUnavailable.into()),
         [endpoint] => {
             api.open_path(endpoint.path())
                 .context("open Beckon USB status endpoint")?;

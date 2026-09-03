@@ -55,6 +55,7 @@ in
             "glove80"
             "macbook-function-keys"
           ];
+          outputs.adapters = [ "glove80-usb" ];
           focus.command = [ "/Users/you/.config/beckon/focus-ghostty" ];
         };
         description = ''

@@ -1,6 +1,7 @@
 pub mod action;
 pub mod config;
 pub mod core;
+pub mod display;
 pub mod focus;
 pub mod herdr;
 pub mod hid;
