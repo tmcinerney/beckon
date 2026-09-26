@@ -337,15 +337,12 @@ mod tests {
 
         store
             .0
-            .record(record("ghostty-applescript", "agent-workspace"))
+            .record(record("ghostty", "agent-workspace"))
             .unwrap();
+        store.0.record(record("ghostty", "default")).unwrap();
         store
             .0
-            .record(record("ghostty-applescript", "default"))
-            .unwrap();
-        store
-            .0
-            .record(record("ghostty-applescript", "agent-workspace"))
+            .record(record("ghostty", "agent-workspace"))
             .unwrap();
 
         let state = store.0.load().unwrap();
@@ -364,7 +361,7 @@ mod tests {
         let error = store
             .0
             .record(SurfaceRecord {
-                backend: "ghostty-applescript".into(),
+                backend: "ghostty".into(),
                 session: "default".into(),
                 handle: SurfaceHandle::new("  "),
             })
@@ -382,9 +379,9 @@ mod tests {
         let store = TestStore::new();
         store
             .0
-            .record(record("ghostty-applescript", "agent-workspace"))
+            .record(record("ghostty", "agent-workspace"))
             .unwrap();
-        let backend = FakeBackend::new("ghostty-applescript");
+        let backend = FakeBackend::new("ghostty");
         let link = TerminalLink::new(Box::new(backend), store.0.clone());
 
         assert_eq!(link.raise_for_session("default").unwrap(), None);
@@ -398,10 +395,7 @@ mod tests {
     fn a_changed_backend_or_stale_handle_degrades_without_guessing() {
         let store = TestStore::new();
         store.0.record(record("other-backend", "default")).unwrap();
-        let link = TerminalLink::new(
-            Box::new(FakeBackend::new("ghostty-applescript")),
-            store.0.clone(),
-        );
+        let link = TerminalLink::new(Box::new(FakeBackend::new("ghostty")), store.0.clone());
         let error = link.raise_for_session("default").unwrap_err();
         assert!(
             format!("{error:#}").contains("re-run `beckon adopt`"),
@@ -409,11 +403,8 @@ mod tests {
         );
 
         let store = TestStore::new();
-        store
-            .0
-            .record(record("ghostty-applescript", "default"))
-            .unwrap();
-        let mut backend = FakeBackend::new("ghostty-applescript");
+        store.0.record(record("ghostty", "default")).unwrap();
+        let mut backend = FakeBackend::new("ghostty");
         backend.fail_focus = true;
         let link = TerminalLink::new(Box::new(backend), store.0.clone());
         let error = link.raise_for_session("default").unwrap_err();

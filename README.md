@@ -66,7 +66,7 @@ before focusing the pane:
 ```toml
 [terminal]
 # "none" (default) keeps the focus command as the only surface mechanism.
-backend = "ghostty-applescript"
+backend = "ghostty"
 ```
 
 Adoption is explicit and machine-local — Beckon never infers which surface

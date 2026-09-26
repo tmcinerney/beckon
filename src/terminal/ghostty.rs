@@ -16,7 +16,7 @@ use serde::Deserialize;
 
 use super::{Surface, SurfaceHandle, TerminalBackend};
 
-pub const BACKEND_ID: &str = "ghostty-applescript";
+pub const BACKEND_ID: &str = "ghostty";
 
 /// Runs a JXA program and returns its stdout. Injectable so surface parsing and
 /// failure mapping are unit-testable without a live terminal.

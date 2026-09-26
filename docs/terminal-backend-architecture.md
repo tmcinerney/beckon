@@ -92,9 +92,15 @@ blocked navigation.
 ```toml
 [terminal]
 # "none" (default) keeps the pre-backend behavior: only [focus] command runs.
-# "ghostty-applescript" raises Ghostty windows/tabs by surface UUID.
+# "ghostty" raises Ghostty windows/tabs by surface UUID.
 backend = "none"
 ```
+
+Registry names identify the terminal *product*, never the mechanism: the
+scripting bridge, IPC socket, or CLI a backend happens to use is an
+implementation detail that can change without invalidating user configuration.
+The Ghostty backend's mechanism (its scripting dictionary through `osascript`)
+is documented in `src/terminal/ghostty.rs`.
 
 `surfaces.json` in the Beckon state directory:
 
@@ -103,7 +109,7 @@ backend = "none"
   "version": 1,
   "surfaces": [
     {
-      "backend": "ghostty-applescript",
+      "backend": "ghostty",
       "session": "agent-workspace",
       "handle": "BBD9B110-3F60-43A3-8C32-50A4D56F240E"
     }

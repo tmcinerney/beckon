@@ -45,7 +45,7 @@ pub enum TerminalBackendKind {
     #[default]
     None,
     /// Ghostty >= 1.3 through its scripting dictionary.
-    #[serde(rename = "ghostty-applescript")]
+    #[serde(rename = "ghostty")]
     GhosttyAppleScript,
 }
 
@@ -53,7 +53,7 @@ impl TerminalBackendKind {
     pub const fn name(self) -> &'static str {
         match self {
             Self::None => "none",
-            Self::GhosttyAppleScript => "ghostty-applescript",
+            Self::GhosttyAppleScript => "ghostty",
         }
     }
 }
@@ -579,7 +579,7 @@ config_version = 2
 # directory. Defaults to "none", which keeps the focus command as the only
 # surface mechanism.
 # [terminal]
-# backend = "ghostty-applescript"
+# backend = "ghostty"
 
 
 # Select independent display outputs. The compatibility default is the
@@ -922,7 +922,7 @@ sessions = ["  "]
             r#"
 config_version = 2
 [terminal]
-backend = "ghostty-applescript"
+backend = "ghostty"
 "#,
         )
         .unwrap();
@@ -930,7 +930,7 @@ backend = "ghostty-applescript"
             ghostty.terminal.backend,
             TerminalBackendKind::GhosttyAppleScript
         );
-        assert_eq!(ghostty.terminal.backend.name(), "ghostty-applescript");
+        assert_eq!(ghostty.terminal.backend.name(), "ghostty");
     }
 
     #[test]
