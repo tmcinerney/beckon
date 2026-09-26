@@ -1,8 +1,49 @@
-use std::{env, fs, os::unix::fs::PermissionsExt, path::PathBuf};
+use std::{
+    env, fs,
+    os::unix::fs::PermissionsExt,
+    path::{Path, PathBuf},
+};
 
 use anyhow::{Context, Result, bail};
+use serde::Serialize;
 
 use crate::core::{BindingState, BindingStore, STATE_VERSION, validate_bindings};
+
+/// Beckon's machine-local state directory. It holds files that describe this
+/// machine's current facts (the binding ledger, adopted terminal surfaces),
+/// as opposed to the declarative configuration and its rendered themes.
+pub fn state_directory() -> PathBuf {
+    env::var_os("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/state")))
+        .unwrap_or_else(env::temp_dir)
+        .join("beckon")
+}
+
+/// Atomically write a private JSON state file: 0700 directory, 0600 file, a
+/// temporary sibling, and a rename into place. State files are written only by
+/// the component that owns them (the daemon for the ledger, the explicit
+/// commands for adopted surfaces).
+pub fn save_private_json<T>(path: &Path, value: &T) -> Result<()>
+where
+    T: ?Sized + Serialize,
+{
+    let directory = path.parent().expect("state file path has a parent");
+    fs::create_dir_all(directory).with_context(|| format!("create {}", directory.display()))?;
+    fs::set_permissions(directory, fs::Permissions::from_mode(0o700))
+        .with_context(|| format!("protect {}", directory.display()))?;
+    let file_name = path
+        .file_name()
+        .expect("state file path has a file name")
+        .to_string_lossy();
+    let temporary = directory.join(format!(".{file_name}.{}.tmp", std::process::id()));
+    fs::write(&temporary, serde_json::to_vec_pretty(value)?)
+        .with_context(|| format!("write {}", temporary.display()))?;
+    fs::rename(&temporary, path).with_context(|| format!("replace {}", path.display()))?;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+        .with_context(|| format!("protect {}", path.display()))?;
+    Ok(())
+}
 
 pub struct JsonBindingStore {
     path: PathBuf,
@@ -10,13 +51,8 @@ pub struct JsonBindingStore {
 
 impl JsonBindingStore {
     pub fn from_environment() -> Self {
-        let directory = env::var_os("XDG_STATE_HOME")
-            .map(PathBuf::from)
-            .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/state")))
-            .unwrap_or_else(env::temp_dir)
-            .join("beckon");
         Self {
-            path: directory.join("bindings.json"),
+            path: state_directory().join("bindings.json"),
         }
     }
 
@@ -57,17 +93,7 @@ impl BindingStore for JsonBindingStore {
     fn save(&self, state: &BindingState) -> Result<()> {
         validate_bindings(&state.bindings)?;
         self.ensure_directory()?;
-        let temporary = self
-            .directory()
-            .join(format!(".bindings-{}.tmp", std::process::id()));
-        let contents = serde_json::to_vec_pretty(state)?;
-        fs::write(&temporary, contents)
-            .with_context(|| format!("write {}", temporary.display()))?;
-        fs::rename(&temporary, &self.path)
-            .with_context(|| format!("replace {}", self.path.display()))?;
-        fs::set_permissions(&self.path, fs::Permissions::from_mode(0o600))
-            .with_context(|| format!("protect {}", self.path.display()))?;
-        Ok(())
+        save_private_json(&self.path, state)
     }
 }
 

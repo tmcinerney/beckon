@@ -57,6 +57,16 @@ The remaining Glove80 coupling is confined to the built-in input profile, USB
 display adapter, and explicit `beckon hid` diagnostics. The binding ledger and
 Herdr integration do not depend on any of them.
 
+### Terminal backends and sessions
+
+Session-qualified pane identity and the terminal surface control plane have
+their own decision record in
+[terminal-backend-architecture.md](terminal-backend-architecture.md). In short:
+pane identity is the `(session, pane_id)` pair, sessions are discovered and
+routed behind a generic `SessionRouter`, and raising the terminal surface that
+displays a session is a pluggable backend with an explicitly adopted,
+machine-local handle store. No component matches titles or infers layouts.
+
 ## Minimal module shape
 
 Keep the existing crate for this increment. A workspace split is unnecessary

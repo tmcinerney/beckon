@@ -17,7 +17,7 @@ use beckon::{
         PresentationTokenWrite, STATE_VERSION,
     },
     display::DisplaySet,
-    focus::{CommandFocus, FocusAdapter},
+    focus::{CommandFocus, FocusAdapter, FocusContext},
     herdr::{HerdrCli, LivePaneDirectory, discover_sessions},
     hid::{self, Status, StatusSnapshot},
     input::{
@@ -26,6 +26,7 @@ use beckon::{
     },
     session::SessionRouter,
     state::JsonBindingStore,
+    terminal::{self, SurfaceHandle, SurfaceRecord, TerminalLink},
 };
 use clap::{Args, Parser, Subcommand};
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager};
@@ -107,6 +108,30 @@ does not close a pane or control an agent."
     Release(ReleaseArgs),
     /// Print every live Herdr pane with its resolved title and Beckon binding.
     Status,
+    /// List the terminal surfaces the configured backend can see.
+    #[command(
+        long_about = "List the terminal surfaces the configured [terminal] backend can see, marking
+\
+adopted ones. This is read-only: Beckon never infers which surface displays
+\
+which session."
+    )]
+    Terminals(TerminalsArgs),
+    /// Record which terminal surface displays a Herdr session.
+    #[command(
+        long_about = "Explicitly record that one terminal surface (from `beckon terminals`)\n\
+displays one Herdr session. Beckon raises that surface before focusing a bound\n\
+pane in the session. The record lives in the state directory, not in\n\
+configuration, and is only ever changed by this command or `beckon forget`."
+    )]
+    Adopt(AdoptArgs),
+    /// Remove an adopted terminal surface for a session.
+    #[command(
+        long_about = "Remove the adopted surface record for one session. This works without\n\
+a configured backend so it can clean up stale records even after the terminal\n\
+setup changed."
+    )]
+    Forget(ForgetArgs),
     /// Print the hardware-neutral LED plan. This does not write to a keyboard.
     Preview(PreviewArgs),
     /// Inspect or explicitly test the USB-only Beckon status endpoint.
@@ -168,6 +193,30 @@ struct PreviewArgs {
     /// Emit the render plan as JSON.
     #[arg(long)]
     json: bool,
+}
+
+#[derive(Args)]
+struct TerminalsArgs {
+    /// Emit surfaces as JSON for scripts.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Args)]
+struct AdoptArgs {
+    /// Herdr session whose surface this is.
+    #[arg(long)]
+    session: String,
+    /// Surface handle exactly as printed by `beckon terminals`.
+    #[arg(long)]
+    terminal: String,
+}
+
+#[derive(Args)]
+struct ForgetArgs {
+    /// Herdr session whose surface record should be removed.
+    #[arg(long)]
+    session: String,
 }
 
 #[derive(Subcommand)]
@@ -258,6 +307,9 @@ fn main() -> Result<()> {
             }),
         },
         CommandLine::Status => client(Request::Status),
+        CommandLine::Terminals(args) => terminals_command(args),
+        CommandLine::Adopt(args) => adopt_command(args),
+        CommandLine::Forget(args) => forget_command(args),
         CommandLine::Preview(args) => preview(args),
         CommandLine::Hid { command } => hid_command(command),
         CommandLine::ListenKeys => listen_keys(),
@@ -379,6 +431,112 @@ fn preview(args: PreviewArgs) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// List the terminal surfaces the configured backend can see, marking adopted
+/// ones. Read-only: adoption is always an explicit `beckon adopt`.
+fn terminals_command(args: TerminalsArgs) -> Result<()> {
+    let config = config::load()?;
+    let link = terminal_link(&config)?;
+    let surfaces = link.backend().list_surfaces()?;
+    let adopted = link
+        .store()
+        .load()?
+        .surfaces
+        .into_iter()
+        .map(|record| (record.handle, record.session))
+        .collect::<BTreeMap<_, _>>();
+    if args.json {
+        let entries = surfaces
+            .iter()
+            .map(|surface| {
+                json!({
+                    "handle": surface.handle.as_str(),
+                    "title": surface.title,
+                    "window": surface.window,
+                    "tab": surface.tab,
+                    "adopted_session": adopted.get(&surface.handle),
+                })
+            })
+            .collect::<Vec<_>>();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "backend": link.backend().id(),
+                "surfaces": entries,
+            }))?
+        );
+        return Ok(());
+    }
+    if surfaces.is_empty() {
+        println!("backend {} lists no terminal surfaces", link.backend().id());
+        return Ok(());
+    }
+    for surface in surfaces {
+        let adopted = adopted
+            .get(&surface.handle)
+            .map(|session| format!(" (session {session})"))
+            .unwrap_or_default();
+        println!(
+            "{}\t{}{}\t{}/{}",
+            surface.handle, surface.title, adopted, surface.window, surface.tab
+        );
+    }
+    Ok(())
+}
+
+/// Record an explicit session-to-surface association. The handle must be
+/// currently listed, so typos and stale handles cannot be adopted silently.
+fn adopt_command(args: AdoptArgs) -> Result<()> {
+    let config = config::load()?;
+    let link = terminal_link(&config)?;
+    let handle = SurfaceHandle::new(&args.terminal);
+    let surfaces = link.backend().list_surfaces()?;
+    if !surfaces.iter().any(|surface| surface.handle == handle) {
+        let known = surfaces
+            .iter()
+            .map(|surface| surface.handle.as_str())
+            .collect::<Vec<_>>();
+        let known = if known.is_empty() {
+            "none currently listed".to_string()
+        } else {
+            known.join(", ")
+        };
+        bail!(
+            "backend {} does not list surface {}; `beckon terminals` shows: {known}",
+            link.backend().id(),
+            handle
+        );
+    }
+    link.store().record(SurfaceRecord {
+        backend: link.backend().id().to_string(),
+        session: args.session.clone(),
+        handle: handle.clone(),
+    })?;
+    println!("adopted {handle} for session {}", args.session);
+    Ok(())
+}
+
+/// Remove an adopted record. Deliberately independent of the configured
+/// backend: cleanup must work even after the terminal setup changed.
+fn forget_command(args: ForgetArgs) -> Result<()> {
+    let store = terminal::SurfaceStore::from_environment();
+    if store.forget(&args.session)? {
+        println!("forgot the adopted surface for session {}", args.session);
+    } else {
+        println!("no adopted surface for session {}", args.session);
+    }
+    Ok(())
+}
+
+fn terminal_link(config: &config::Config) -> Result<TerminalLink> {
+    match terminal::from_config(&config.terminal)? {
+        Some(link) => Ok(link),
+        None => bail!(
+            "no terminal backend is configured; set [terminal] backend in {}",
+            config::path().display()
+        ),
+    }
 }
 
 fn listen_keys() -> Result<()> {
@@ -534,6 +692,13 @@ fn daemon() -> Result<()> {
         sessions = %herdr.sessions().collect::<Vec<_>>().join(", "),
         "daemon discovered Herdr sessions"
     );
+    let terminal = terminal::from_config(&config.terminal)?;
+    if let Some(link) = &terminal {
+        info!(
+            backend = link.backend().id(),
+            "terminal surface backend configured"
+        );
+    }
     let output_ids = config.outputs.ids();
     let mut displays = DisplaySet::from_config(&config.outputs)?;
     let mut last_render_error = None;
@@ -637,7 +802,7 @@ fn daemon() -> Result<()> {
                         }
                     }
                 } else {
-                    match focus_key(key, &config, &herdr) {
+                    match focus_key(key, &config, &herdr, terminal.as_ref()) {
                         Ok(()) => {
                             info!(key, "navigation completed");
                             if config.actions.confirm.enabled
@@ -934,12 +1099,36 @@ fn cli_directories(config: &config::Config) -> Result<SessionRouter<HerdrCli>> {
     Ok(SessionRouter::new(directories))
 }
 
-fn focus_key<D: PaneDirectory>(key: &str, config: &config::Config, panes: &D) -> Result<()> {
+fn focus_key<D: PaneDirectory>(
+    key: &str,
+    config: &config::Config,
+    panes: &D,
+    terminal: Option<&TerminalLink>,
+) -> Result<()> {
     let span = info_span!("focus_bound_pane", key);
     let _entered = span.enter();
     let pane = pane_for_key(key, panes)?;
     info!(session = %pane.session, pane_id = %pane.pane_id, "resolved bound pane");
-    CommandFocus::new(&config.focus).focus_terminal()?;
+    // Raising the adopted surface is best effort: a missing record, a changed
+    // backend, or a stale handle warns and degrades to command + pane focus.
+    // Beckon never guesses a replacement surface.
+    let mut raised = None;
+    if let Some(link) = terminal {
+        match link.raise_for_session(&pane.session) {
+            Ok(outcome) => raised = outcome,
+            Err(error) => {
+                let error = format!("{error:#}");
+                warn!(session = %pane.session, error = %error, "adopted terminal surface not raised");
+                eprintln!("focus {key}: {error}");
+            }
+        }
+    }
+    let context = FocusContext {
+        key,
+        pane: &pane,
+        terminal_handle: raised.as_ref(),
+    };
+    CommandFocus::new(&config.focus).focus_terminal(&context)?;
     info!("terminal focus integration completed");
     debug!(pane = %pane, "requesting Herdr pane focus");
     panes.focus_pane(&pane)?;

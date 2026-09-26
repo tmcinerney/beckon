@@ -56,6 +56,43 @@ The `BECKON_HERDR_SOCKET` environment variable still overrides the socket for
 tests and one-off runs; `BECKON_HERDR_SESSIONS_DIR` overrides the discovery
 directory.
 
+## Terminal surface control
+
+Navigation focuses the Herdr pane first; whether the terminal *window or tab*
+displaying that session comes forward is a separate, explicitly configured
+capability. With a backend enabled, Beckon can raise the adopted surface
+before focusing the pane:
+
+```toml
+[terminal]
+# "none" (default) keeps the focus command as the only surface mechanism.
+backend = "ghostty-applescript"
+```
+
+Adoption is explicit and machine-local — Beckon never infers which surface
+displays which session, never repairs a stale handle, and never opens windows
+itself:
+
+```sh
+beckon terminals                      # list surfaces with opaque handles
+beckon adopt --session agent-workspace --terminal BBD9B110-…
+beckon forget --session agent-workspace
+```
+
+Adopted handles live in `surfaces.json` in the state directory (not in
+configuration, which Home Manager may render), and each record names the
+backend that produced it, so changing backends invalidates it honestly. A
+missing record, a stale handle, or a changed backend warns and continues to
+pane focus. Under launchd, the Ghostty backend needs an Automation (Apple
+Events) grant on first use.
+
+A keypress then runs, in order: the adopted surface raise, the `[focus]
+command`, and the Herdr pane focus. The command receives `BECKON_KEY`,
+`BECKON_PANE_ID`, `BECKON_HERDR_SESSION`, and `BECKON_TERMINAL_HANDLE` when a
+handle was raised, so machine-specific scripts can compose instead of guess.
+The design record is
+[docs/terminal-backend-architecture.md](docs/terminal-backend-architecture.md).
+
 ## Optional MacBook function-key input
 
 Beckon's logical slots (`f1` through `f10`) are separate from their physical
@@ -219,6 +256,10 @@ executable, then add this to `config.toml`:
 [focus]
 command = ["/Users/you/.config/beckon/focus-ghostty"]
 ```
+
+Ghostty users with several windows or tabs can instead adopt surfaces per
+session with the built-in terminal backend (see "Terminal surface control"
+above) and let the focus command handle only the remaining details.
 
 The script re-queries OmniWM on every press because its opaque window IDs are
 session-scoped. It uses `window navigate`, which brings Ghostty to its workspace

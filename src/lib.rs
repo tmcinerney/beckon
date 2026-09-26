@@ -11,3 +11,4 @@ pub mod pane_cache;
 pub mod render;
 pub mod session;
 pub mod state;
+pub mod terminal;

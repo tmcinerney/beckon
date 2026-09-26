@@ -23,6 +23,39 @@ pub struct Config {
     pub actions: ActionsConfig,
     #[serde(default)]
     pub herdr: HerdrConfig,
+    #[serde(default)]
+    pub terminal: TerminalConfig,
+}
+
+/// Terminal surface control. The backend is a stable registry name; adopted
+/// session-to-surface handles are explicit machine-local state and never part
+/// of configuration. See `docs/terminal-backend-architecture.md`.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TerminalConfig {
+    #[serde(default)]
+    pub backend: TerminalBackendKind,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum TerminalBackendKind {
+    /// No terminal control plane. The user's focus command remains the only
+    /// surface mechanism, matching pre-backend behavior.
+    #[default]
+    None,
+    /// Ghostty >= 1.3 through its scripting dictionary.
+    #[serde(rename = "ghostty-applescript")]
+    GhosttyAppleScript,
+}
+
+impl TerminalBackendKind {
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::GhosttyAppleScript => "ghostty-applescript",
+        }
+    }
 }
 
 /// Herdr topology: which server CLI to invoke, where the default session's
@@ -416,6 +449,7 @@ impl ConfigV1 {
             display,
             actions: ActionsConfig::default(),
             herdr: HerdrConfig::default(),
+            terminal: TerminalConfig::default(),
         }
     }
 }
@@ -537,6 +571,16 @@ config_version = 2
 # cli = "herdr"
 # socket = "/Users/you/.config/herdr/herdr.sock"
 # sessions = "auto"  # or ["default", "agent-workspace"]
+
+# Optional terminal surface control. With a backend configured, Beckon can
+# raise the window and tab displaying a bound session before it focuses the
+# pane. Adoption is explicit: `beckon terminals` lists surfaces and
+# `beckon adopt --session <name> --terminal <handle>` records one in the state
+# directory. Defaults to "none", which keeps the focus command as the only
+# surface mechanism.
+# [terminal]
+# backend = "ghostty-applescript"
+
 
 # Select independent display outputs. The compatibility default is the
 # optional Glove80 USB LED adapter. Use an empty list for navigation without
@@ -867,6 +911,35 @@ sessions = ["  "]
     #[test]
     fn herdr_rejects_unknown_keys() {
         assert!(parse("config_version = 2\n[herdr]\nunknown = 1\n").is_err());
+    }
+
+    #[test]
+    fn terminal_backend_defaults_to_none_and_accepts_registry_names() {
+        let default = parse("config_version = 2").unwrap();
+        assert_eq!(default.terminal.backend, TerminalBackendKind::None);
+
+        let ghostty = parse(
+            r#"
+config_version = 2
+[terminal]
+backend = "ghostty-applescript"
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            ghostty.terminal.backend,
+            TerminalBackendKind::GhosttyAppleScript
+        );
+        assert_eq!(ghostty.terminal.backend.name(), "ghostty-applescript");
+    }
+
+    #[test]
+    fn terminal_rejects_unknown_backends_and_keys() {
+        assert!(
+            parse("config_version = 2\n[terminal]\nbackend = \"tmux\"\n").is_err(),
+            "unregistered backend names must fail validation"
+        );
+        assert!(parse("config_version = 2\n[terminal]\nsurfaces = []\n").is_err());
     }
 
     #[test]
