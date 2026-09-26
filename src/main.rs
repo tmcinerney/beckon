@@ -13,17 +13,18 @@ use beckon::{
     action::RepeatPressConfirm,
     config::{self, InputProfile},
     core::{
-        BindingService, BindingState, BindingStore, PaneDirectory, PanePresentation,
+        BindingService, BindingState, BindingStore, PaneDirectory, PanePresentation, PaneRef,
         PresentationTokenWrite, STATE_VERSION,
     },
     display::DisplaySet,
     focus::{CommandFocus, FocusAdapter},
-    herdr::{HerdrCli, LivePaneDirectory},
+    herdr::{HerdrCli, LivePaneDirectory, discover_sessions},
     hid::{self, Status, StatusSnapshot},
     input::{
         Glove80HotkeyInput, InputAdapter, MacbookFunctionKeyInput, RegisteredInput,
         register_adapters,
     },
+    session::SessionRouter,
     state::JsonBindingStore,
 };
 use clap::{Args, Parser, Subcommand};
@@ -88,13 +89,18 @@ you are deliberately recovering or developing the service."
 Run this in the pane being registered, or provide `--pane <pane-id>`. Specify\n\
 `--key f1` through `--key f10` to choose a key. Omitting --key deliberately uses\n\
 the first available key, except that an already-bound pane keeps its existing\n\
-key. Beckon never auto-registers panes or agents."
+key. Beckon never auto-registers panes or agents.\n\
+\n\
+Beckon manages every live Herdr session it discovers. A pane that exists in\n\
+more than one session requires `--session <name>`; a unique pane ID resolves\n\
+on its own."
     )]
     Bind(BindArgs),
     /// Clear a pane's Beckon binding. Defaults to $HERDR_PANE_ID; --key works from any pane.
     #[command(
         long_about = "Remove a Beckon registration. Run this in the bound pane, provide\n\
 `--pane <pane-id>`, or use `--key f1` through `--key f10` from anywhere.\n\
+For a pane ID that exists in more than one Herdr session, add `--session`.\n\
 This changes only the local Beckon binding and the pane's visible fkey token; it\n\
 does not close a pane or control an agent."
     )]
@@ -136,6 +142,10 @@ struct BindArgs {
 struct PaneArgs {
     #[arg(long)]
     pane: Option<String>,
+    /// Herdr session owning the pane. Required only when the pane ID exists in
+    /// more than one session.
+    #[arg(long)]
+    session: Option<String>,
 }
 
 #[derive(Args)]
@@ -194,10 +204,14 @@ struct HidMalformedArgs {
 enum Request {
     Bind {
         pane_id: String,
+        #[serde(default)]
+        session: Option<String>,
         key: Option<String>,
     },
     ReleasePane {
         pane_id: String,
+        #[serde(default)]
+        session: Option<String>,
     },
     ReleaseKey {
         key: String,
@@ -227,6 +241,7 @@ fn main() -> Result<()> {
         CommandLine::Daemon => daemon(),
         CommandLine::Bind(args) => client(Request::Bind {
             pane_id: current_pane(args.pane.pane)?,
+            session: args.pane.session,
             key: args.key,
         }),
         CommandLine::Release(args) if args.all => client(Request::ReleaseAll),
@@ -239,6 +254,7 @@ fn main() -> Result<()> {
             }
             None => client(Request::ReleasePane {
                 pane_id: current_pane(args.pane.pane)?,
+                session: args.pane.session,
             }),
         },
         CommandLine::Status => client(Request::Status),
@@ -344,7 +360,7 @@ fn preview(args: PreviewArgs) -> Result<()> {
         beckon::render::all_state_examples(&config.display)?
     } else {
         let store = JsonBindingStore::from_environment();
-        let herdr = HerdrCli;
+        let herdr = cli_directories(&config)?;
         let bindings = BindingService::new(&store, &herdr);
         beckon::render::render(&config.display, &bindings.status()?)?
     };
@@ -513,7 +529,11 @@ fn daemon() -> Result<()> {
 
     // AIDEV-NOTE: macOS requires global-hotkey and Tao's event loop on the main
     // thread. Socket polling keeps binding mutation serialized in this daemon.
-    let herdr = LivePaneDirectory::start()?;
+    let herdr = live_directories(&config)?;
+    info!(
+        sessions = %herdr.sessions().collect::<Vec<_>>().join(", "),
+        "daemon discovered Herdr sessions"
+    );
     let output_ids = config.outputs.ids();
     let mut displays = DisplaySet::from_config(&config.outputs)?;
     let mut last_render_error = None;
@@ -584,8 +604,8 @@ fn daemon() -> Result<()> {
                 let now = Instant::now();
                 let target = pane_for_key(key, &herdr);
                 let confirmed = config.actions.confirm.enabled
-                    && target.as_ref().is_ok_and(|pane_id| {
-                        confirm.take_if_ready(key, pane_id, pane_is_focused(&herdr, pane_id), now)
+                    && target.as_ref().is_ok_and(|pane| {
+                        confirm.take_if_ready(key, pane, pane_is_focused(&herdr, pane), now)
                     });
                 if confirmed {
                     info!(key, "repeat press confirmed configured action");
@@ -596,7 +616,7 @@ fn daemon() -> Result<()> {
                         .iter()
                         .map(String::as_str)
                         .collect::<Vec<_>>();
-                    let result = target.and_then(|pane_id| herdr.send_keys(&pane_id, &keys));
+                    let result = target.and_then(|pane| herdr.send_keys(&pane, &keys));
                     match result {
                         Ok(()) => {
                             info!(key, "configured action completed");
@@ -621,11 +641,11 @@ fn daemon() -> Result<()> {
                         Ok(()) => {
                             info!(key, "navigation completed");
                             if config.actions.confirm.enabled
-                                && let Ok(pane_id) = target
+                                && let Ok(pane) = target
                             {
                                 confirm.arm(
                                     key,
-                                    &pane_id,
+                                    &pane,
                                     Duration::from_millis(config.actions.confirm.repeat_press_ms),
                                     now,
                                 );
@@ -652,8 +672,8 @@ fn daemon() -> Result<()> {
 }
 
 /// Publishes Beckon-owned sidebar tokens only when a pane appears or its
-/// binding changes. Pane IDs are immutable, so including them in the one
-/// update keeps the sidebar independent of missing-token fallbacks.
+/// binding changes. Pane references are immutable, so including them in the
+/// one update keeps the sidebar independent of missing-token fallbacks.
 #[derive(Default)]
 struct PresentationPublisher {
     published_bindings: BTreeMap<String, String>,
@@ -674,29 +694,35 @@ impl PresentationPublisher {
         let mut changed = false;
         let live = presentation
             .iter()
-            .map(|pane| pane.pane_id.as_str())
+            .map(|pane| pane_reference(pane).to_string())
             .collect::<std::collections::BTreeSet<_>>();
         self.published_bindings
-            .retain(|pane_id, _| live.contains(pane_id.as_str()));
+            .retain(|reference, _| live.contains(reference.as_str()));
         for pane in presentation {
-            if self.published_bindings.get(&pane.pane_id) == Some(&pane.binding) {
+            let reference = pane_reference(&pane);
+            let key = reference.to_string();
+            if self.published_bindings.get(&key) == Some(&pane.binding) {
                 continue;
             }
-            match panes.write_presentation_tokens(&pane.pane_id, &pane.binding)? {
+            match panes.write_presentation_tokens(&reference, &pane.binding)? {
                 PresentationTokenWrite::Written => {
-                    self.published_bindings.insert(pane.pane_id, pane.binding);
+                    self.published_bindings.insert(key, pane.binding);
                     changed = true;
                 }
                 PresentationTokenWrite::PaneGone => {
                     // A cache snapshot may briefly outlive a pane. Remember the
                     // definitive server response to avoid retrying on every
                     // event-loop tick; `retain` removes it after reconciliation.
-                    self.published_bindings.insert(pane.pane_id, pane.binding);
+                    self.published_bindings.insert(key, pane.binding);
                 }
             }
         }
         Ok(changed)
     }
+}
+
+fn pane_reference(pane: &PanePresentation) -> PaneRef {
+    PaneRef::new(pane.session.clone(), pane.pane_id.clone())
 }
 
 /// Read the durable binding ledger without mutating it, combine it with the
@@ -723,7 +749,7 @@ where
         .filter_map(|binding| {
             panes_by_id
                 .iter()
-                .find(|pane| pane.pane_id == binding.pane_id)
+                .find(|pane| pane.session == binding.session && pane.pane_id == binding.pane_id)
                 .cloned()
                 .map(|pane| (binding, pane))
         })
@@ -793,15 +819,30 @@ fn dispatch<D: PaneDirectory>(request: Request, panes: &D) -> Result<Value> {
     let store = JsonBindingStore::from_environment();
     let bindings = BindingService::new(&store, panes);
     match request {
-        Request::Bind { pane_id, key } => Ok(serde_json::to_value(
-            bindings.bind(&pane_id, key.as_deref())?,
-        )?),
-        Request::ReleasePane { pane_id } => {
-            Ok(json!({"pane_id": pane_id, "changed": bindings.release(&pane_id)?}))
+        Request::Bind {
+            pane_id,
+            session,
+            key,
+        } => {
+            let pane = resolve_pane(panes, session, &pane_id)?;
+            Ok(serde_json::to_value(bindings.bind(&pane, key.as_deref())?)?)
+        }
+        Request::ReleasePane { pane_id, session } => {
+            let pane = resolve_pane(panes, session, &pane_id)?;
+            Ok(json!({
+                "session": pane.session,
+                "pane_id": pane.pane_id,
+                "changed": bindings.release(&pane)?,
+            }))
         }
         Request::ReleaseKey { key } => {
-            let pane_id = bindings.release_key(&key)?;
-            Ok(json!({"key": key, "pane_id": pane_id, "changed": pane_id.is_some()}))
+            let released = bindings.release_key(&key)?;
+            Ok(json!({
+                "key": key,
+                "session": released.as_ref().map(|binding| binding.session.clone()),
+                "pane_id": released.as_ref().map(|binding| binding.pane_id.clone()),
+                "changed": released.is_some(),
+            }))
         }
         Request::ReleaseAll => {
             let released = bindings.release_all()?;
@@ -810,6 +851,7 @@ fn dispatch<D: PaneDirectory>(request: Request, panes: &D) -> Result<Value> {
         Request::Status => Ok(json!({
             "bindings": bindings.status()?.into_iter().map(|(binding, pane)| json!({
                 "key": binding.key,
+                "session": binding.session,
                 "pane": pane,
             })).collect::<Vec<_>>(),
             "panes": bindings.panes()?,
@@ -817,31 +859,108 @@ fn dispatch<D: PaneDirectory>(request: Request, panes: &D) -> Result<Value> {
     }
 }
 
+/// Resolve a client-supplied pane reference. Without an explicit `--session`,
+/// the pane ID must exist in exactly one managed session; ambiguity asks for
+/// `--session` instead of guessing.
+fn resolve_pane<D: PaneDirectory>(
+    panes: &D,
+    session: Option<String>,
+    pane_id: &str,
+) -> Result<PaneRef> {
+    if let Some(session) = session {
+        return Ok(PaneRef::new(session, pane_id));
+    }
+    let matches = panes
+        .panes()?
+        .into_iter()
+        .filter(|pane| pane.pane_id == pane_id)
+        .collect::<Vec<_>>();
+    match matches.as_slice() {
+        [] => bail!("pane {pane_id} no longer exists in any managed session"),
+        [pane] => Ok(pane.reference()),
+        many => {
+            let sessions = many
+                .iter()
+                .map(|pane| pane.session.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            bail!("pane {pane_id} exists in multiple sessions ({sessions}); retry with --session")
+        }
+    }
+}
+
+/// Build the live session router used by the daemon.
+fn live_directories(config: &config::Config) -> Result<SessionRouter<LivePaneDirectory>> {
+    let sessions = discover_sessions(
+        config.herdr.socket.as_deref(),
+        config.herdr.allowed_sessions(),
+    );
+    if sessions.is_empty() {
+        bail!("no reachable Herdr sessions; start Herdr or check the [herdr] configuration");
+    }
+    let mut directories = std::collections::BTreeMap::new();
+    for session in sessions {
+        match LivePaneDirectory::start(session.clone(), &config.herdr.cli) {
+            Ok(directory) => {
+                directories.insert(session.name.clone(), directory);
+            }
+            Err(error) => {
+                eprintln!("beckond: skipping session {}: {error:#}", session.name);
+            }
+        }
+    }
+    if directories.is_empty() {
+        bail!("no Herdr session accepted a connection; check the [herdr] configuration");
+    }
+    Ok(SessionRouter::new(directories))
+}
+
+/// Build the one-shot CLI session router used by read-only commands.
+fn cli_directories(config: &config::Config) -> Result<SessionRouter<HerdrCli>> {
+    let sessions = discover_sessions(
+        config.herdr.socket.as_deref(),
+        config.herdr.allowed_sessions(),
+    );
+    if sessions.is_empty() {
+        bail!("no reachable Herdr sessions; start Herdr or check the [herdr] configuration");
+    }
+    let directories = sessions
+        .into_iter()
+        .map(|session| {
+            let name = session.name.clone();
+            (name, HerdrCli::for_session(&config.herdr.cli, &session))
+        })
+        .collect();
+    Ok(SessionRouter::new(directories))
+}
+
 fn focus_key<D: PaneDirectory>(key: &str, config: &config::Config, panes: &D) -> Result<()> {
     let span = info_span!("focus_bound_pane", key);
     let _entered = span.enter();
-    let pane_id = pane_for_key(key, panes)?;
-    info!(pane_id, "resolved bound pane");
+    let pane = pane_for_key(key, panes)?;
+    info!(session = %pane.session, pane_id = %pane.pane_id, "resolved bound pane");
     CommandFocus::new(&config.focus).focus_terminal()?;
     info!("terminal focus integration completed");
-    debug!(pane_id, "requesting Herdr pane focus");
-    panes.focus_pane(&pane_id)?;
-    info!(pane_id, "Herdr pane focus completed");
+    debug!(pane = %pane, "requesting Herdr pane focus");
+    panes.focus_pane(&pane)?;
+    info!(pane = %pane, "Herdr pane focus completed");
     Ok(())
 }
 
-fn pane_for_key<D: PaneDirectory>(key: &str, panes: &D) -> Result<String> {
+fn pane_for_key<D: PaneDirectory>(key: &str, panes: &D) -> Result<PaneRef> {
     let store = JsonBindingStore::from_environment();
     BindingService::new(&store, panes).pane_for_key(key)
 }
 
-fn pane_is_focused<D: PaneDirectory>(panes: &D, pane_id: &str) -> bool {
+fn pane_is_focused<D: PaneDirectory>(panes: &D, pane: &PaneRef) -> bool {
     panes
         .panes()
         .map(|panes| {
-            panes
-                .into_iter()
-                .any(|pane| pane.pane_id == pane_id && pane.focused)
+            panes.into_iter().any(|candidate| {
+                candidate.session == pane.session
+                    && candidate.pane_id == pane.pane_id
+                    && candidate.focused
+            })
         })
         .unwrap_or(false)
 }
@@ -876,9 +995,11 @@ mod tests {
         let bind_help = help_for(&["bind"]);
         assert!(bind_help.contains("Beckon never auto-registers panes or agents"));
         assert!(bind_help.contains("--key f1"));
+        assert!(bind_help.contains("--session <name>"));
 
         let release_help = help_for(&["release"]);
         assert!(release_help.contains("does not close a pane or control an agent"));
+        assert!(release_help.contains("--session"));
     }
 
     #[test]
@@ -893,25 +1014,30 @@ mod tests {
     struct RecordingDirectory {
         writes: RefCell<Vec<(String, String)>>,
         pane_gone: bool,
+        panes: Vec<beckon::core::Pane>,
     }
 
     impl PaneDirectory for RecordingDirectory {
         fn panes(&self) -> Result<Vec<beckon::core::Pane>> {
-            Ok(Vec::new())
+            Ok(self.panes.clone())
         }
 
-        fn write_fkey(&self, _pane_id: &str, _key: Option<&str>) -> Result<()> {
+        fn observed_sessions(&self) -> Result<std::collections::BTreeSet<String>> {
+            Ok(self.panes.iter().map(|pane| pane.session.clone()).collect())
+        }
+
+        fn write_fkey(&self, _pane: &PaneRef, _key: Option<&str>) -> Result<()> {
             Ok(())
         }
 
         fn write_presentation_tokens(
             &self,
-            pane_id: &str,
+            pane: &PaneRef,
             binding: &str,
         ) -> Result<PresentationTokenWrite> {
             self.writes
                 .borrow_mut()
-                .push((pane_id.into(), binding.into()));
+                .push((pane.to_string(), binding.into()));
             Ok(if self.pane_gone {
                 PresentationTokenWrite::PaneGone
             } else {
@@ -919,13 +1045,72 @@ mod tests {
             })
         }
 
-        fn focus_pane(&self, _pane_id: &str) -> Result<()> {
+        fn focus_pane(&self, _pane: &PaneRef) -> Result<()> {
             Ok(())
         }
 
-        fn send_keys(&self, _pane_id: &str, _keys: &[&str]) -> Result<()> {
+        fn send_keys(&self, _pane: &PaneRef, _keys: &[&str]) -> Result<()> {
             Ok(())
         }
+    }
+
+    fn pane(session: &str, id: &str, focused: bool) -> beckon::core::Pane {
+        beckon::core::Pane {
+            pane_id: id.into(),
+            session: session.into(),
+            revision: 0,
+            agent_status: "idle".into(),
+            agent: None,
+            label: None,
+            cwd: None,
+            terminal_title: None,
+            terminal_title_stripped: None,
+            focused,
+            tokens: std::collections::BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn resolves_an_unambiguous_pane_across_sessions() {
+        let directory = RecordingDirectory {
+            panes: vec![pane("agent-workspace", "w6:p1", false)],
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_pane(&directory, None, "w6:p1").unwrap(),
+            PaneRef::new("agent-workspace", "w6:p1")
+        );
+    }
+
+    #[test]
+    fn rejects_missing_or_ambiguous_panes_with_actionable_messages() {
+        let directory = RecordingDirectory {
+            panes: vec![
+                pane("default", "w1:p1", false),
+                pane("agent-workspace", "w1:p1", false),
+            ],
+            ..Default::default()
+        };
+
+        let ambiguous = resolve_pane(&directory, None, "w1:p1")
+            .unwrap_err()
+            .to_string();
+        assert!(ambiguous.contains("multiple sessions"), "{ambiguous}");
+        assert!(ambiguous.contains("--session"), "{ambiguous}");
+
+        let missing = resolve_pane(&directory, None, "gone")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            missing.contains("no longer exists in any managed session"),
+            "{missing}"
+        );
+
+        // An explicit session bypasses the search entirely.
+        assert_eq!(
+            resolve_pane(&directory, Some("agent-workspace".into()), "w1:p1").unwrap(),
+            PaneRef::new("agent-workspace", "w1:p1")
+        );
     }
 
     #[test]
@@ -933,6 +1118,7 @@ mod tests {
         let directory = RecordingDirectory::default();
         let mut publisher = PresentationPublisher::default();
         let pane = |binding: &str| PanePresentation {
+            session: "default".into(),
             pane_id: "w:p1".into(),
             title: "task".into(),
             binding: binding.into(),
@@ -954,8 +1140,8 @@ mod tests {
         assert_eq!(
             *directory.writes.borrow(),
             vec![
-                ("w:p1".into(), "unbound".into()),
-                ("w:p1".into(), "F4".into()),
+                ("default:w:p1".into(), "unbound".into()),
+                ("default:w:p1".into(), "F4".into()),
             ]
         );
     }
@@ -968,6 +1154,7 @@ mod tests {
         };
         let mut publisher = PresentationPublisher::default();
         let pane = PanePresentation {
+            session: "default".into(),
             pane_id: "w:p1".into(),
             title: "closing task".into(),
             binding: "F2".into(),
@@ -979,7 +1166,7 @@ mod tests {
         assert!(!publisher.publish(&directory, vec![pane]).unwrap());
         assert_eq!(
             *directory.writes.borrow(),
-            vec![("w:p1".into(), "F2".into())]
+            vec![("default:w:p1".into(), "F2".into())]
         );
     }
 

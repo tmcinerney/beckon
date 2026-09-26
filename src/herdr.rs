@@ -1,8 +1,9 @@
 use std::{
-    env,
+    collections::BTreeSet,
+    env, fs,
     io::{BufRead, BufReader, Write},
     os::unix::net::UnixStream,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::Command,
 };
 
@@ -12,30 +13,138 @@ use serde_json::{Value, json};
 use tracing::debug;
 
 use crate::{
-    core::{Pane, PaneDirectory, PresentationTokenWrite},
+    core::{DEFAULT_SESSION, Pane, PaneDirectory, PaneRef, PresentationTokenWrite},
     pane_cache::PaneEvent,
 };
 
 const SOURCE: &str = "beckond";
 
-pub struct HerdrCli;
+/// One discoverable Herdr server instance.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HerdrSession {
+    pub name: String,
+    pub socket_path: PathBuf,
+}
 
-/// Live read directory plus the existing, verified mutation commands.
+/// Discovers the Herdr sessions Beckon should manage.
+///
+/// The default session's socket is `BECKON_HERDR_SOCKET` (a test seam), then
+/// `[herdr] socket`, then `~/.config/herdr/herdr.sock`. Named sessions come
+/// from `~/.config/herdr/sessions/<name>/herdr.sock` (root overridable with
+/// `BECKON_HERDR_SESSIONS_DIR` for hermetic tests). Stopped sessions leave
+/// their directories and sockets behind, so every candidate is liveness-checked
+/// and dead ones are skipped. `allowed` is the `[herdr] sessions` allowlist;
+/// `None` manages every live session.
+pub fn discover_sessions(
+    configured_socket: Option<&Path>,
+    allowed: Option<&[String]>,
+) -> Vec<HerdrSession> {
+    if let Some(pinned) = env::var_os("BECKON_HERDR_SOCKET") {
+        // Hermetic tests pin exactly one socket and must not observe the
+        // machine's real session directory.
+        return vec![HerdrSession {
+            name: DEFAULT_SESSION.into(),
+            socket_path: PathBuf::from(pinned),
+        }];
+    }
+
+    let candidates = collect_session_candidates(
+        configured_socket
+            .map(Path::to_path_buf)
+            .unwrap_or_else(default_socket_path),
+        &sessions_dir_path(),
+        allowed,
+    );
+    candidates
+        .into_iter()
+        .filter(|session| {
+            let alive = socket_is_live(&session.socket_path);
+            if !alive && allowed.is_some() {
+                // An explicit allowlist names sessions deliberately; say why a
+                // configured session is missing instead of ignoring it.
+                eprintln!(
+                    "beckon: session {} is configured but its socket {} is not reachable",
+                    session.name,
+                    session.socket_path.display()
+                );
+            }
+            alive
+        })
+        .collect()
+}
+
+/// Candidate sessions in deterministic order (default first, then named
+/// sessions sorted by name) without any liveness filtering.
+fn collect_session_candidates(
+    default_socket: PathBuf,
+    sessions_dir: &Path,
+    allowed: Option<&[String]>,
+) -> Vec<HerdrSession> {
+    let permits =
+        |name: &str| allowed.is_none_or(|names| names.iter().any(|allowed| allowed == name));
+
+    let mut sessions = Vec::new();
+    if permits(DEFAULT_SESSION) {
+        sessions.push(HerdrSession {
+            name: DEFAULT_SESSION.into(),
+            socket_path: default_socket,
+        });
+    }
+
+    let mut named = Vec::new();
+    if allowed.is_none_or(|names| names.iter().any(|name| name != DEFAULT_SESSION))
+        && let Ok(entries) = fs::read_dir(sessions_dir)
+    {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            // The default session lives at the root socket path, never under
+            // the sessions directory.
+            if name == DEFAULT_SESSION || !permits(&name) {
+                continue;
+            }
+            let socket_path = entry.path().join("herdr.sock");
+            if socket_path.exists() {
+                named.push(HerdrSession { name, socket_path });
+            }
+        }
+    }
+    named.sort_by(|left, right| left.name.cmp(&right.name));
+    sessions.extend(named);
+    sessions
+}
+
+fn socket_is_live(path: &Path) -> bool {
+    UnixStream::connect(path).is_ok()
+}
+
+/// Live read directory plus the existing, verified mutation commands for one
+/// session.
 ///
 /// Herdr's event socket is ideal for long-lived state. The CLI remains the
-/// deliberately narrow command adapter for the already-proven metadata and
-/// agent-focus operations; importantly, no binding operation polls it.
+/// deliberately narrow command adapter for the already-proven metadata
+/// operations; targeting and pane focus stay on the socket.
 pub struct LivePaneDirectory {
+    session: HerdrSession,
     cache: crate::pane_cache::PaneCache,
     commands: HerdrCli,
 }
 
 impl LivePaneDirectory {
-    pub fn start() -> Result<Self> {
+    pub fn start(session: HerdrSession, cli: &str) -> Result<Self> {
+        let cache = crate::pane_cache::PaneCache::start(
+            HerdrSocket::new(session.socket_path.clone()),
+            &session.name,
+        )?;
+        let commands = HerdrCli::for_session(cli, &session);
         Ok(Self {
-            cache: crate::pane_cache::PaneCache::start(HerdrSocket::from_environment())?,
-            commands: HerdrCli,
+            session,
+            cache,
+            commands,
         })
+    }
+
+    pub fn session(&self) -> &HerdrSession {
+        &self.session
     }
 
     pub fn cache(&self) -> &crate::pane_cache::PaneCache {
@@ -48,24 +157,28 @@ impl PaneDirectory for LivePaneDirectory {
         Ok(self.cache.panes())
     }
 
-    fn write_fkey(&self, pane_id: &str, key: Option<&str>) -> Result<()> {
-        self.commands.write_fkey(pane_id, key)
+    fn observed_sessions(&self) -> Result<BTreeSet<String>> {
+        Ok(BTreeSet::from([self.session.name.clone()]))
+    }
+
+    fn write_fkey(&self, pane: &PaneRef, key: Option<&str>) -> Result<()> {
+        self.commands.write_fkey(pane, key)
     }
 
     fn write_presentation_tokens(
         &self,
-        pane_id: &str,
+        pane: &PaneRef,
         binding: &str,
     ) -> Result<PresentationTokenWrite> {
-        self.commands.write_presentation_tokens(pane_id, binding)
+        self.commands.write_presentation_tokens(pane, binding)
     }
 
-    fn focus_pane(&self, pane_id: &str) -> Result<()> {
-        HerdrSocket::from_environment().focus_pane(pane_id)
+    fn focus_pane(&self, pane: &PaneRef) -> Result<()> {
+        self.commands.focus_pane(pane)
     }
 
-    fn send_keys(&self, pane_id: &str, keys: &[&str]) -> Result<()> {
-        HerdrSocket::from_environment().send_keys(pane_id, keys)
+    fn send_keys(&self, pane: &PaneRef, keys: &[&str]) -> Result<()> {
+        self.commands.send_keys(pane, keys)
     }
 }
 
@@ -77,16 +190,6 @@ pub struct HerdrSocket {
 }
 
 impl HerdrSocket {
-    pub fn from_environment() -> Self {
-        Self {
-            // Beckon owns this override rather than assuming an undocumented
-            // Herdr environment variable. It also makes socket tests hermetic.
-            path: env::var_os("BECKON_HERDR_SOCKET")
-                .map(PathBuf::from)
-                .unwrap_or_else(default_socket_path),
-        }
-    }
-
     pub fn new(path: PathBuf) -> Self {
         Self { path }
     }
@@ -181,16 +284,81 @@ impl HerdrSocket {
 }
 
 fn default_socket_path() -> PathBuf {
+    herdr_config_dir().join("herdr/herdr.sock")
+}
+
+fn sessions_dir_path() -> PathBuf {
+    env::var_os("BECKON_HERDR_SESSIONS_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| herdr_config_dir().join("herdr/sessions"))
+}
+
+fn herdr_config_dir() -> PathBuf {
     env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
         .unwrap_or_else(|| PathBuf::from(".config"))
-        .join("herdr/herdr.sock")
+}
+
+/// The `herdr` CLI adapter for one session.
+///
+/// Metadata and pane listing use the CLI because those commands are already
+/// proven there. This mirrors the original adapter, which used the socket for
+/// focus and key delivery even when constructed as a CLI directory.
+#[derive(Clone, Debug)]
+pub struct HerdrCli {
+    program: String,
+    session: String,
+    socket_path: PathBuf,
+}
+
+impl HerdrCli {
+    pub fn for_session(program: &str, session: &HerdrSession) -> Self {
+        Self {
+            program: program.into(),
+            session: session.name.clone(),
+            socket_path: session.socket_path.clone(),
+        }
+    }
+
+    /// The global `--session` flag selects a named server. The default session
+    /// keeps its historical invocation exactly: no flag.
+    fn command(&self) -> Command {
+        let mut command = Command::new(&self.program);
+        command.args(session_arguments(&self.session));
+        command
+    }
+
+    fn socket(&self) -> HerdrSocket {
+        HerdrSocket::new(self.socket_path.clone())
+    }
+
+    fn ensure_same_session(&self, pane: &PaneRef) -> Result<()> {
+        if pane.session != self.session {
+            bail!(
+                "pane {} belongs to session {}, not {}",
+                pane.pane_id,
+                pane.session,
+                self.session
+            );
+        }
+        Ok(())
+    }
+}
+
+/// Argument prefix for a session-addressed CLI invocation.
+fn session_arguments(session: &str) -> Vec<String> {
+    if session == DEFAULT_SESSION {
+        Vec::new()
+    } else {
+        vec!["--session".to_string(), session.to_string()]
+    }
 }
 
 impl PaneDirectory for HerdrCli {
     fn panes(&self) -> Result<Vec<Pane>> {
-        let output = Command::new("herdr")
+        let output = self
+            .command()
             .args(["pane", "list"])
             .output()
             .context("run herdr pane list")?;
@@ -200,14 +368,23 @@ impl PaneDirectory for HerdrCli {
                 String::from_utf8_lossy(&output.stderr).trim()
             );
         }
-        Ok(serde_json::from_slice::<PaneListResponse>(&output.stdout)?
+        let mut panes = serde_json::from_slice::<PaneListResponse>(&output.stdout)?
             .result
-            .panes)
+            .panes;
+        for pane in &mut panes {
+            pane.session.clone_from(&self.session);
+        }
+        Ok(panes)
     }
 
-    fn write_fkey(&self, pane_id: &str, key: Option<&str>) -> Result<()> {
-        let mut command = Command::new("herdr");
-        command.args(["pane", "report-metadata", pane_id, "--source", SOURCE]);
+    fn observed_sessions(&self) -> Result<BTreeSet<String>> {
+        Ok(BTreeSet::from([self.session.clone()]))
+    }
+
+    fn write_fkey(&self, pane: &PaneRef, key: Option<&str>) -> Result<()> {
+        self.ensure_same_session(pane)?;
+        let mut command = self.command();
+        command.args(["pane", "report-metadata", &pane.pane_id, "--source", SOURCE]);
         match key {
             Some(key) => command.arg("--token").arg(format!("fkey={key}")),
             None => command.arg("--clear-token").arg("fkey"),
@@ -224,15 +401,17 @@ impl PaneDirectory for HerdrCli {
 
     fn write_presentation_tokens(
         &self,
-        pane_id: &str,
+        pane: &PaneRef,
         binding: &str,
     ) -> Result<PresentationTokenWrite> {
-        let output = Command::new("herdr")
-            .args(["pane", "report-metadata", pane_id, "--source", SOURCE])
+        self.ensure_same_session(pane)?;
+        let output = self
+            .command()
+            .args(["pane", "report-metadata", &pane.pane_id, "--source", SOURCE])
             .arg("--token")
             .arg(format!("beckon_binding={binding}"))
             .arg("--token")
-            .arg(format!("beckon_pane_id={pane_id}"))
+            .arg(format!("beckon_pane_id={}", pane.pane_id))
             .output()
             .context("write Beckon presentation tokens")?;
         if output.status.success() {
@@ -245,12 +424,14 @@ impl PaneDirectory for HerdrCli {
         bail!("presentation token update failed: {}", stderr.trim());
     }
 
-    fn focus_pane(&self, pane_id: &str) -> Result<()> {
-        HerdrSocket::from_environment().focus_pane(pane_id)
+    fn focus_pane(&self, pane: &PaneRef) -> Result<()> {
+        self.ensure_same_session(pane)?;
+        self.socket().focus_pane(&pane.pane_id)
     }
 
-    fn send_keys(&self, pane_id: &str, keys: &[&str]) -> Result<()> {
-        HerdrSocket::from_environment().send_keys(pane_id, keys)
+    fn send_keys(&self, pane: &PaneRef, keys: &[&str]) -> Result<()> {
+        self.ensure_same_session(pane)?;
+        self.socket().send_keys(&pane.pane_id, keys)
     }
 }
 
@@ -301,7 +482,7 @@ fn decode_pane_event(line: &str) -> Result<Option<PaneEvent>> {
     match event.event_type.as_str() {
         "pane_created" | "pane_updated" => event
             .pane
-            .map(PaneEvent::Upsert)
+            .map(|pane| PaneEvent::Upsert(Box::new(pane)))
             .context("pane event omitted pane")
             .map(Some),
         "pane_closed" | "pane_exited" => event
@@ -325,6 +506,87 @@ mod tests {
     };
 
     use super::*;
+
+    fn unique_temp_path(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "beckon-{name}-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    #[test]
+    fn session_arguments_only_add_the_flag_for_named_sessions() {
+        assert!(session_arguments(DEFAULT_SESSION).is_empty());
+        assert_eq!(
+            session_arguments("agent-workspace"),
+            ["--session", "agent-workspace"]
+        );
+    }
+
+    #[test]
+    fn collects_candidates_with_default_first_and_named_sessions_sorted() {
+        let root = unique_temp_path("sessions-candidates");
+        let sessions_dir = root.join("sessions");
+        for name in ["beta", "alpha"] {
+            fs::create_dir_all(sessions_dir.join(name)).unwrap();
+            fs::write(sessions_dir.join(name).join("herdr.sock"), b"").unwrap();
+        }
+        let default_socket = root.join("herdr.sock");
+
+        let all = collect_session_candidates(default_socket.clone(), &sessions_dir, None);
+        let names = all
+            .iter()
+            .map(|session| session.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["default", "alpha", "beta"]);
+        assert_eq!(all[0].socket_path, default_socket);
+
+        let only = ["default".to_string(), "alpha".to_string()];
+        let filtered = collect_session_candidates(default_socket, &sessions_dir, Some(&only));
+        let names = filtered
+            .iter()
+            .map(|session| session.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["default", "alpha"]);
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn liveness_check_rejects_dead_sockets() {
+        let path = unique_temp_path("liveness");
+        let listener = UnixListener::bind(&path).unwrap();
+        assert!(socket_is_live(&path));
+        drop(listener);
+        fs::remove_file(&path).unwrap();
+
+        fs::write(&path, b"not a socket").unwrap();
+        assert!(!socket_is_live(&path));
+        assert!(!socket_is_live(&path.with_extension("missing")));
+        fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn a_pinned_socket_yields_exactly_the_default_session() {
+        let pinned = unique_temp_path("pinned");
+        // SAFETY: this test is the only writer or reader of the pin outside of
+        // production discovery; no other test observes this variable.
+        unsafe {
+            env::set_var("BECKON_HERDR_SOCKET", &pinned);
+        }
+        let sessions = discover_sessions(None, None);
+        unsafe {
+            env::remove_var("BECKON_HERDR_SOCKET");
+        }
+
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].name, DEFAULT_SESSION);
+        assert_eq!(sessions[0].socket_path, pinned);
+    }
 
     #[test]
     fn requests_a_pane_snapshot_over_ndjson() {
@@ -400,7 +662,7 @@ mod tests {
         )
         .unwrap();
         assert!(
-            matches!(event, Some(PaneEvent::Upsert(Pane { pane_id, agent_status, .. })) if pane_id == "w:p" && agent_status == "working")
+            matches!(event, Some(PaneEvent::Upsert(pane)) if pane.pane_id == "w:p" && pane.agent_status == "working")
         );
     }
 

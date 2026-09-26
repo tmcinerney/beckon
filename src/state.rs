@@ -70,3 +70,38 @@ impl BindingStore for JsonBindingStore {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use super::*;
+    use crate::core::DEFAULT_SESSION;
+
+    #[test]
+    fn reads_pre_multi_session_ledgers_as_the_default_session() {
+        let directory = env::temp_dir().join(format!(
+            "beckon-state-test-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("bindings.json");
+        fs::write(
+            &path,
+            r#"{"state_version":1,"bindings":[{"key":"f3","pane_id":"wB:p1A"}]}"#,
+        )
+        .unwrap();
+
+        let store = JsonBindingStore { path };
+        let state = store.load().unwrap().unwrap();
+        assert_eq!(state.bindings.len(), 1);
+        assert_eq!(state.bindings[0].session, DEFAULT_SESSION);
+        assert_eq!(state.bindings[0].pane_id, "wB:p1A");
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+}

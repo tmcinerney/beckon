@@ -375,6 +375,7 @@ mod tests {
     fn pane(status: &str) -> Pane {
         Pane {
             pane_id: "p1".into(),
+            session: crate::core::DEFAULT_SESSION.into(),
             revision: 0,
             agent_status: status.into(),
             agent: None,
@@ -394,6 +395,7 @@ mod tests {
             &[(
                 Binding {
                     key: "f1".into(),
+                    session: crate::core::DEFAULT_SESSION.into(),
                     pane_id: "p1".into(),
                 },
                 pane("blocked"),
@@ -411,6 +413,7 @@ mod tests {
             &[(
                 Binding {
                     key: "f1".into(),
+                    session: crate::core::DEFAULT_SESSION.into(),
                     pane_id: "p1".into(),
                 },
                 pane("waiting_for_user"),

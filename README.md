@@ -28,6 +28,34 @@ to `~/.local/state/beckon`). Herdr's `fkey` pane token is a visible mirror for
 the sidebar, not the source of truth: Herdr does not restore token metadata
 after its server restarts.
 
+## Multiple Herdr sessions
+
+Beckon manages every live Herdr session it finds: the default session's socket
+plus each named session under `~/.config/herdr/sessions/<name>/herdr.sock`.
+Stopped sessions leave their directories behind, so candidates are
+liveness-checked and dead sockets are skipped. Bind, release, and status work
+from any session's panes.
+
+Pane identity is the pair `(session, pane_id)` because Herdr pane IDs are only
+unique within one session. A pane ID that exists in exactly one managed session
+resolves on its own; when the same ID exists in several, `beckon bind --session
+<name>` (or `release --session`) selects one. Bindings for a session that is
+not currently reachable are kept dormant rather than released, so restarting a
+stopped Herdr session restores its keys instead of losing them.
+
+```toml
+[herdr]
+# Pin the CLI for launchd shells whose PATH differs, point at a nonstandard
+# default-session socket, or limit management to named sessions.
+cli = "herdr"
+socket = "/Users/you/.config/herdr/herdr.sock"
+sessions = "auto"  # or ["default", "agent-workspace"]
+```
+
+The `BECKON_HERDR_SOCKET` environment variable still overrides the socket for
+tests and one-off runs; `BECKON_HERDR_SESSIONS_DIR` overrides the discovery
+directory.
+
 ## Optional MacBook function-key input
 
 Beckon's logical slots (`f1` through `f10`) are separate from their physical

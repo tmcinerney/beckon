@@ -1,4 +1,4 @@
-use std::{env, fs, path::PathBuf};
+use std::{collections::BTreeSet, env, fs, path::PathBuf};
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
@@ -21,6 +21,98 @@ pub struct Config {
     pub display: DisplayConfig,
     #[serde(default)]
     pub actions: ActionsConfig,
+    #[serde(default)]
+    pub herdr: HerdrConfig,
+}
+
+/// Herdr topology: which server CLI to invoke, where the default session's
+/// socket lives, and which sessions Beckon manages.
+///
+/// Leaving `[herdr]` absent preserves the original behavior: the `herdr`
+/// program from `PATH`, the default socket location, and every live session.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HerdrConfig {
+    /// The Herdr CLI program to invoke. Under launchd, `PATH` is often narrower
+    /// than an interactive shell's, so an absolute path is more predictable.
+    #[serde(default = "default_herdr_cli")]
+    pub cli: String,
+    /// Socket path for the default session. The `BECKON_HERDR_SOCKET`
+    /// environment variable still wins for tests and one-off overrides.
+    #[serde(default)]
+    pub socket: Option<PathBuf>,
+    #[serde(default)]
+    pub sessions: SessionsConfig,
+}
+
+impl Default for HerdrConfig {
+    fn default() -> Self {
+        Self {
+            cli: default_herdr_cli(),
+            socket: None,
+            sessions: SessionsConfig::default(),
+        }
+    }
+}
+
+fn default_herdr_cli() -> String {
+    "herdr".into()
+}
+
+impl HerdrConfig {
+    pub fn validate(&self) -> Result<()> {
+        if self.cli.trim().is_empty() {
+            bail!("herdr.cli must name the herdr program when set");
+        }
+        if let Some(socket) = &self.socket
+            && socket.as_os_str().is_empty()
+        {
+            bail!("herdr.socket must be a path when set");
+        }
+        if let SessionsConfig::Only(names) = &self.sessions {
+            if names.is_empty() {
+                bail!("herdr.sessions must name at least one session when set");
+            }
+            let mut seen = BTreeSet::new();
+            for name in names {
+                if name.trim().is_empty() {
+                    bail!("herdr.sessions must not contain empty session names");
+                }
+                if !seen.insert(name.as_str()) {
+                    bail!("herdr.sessions contains duplicate session {name}");
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// `None` manages every live session; `Some` is the explicit allowlist.
+    pub fn allowed_sessions(&self) -> Option<&[String]> {
+        match &self.sessions {
+            SessionsConfig::Auto(_) => None,
+            SessionsConfig::Only(names) => Some(names),
+        }
+    }
+}
+
+/// `sessions = "auto"` (default) or an explicit list of session names.
+#[derive(Debug, Deserialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum SessionsConfig {
+    Auto(AutoSessions),
+    Only(Vec<String>),
+}
+
+#[derive(Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum AutoSessions {
+    Auto,
+}
+
+impl Default for SessionsConfig {
+    fn default() -> Self {
+        Self::Auto(AutoSessions::Auto)
+    }
 }
 
 /// Built-in output integrations. The stable names form a configuration
@@ -323,6 +415,7 @@ impl ConfigV1 {
             focus: self.focus,
             display,
             actions: ActionsConfig::default(),
+            herdr: HerdrConfig::default(),
         }
     }
 }
@@ -400,6 +493,7 @@ pub fn load() -> Result<Config> {
     config.input.enabled_profiles()?;
     config.outputs.validate()?;
     config.display.validate()?;
+    config.herdr.validate()?;
     Ok(config)
 }
 
@@ -434,6 +528,15 @@ config_version = 2
 # need the normal macOS brightness, media, or volume behavior.
 # [input]
 # profiles = ["glove80", "macbook-function-keys"]
+
+# Herdr topology. By default Beckon uses the `herdr` program from PATH, the
+# default session socket, and every live session (the default session plus
+# named sessions under ~/.config/herdr/sessions). Pin the CLI for launchd,
+# point at a nonstandard socket, or restrict management to named sessions.
+# [herdr]
+# cli = "herdr"
+# socket = "/Users/you/.config/herdr/herdr.sock"
+# sessions = "auto"  # or ["default", "agent-workspace"]
 
 # Select independent display outputs. The compatibility default is the
 # optional Glove80 USB LED adapter. Use an empty list for navigation without
@@ -697,5 +800,92 @@ profiles = []
     #[test]
     fn rejects_unknown_config_versions() {
         assert!(parse("config_version = 9").is_err());
+    }
+
+    #[test]
+    fn herdr_defaults_manage_every_live_session() {
+        let config = parse("config_version = 2").unwrap();
+        config.herdr.validate().unwrap();
+
+        assert_eq!(config.herdr.cli, "herdr");
+        assert!(config.herdr.socket.is_none());
+        assert!(config.herdr.allowed_sessions().is_none());
+    }
+
+    #[test]
+    fn herdr_session_allowlist_is_explicit() {
+        let config = parse(
+            r#"
+config_version = 2
+[herdr]
+sessions = ["default", "agent-workspace"]
+"#,
+        )
+        .unwrap();
+        config.herdr.validate().unwrap();
+
+        assert_eq!(
+            config.herdr.allowed_sessions(),
+            Some(["default".to_string(), "agent-workspace".to_string()].as_slice())
+        );
+    }
+
+    #[test]
+    fn herdr_rejects_duplicate_or_empty_session_lists() {
+        for (contents, expected) in [
+            (
+                r#"
+config_version = 2
+[herdr]
+sessions = ["default", "default"]
+"#,
+                "duplicate session default",
+            ),
+            (
+                r#"
+config_version = 2
+[herdr]
+sessions = []
+"#,
+                "at least one session",
+            ),
+            (
+                r#"
+config_version = 2
+[herdr]
+sessions = ["  "]
+"#,
+                "empty session names",
+            ),
+        ] {
+            let config = parse(contents).unwrap();
+            let error = config.herdr.validate().unwrap_err();
+            assert!(error.to_string().contains(expected), "{error:#}");
+        }
+    }
+
+    #[test]
+    fn herdr_rejects_unknown_keys() {
+        assert!(parse("config_version = 2\n[herdr]\nunknown = 1\n").is_err());
+    }
+
+    #[test]
+    fn herdr_accepts_a_pinned_cli_and_socket() {
+        let config = parse(
+            r#"
+config_version = 2
+[herdr]
+cli = "/nix/store/herdr/bin/herdr"
+socket = "/tmp/custom-herdr.sock"
+"#,
+        )
+        .unwrap();
+        config.herdr.validate().unwrap();
+
+        assert_eq!(config.herdr.cli, "/nix/store/herdr/bin/herdr");
+        assert_eq!(
+            config.herdr.socket.as_deref(),
+            Some(std::path::Path::new("/tmp/custom-herdr.sock"))
+        );
     }
 }
