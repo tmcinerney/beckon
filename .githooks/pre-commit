@@ -1,0 +1,52 @@
+#!/bin/sh
+# beckon: worktree-relative hook
+#
+# 1. Refuses commits from the repository root. The root checkout stays a
+#    stable, runnable copy of main; all work happens in a linked worktree.
+# 2. Runs the devenv-generated git hooks (clippy, rustfmt, nixfmt) through
+#    prek, against THIS worktree's .pre-commit-config.yaml.
+#
+# AIDEV-NOTE: never bake a worktree's absolute path into this file or into
+# the shared .git/hooks. Every linked worktree shares one hooks dir, so a
+# fixed path breaks every commit as soon as that worktree is removed.
+#
+# One-time setup per clone (git config is shared by all worktrees):
+#   git config --local core.hooksPath .githooks
+
+set -eu
+
+git_dir=$(cd "$(git rev-parse --git-dir)" && pwd -P)
+common_dir=$(cd "$(git rev-parse --git-common-dir)" && pwd -P)
+
+if [ "$git_dir" = "$common_dir" ]; then
+  cat >&2 <<'MSG'
+pre-commit: refusing to commit from the repository root.
+
+The root is reserved as a stable, runnable copy of main. All branch
+work must happen in a worktree (managed by worktrunk under
+~/Code/.worktrees/).
+
+To start work:
+  wt switch -c <branch>            # creates ~/Code/.worktrees/<repo>/<branch>
+
+To continue existing work:
+  wt switch <branch>               # or: cd ~/Code/.worktrees/<repo>/<branch>
+MSG
+  exit 1
+fi
+
+config="$(git rev-parse --show-toplevel)/.pre-commit-config.yaml"
+
+# Inside `devenv shell` prek is on PATH and devenv has linked the config.
+if command -v prek >/dev/null 2>&1 && [ -e "$config" ]; then
+  exec prek hook-impl --hook-type=pre-commit --config="$config" -- "$@"
+fi
+
+# Outside it (a plain terminal, an editor, an agent), let devenv provide prek
+# and (re)generate the config for this worktree.
+if command -v devenv >/dev/null 2>&1; then
+  exec devenv shell -- prek hook-impl --hook-type=pre-commit --config="$config" -- "$@"
+fi
+
+echo >&2 "pre-commit: neither prek nor devenv is on PATH; run the commit from 'devenv shell'."
+exit 1
