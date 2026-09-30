@@ -301,14 +301,7 @@ mod tests {
 
     impl TestStore {
         fn new() -> Self {
-            let directory = std::env::temp_dir().join(format!(
-                "beckon-surfaces-test-{}-{}",
-                std::process::id(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos()
-            ));
+            let directory = crate::test_support::unique_temp_path("surfaces-test");
             Self(SurfaceStore {
                 path: directory.join("surfaces.json"),
             })

@@ -502,21 +502,10 @@ mod tests {
         io::{BufRead, BufReader, Write},
         os::unix::net::UnixListener,
         thread,
-        time::{SystemTime, UNIX_EPOCH},
     };
 
     use super::*;
-
-    fn unique_temp_path(name: &str) -> PathBuf {
-        std::env::temp_dir().join(format!(
-            "beckon-{name}-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ))
-    }
+    use crate::test_support::unique_temp_path;
 
     #[test]
     fn session_arguments_only_add_the_flag_for_named_sessions() {
@@ -590,14 +579,7 @@ mod tests {
 
     #[test]
     fn requests_a_pane_snapshot_over_ndjson() {
-        let path = std::env::temp_dir().join(format!(
-            "beckon-herdr-test-{}-{}.sock",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let path = unique_temp_path("herdr-test").with_extension("sock");
         let listener = UnixListener::bind(&path).unwrap();
         let server = thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
@@ -624,14 +606,7 @@ mod tests {
 
     #[test]
     fn sends_logical_keys_to_an_explicit_pane() {
-        let path = std::env::temp_dir().join(format!(
-            "beckon-herdr-keys-test-{}-{}.sock",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let path = unique_temp_path("herdr-keys-test").with_extension("sock");
         let listener = UnixListener::bind(&path).unwrap();
         let server = thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();

@@ -2,3 +2,4 @@
 /devenv.local.nix
 /devenv.local.yaml
 /devenv.lock
+/.pre-commit-config.yaml
