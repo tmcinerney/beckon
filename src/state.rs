@@ -99,21 +99,12 @@ impl BindingStore for JsonBindingStore {
 
 #[cfg(test)]
 mod tests {
-    use std::time::{SystemTime, UNIX_EPOCH};
-
     use super::*;
     use crate::core::DEFAULT_SESSION;
 
     #[test]
     fn reads_pre_multi_session_ledgers_as_the_default_session() {
-        let directory = env::temp_dir().join(format!(
-            "beckon-state-test-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let directory = crate::test_support::unique_temp_path("state-test");
         fs::create_dir_all(&directory).unwrap();
         let path = directory.join("bindings.json");
         fs::write(
