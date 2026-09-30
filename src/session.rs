@@ -82,7 +82,7 @@ impl<D: PaneDirectory> PaneDirectory for SessionRouter<D> {
     fn write_presentation_tokens(
         &self,
         pane: &PaneRef,
-        binding: &str,
+        binding: Option<&str>,
     ) -> Result<PresentationTokenWrite> {
         self.route(pane)?.write_presentation_tokens(pane, binding)
     }
@@ -149,7 +149,7 @@ mod tests {
         fn write_presentation_tokens(
             &self,
             _pane: &PaneRef,
-            _binding: &str,
+            _binding: Option<&str>,
         ) -> Result<PresentationTokenWrite> {
             Ok(PresentationTokenWrite::Written)
         }

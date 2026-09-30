@@ -131,6 +131,9 @@ impl Pane {
     }
 }
 
+/// The resolved binding of a live pane that holds no key.
+pub const UNBOUND: &str = "unbound";
+
 /// Presentation data for every currently live pane, including unbound panes.
 /// This deliberately contains resolved values so clients never need to infer a
 /// missing `fkey` token as an unbound state.
@@ -176,11 +179,12 @@ pub trait PaneDirectory {
     fn observed_sessions(&self) -> Result<std::collections::BTreeSet<String>>;
     fn write_fkey(&self, pane: &PaneRef, key: Option<&str>) -> Result<()>;
     /// Publish Beckon-owned display tokens without changing a pane's title or
-    /// other metadata owned by a user or agent integration.
+    /// other metadata owned by a user or agent integration. A `None` binding
+    /// clears the `beckon_binding` token, which Herdr renders as nothing.
     fn write_presentation_tokens(
         &self,
         pane: &PaneRef,
-        binding: &str,
+        binding: Option<&str>,
     ) -> Result<PresentationTokenWrite>;
     fn focus_pane(&self, pane: &PaneRef) -> Result<()>;
     fn send_keys(&self, pane: &PaneRef, keys: &[&str]) -> Result<()>;
@@ -358,7 +362,7 @@ impl<'a> BindingService<'a> {
                         binding.session == pane.session && binding.pane_id == pane.pane_id
                     })
                     .map(|binding| binding.key.to_ascii_uppercase())
-                    .unwrap_or_else(|| "unbound".into());
+                    .unwrap_or_else(|| UNBOUND.into());
                 let title = pane.display_title();
                 PanePresentation {
                     session: pane.session,
@@ -557,7 +561,7 @@ mod tests {
         fn write_presentation_tokens(
             &self,
             _pane: &PaneRef,
-            _binding: &str,
+            _binding: Option<&str>,
         ) -> Result<PresentationTokenWrite> {
             Ok(PresentationTokenWrite::Written)
         }
