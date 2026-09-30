@@ -76,6 +76,11 @@ pub struct HerdrConfig {
     pub socket: Option<PathBuf>,
     #[serde(default)]
     pub sessions: SessionsConfig,
+    /// Sidebar text published as `beckon_binding` for a live pane with no key.
+    /// An empty string clears the token so Herdr renders nothing. This is
+    /// presentation only: `beckon status` always reports `unbound`.
+    #[serde(default = "default_unbound_label")]
+    pub unbound_label: String,
 }
 
 impl Default for HerdrConfig {
@@ -84,12 +89,17 @@ impl Default for HerdrConfig {
             cli: default_herdr_cli(),
             socket: None,
             sessions: SessionsConfig::default(),
+            unbound_label: default_unbound_label(),
         }
     }
 }
 
 fn default_herdr_cli() -> String {
     "herdr".into()
+}
+
+fn default_unbound_label() -> String {
+    crate::core::UNBOUND.into()
 }
 
 impl HerdrConfig {
@@ -567,10 +577,13 @@ config_version = 2
 # default session socket, and every live session (the default session plus
 # named sessions under ~/.config/herdr/sessions). Pin the CLI for launchd,
 # point at a nonstandard socket, or restrict management to named sessions.
+# `unbound_label` is the `$beckon_binding` sidebar text for a pane without a
+# key; set it to "" to show nothing for unbound panes.
 # [herdr]
 # cli = "herdr"
 # socket = "/Users/you/.config/herdr/herdr.sock"
 # sessions = "auto"  # or ["default", "agent-workspace"]
+# unbound_label = "unbound"
 
 # Optional terminal surface control. With a backend configured, Beckon can
 # raise the window and tab displaying a bound session before it focuses the
@@ -960,5 +973,30 @@ socket = "/tmp/custom-herdr.sock"
             config.herdr.socket.as_deref(),
             Some(std::path::Path::new("/tmp/custom-herdr.sock"))
         );
+    }
+
+    #[test]
+    fn herdr_unbound_label_defaults_to_unbound() {
+        let config = parse("config_version = 2\n").unwrap();
+        assert_eq!(config.herdr.unbound_label, "unbound");
+        let config = parse("config_version = 2\n[herdr]\ncli = \"herdr\"\n").unwrap();
+        assert_eq!(config.herdr.unbound_label, "unbound");
+    }
+
+    #[test]
+    fn herdr_unbound_label_accepts_custom_and_empty_values() {
+        let config = parse("config_version = 2\n[herdr]\nunbound_label = \"-\"\n").unwrap();
+        config.herdr.validate().unwrap();
+        assert_eq!(config.herdr.unbound_label, "-");
+
+        let config = parse("config_version = 2\n[herdr]\nunbound_label = \"\"\n").unwrap();
+        config.herdr.validate().unwrap();
+        assert_eq!(config.herdr.unbound_label, "");
+    }
+
+    #[test]
+    fn default_template_documents_the_unbound_label() {
+        assert!(DEFAULT_CONFIG.contains("# unbound_label = \"unbound\""));
+        parse(DEFAULT_CONFIG).unwrap();
     }
 }

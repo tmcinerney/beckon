@@ -14,7 +14,7 @@ use beckon::{
     config::{self, InputProfile},
     core::{
         BindingService, BindingState, BindingStore, PaneDirectory, PanePresentation, PaneRef,
-        PresentationTokenWrite, STATE_VERSION,
+        PresentationTokenWrite, STATE_VERSION, UNBOUND,
     },
     display::DisplaySet,
     focus::{CommandFocus, FocusAdapter, FocusContext},
@@ -702,7 +702,7 @@ fn daemon() -> Result<()> {
     let output_ids = config.outputs.ids();
     let mut displays = DisplaySet::from_config(&config.outputs)?;
     let mut last_render_error = None;
-    let mut presentation = PresentationPublisher::default();
+    let mut presentation = PresentationPublisher::new(&config.herdr.unbound_label);
     let mut last_presentation_error = None;
     let event_loop = background_event_loop();
     let manager = GlobalHotKeyManager::new().context("initialize macOS global hotkeys")?;
@@ -839,12 +839,39 @@ fn daemon() -> Result<()> {
 /// Publishes Beckon-owned sidebar tokens only when a pane appears or its
 /// binding changes. Pane references are immutable, so including them in the
 /// one update keeps the sidebar independent of missing-token fallbacks.
-#[derive(Default)]
+///
+/// Only the published token uses the configured unbound label; `beckon status`
+/// keeps reporting the resolved `unbound` state.
 struct PresentationPublisher {
+    unbound_label: String,
     published_bindings: BTreeMap<String, String>,
 }
 
+impl Default for PresentationPublisher {
+    fn default() -> Self {
+        Self::new(UNBOUND)
+    }
+}
+
 impl PresentationPublisher {
+    fn new(unbound_label: &str) -> Self {
+        Self {
+            unbound_label: unbound_label.into(),
+            published_bindings: BTreeMap::new(),
+        }
+    }
+
+    /// The `beckon_binding` value for a pane, or `None` to clear the token.
+    fn token_value<'a>(&'a self, binding: &'a str) -> Option<&'a str> {
+        if binding != UNBOUND {
+            Some(binding)
+        } else if self.unbound_label.is_empty() {
+            None
+        } else {
+            Some(&self.unbound_label)
+        }
+    }
+
     fn sync<D: PaneDirectory>(&mut self, panes: &D) -> Result<bool> {
         let store = JsonBindingStore::from_environment();
         let presentation = BindingService::new(&store, panes).panes()?;
@@ -869,7 +896,7 @@ impl PresentationPublisher {
             if self.published_bindings.get(&key) == Some(&pane.binding) {
                 continue;
             }
-            match panes.write_presentation_tokens(&reference, &pane.binding)? {
+            match panes.write_presentation_tokens(&reference, self.token_value(&pane.binding))? {
                 PresentationTokenWrite::Written => {
                     self.published_bindings.insert(key, pane.binding);
                     changed = true;
@@ -1201,7 +1228,7 @@ mod tests {
 
     #[derive(Default)]
     struct RecordingDirectory {
-        writes: RefCell<Vec<(String, String)>>,
+        writes: RefCell<Vec<(String, Option<String>)>>,
         pane_gone: bool,
         panes: Vec<beckon::core::Pane>,
     }
@@ -1222,11 +1249,11 @@ mod tests {
         fn write_presentation_tokens(
             &self,
             pane: &PaneRef,
-            binding: &str,
+            binding: Option<&str>,
         ) -> Result<PresentationTokenWrite> {
             self.writes
                 .borrow_mut()
-                .push((pane.to_string(), binding.into()));
+                .push((pane.to_string(), binding.map(str::to_owned)));
             Ok(if self.pane_gone {
                 PresentationTokenWrite::PaneGone
             } else {
@@ -1329,8 +1356,60 @@ mod tests {
         assert_eq!(
             *directory.writes.borrow(),
             vec![
-                ("default:w:p1".into(), "unbound".into()),
-                ("default:w:p1".into(), "F4".into()),
+                ("default:w:p1".into(), Some("unbound".into())),
+                ("default:w:p1".into(), Some("F4".into())),
+            ]
+        );
+    }
+
+    #[test]
+    fn presentation_uses_the_configured_unbound_label() {
+        let directory = RecordingDirectory::default();
+        let mut publisher = PresentationPublisher::new("-");
+        let pane = |binding: &str| PanePresentation {
+            session: "default".into(),
+            pane_id: "w:p1".into(),
+            title: "task".into(),
+            binding: binding.into(),
+            agent_status: "idle".into(),
+            focused: false,
+        };
+
+        assert!(publisher.publish(&directory, vec![pane(UNBOUND)]).unwrap());
+        assert!(publisher.publish(&directory, vec![pane("F4")]).unwrap());
+        assert_eq!(
+            *directory.writes.borrow(),
+            vec![
+                ("default:w:p1".into(), Some("-".into())),
+                ("default:w:p1".into(), Some("F4".into())),
+            ]
+        );
+    }
+
+    #[test]
+    fn empty_unbound_label_clears_the_binding_token() {
+        let directory = RecordingDirectory::default();
+        let mut publisher = PresentationPublisher::new("");
+        let pane = |binding: &str| PanePresentation {
+            session: "default".into(),
+            pane_id: "w:p1".into(),
+            title: "task".into(),
+            binding: binding.into(),
+            agent_status: "idle".into(),
+            focused: false,
+        };
+
+        assert!(publisher.publish(&directory, vec![pane(UNBOUND)]).unwrap());
+        assert!(!publisher.publish(&directory, vec![pane(UNBOUND)]).unwrap());
+        assert!(publisher.publish(&directory, vec![pane("F4")]).unwrap());
+        // Releasing a key must clear the visible token again, not leave "F4".
+        assert!(publisher.publish(&directory, vec![pane(UNBOUND)]).unwrap());
+        assert_eq!(
+            *directory.writes.borrow(),
+            vec![
+                ("default:w:p1".into(), None),
+                ("default:w:p1".into(), Some("F4".into())),
+                ("default:w:p1".into(), None),
             ]
         );
     }
@@ -1355,7 +1434,7 @@ mod tests {
         assert!(!publisher.publish(&directory, vec![pane]).unwrap());
         assert_eq!(
             *directory.writes.borrow(),
-            vec![("default:w:p1".into(), "F2".into())]
+            vec![("default:w:p1".into(), Some("F2".into()))]
         );
     }
 

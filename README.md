@@ -50,7 +50,17 @@ stopped Herdr session restores its keys instead of losing them.
 cli = "herdr"
 socket = "/Users/you/.config/herdr/herdr.sock"
 sessions = "auto"  # or ["default", "agent-workspace"]
+# Sidebar text for a live pane without a key (default "unbound").
+unbound_label = "unbound"
 ```
+
+For the Herdr sidebar, `beckond` publishes two tokens on every live pane:
+`beckon_binding` (the bound key, such as `F1`, or `unbound_label`) and
+`beckon_pane_id`. Set `unbound_label = ""` to show nothing for unbound panes;
+Beckon then clears the `beckon_binding` token instead of writing an empty
+value, so a `$beckon_binding` row renders no separator. The label is read when
+`beckond` starts, so restart it after changing the setting. `beckon status`
+always reports `unbound` regardless of the label.
 
 The `BECKON_HERDR_SOCKET` environment variable still overrides the socket for
 tests and one-off runs; `BECKON_HERDR_SESSIONS_DIR` overrides the discovery

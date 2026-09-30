@@ -168,7 +168,7 @@ impl PaneDirectory for LivePaneDirectory {
     fn write_presentation_tokens(
         &self,
         pane: &PaneRef,
-        binding: &str,
+        binding: Option<&str>,
     ) -> Result<PresentationTokenWrite> {
         self.commands.write_presentation_tokens(pane, binding)
     }
@@ -402,16 +402,13 @@ impl PaneDirectory for HerdrCli {
     fn write_presentation_tokens(
         &self,
         pane: &PaneRef,
-        binding: &str,
+        binding: Option<&str>,
     ) -> Result<PresentationTokenWrite> {
         self.ensure_same_session(pane)?;
         let output = self
             .command()
             .args(["pane", "report-metadata", &pane.pane_id, "--source", SOURCE])
-            .arg("--token")
-            .arg(format!("beckon_binding={binding}"))
-            .arg("--token")
-            .arg(format!("beckon_pane_id={}", pane.pane_id))
+            .args(presentation_token_args(&pane.pane_id, binding))
             .output()
             .context("write Beckon presentation tokens")?;
         if output.status.success() {
@@ -433,6 +430,18 @@ impl PaneDirectory for HerdrCli {
         self.ensure_same_session(pane)?;
         self.socket().send_keys(&pane.pane_id, keys)
     }
+}
+
+fn presentation_token_args(pane_id: &str, binding: Option<&str>) -> Vec<String> {
+    // AIDEV-NOTE: an empty unbound label clears the token instead of writing
+    // `beckon_binding=`; Herdr renders an absent token as nothing, while an
+    // empty value can still draw the sidebar's separator.
+    let mut args = match binding {
+        Some(binding) => vec!["--token".into(), format!("beckon_binding={binding}")],
+        None => vec!["--clear-token".into(), "beckon_binding".into()],
+    };
+    args.extend(["--token".into(), format!("beckon_pane_id={pane_id}")]);
+    args
 }
 
 fn is_pane_not_found(stderr: &str) -> bool {
@@ -692,5 +701,27 @@ mod tests {
         assert!(!is_pane_not_found(
             r#"{"error":{"code":"permission_denied","message":"not allowed"}}"#
         ));
+    }
+
+    #[test]
+    fn presentation_token_args_publish_or_clear_the_binding_token() {
+        assert_eq!(
+            presentation_token_args("w:p4", Some("F4")),
+            [
+                "--token",
+                "beckon_binding=F4",
+                "--token",
+                "beckon_pane_id=w:p4",
+            ]
+        );
+        assert_eq!(
+            presentation_token_args("w:p4", None),
+            [
+                "--clear-token",
+                "beckon_binding",
+                "--token",
+                "beckon_pane_id=w:p4",
+            ]
+        );
     }
 }
