@@ -2,3 +2,7 @@
 /devenv.local.nix
 /devenv.local.yaml
 /devenv.lock
+
+# Native Swift package build products
+/swift/.build/
+/swift/.swiftpm/
