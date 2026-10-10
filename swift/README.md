@@ -20,3 +20,117 @@ Next Attention ranks approval, question, blocked and unread completion. This can
 Hardware prerequisites are prospective policy only. Supported controller handoff, firmware and durable active-profile backup must be established before any external driver runs. No active keymap, Enter/Escape, Herdr shortcut or installed runtime has been changed.
 
 Before runtime cutover: native request/focus transports, SwiftUI configuration/status, existing Rust CLI/config/binding/surface parity, durable request-delivery receipts, exclusive hotkey ownership, device-specific adapters and emulator/live acceptance. Existing Rust executable and data remain the rollback. Micro Manager protocol ideas were researched; its source code is not copied here.
+
+## Opt-in status/configuration panel
+
+This MVP observes, configures six logical slots and previews identities. It does
+not replace the Rust runtime, focus an agent, activate Ghostty, send text/approval
+responses, open HID devices or write lighting/keymaps. No flag enables live focus.
+
+Run through the project environment:
+
+    devenv shell -- ./swift/run-swift test
+    devenv shell -- ./swift/run-swift build --product beckon-control-panel
+    devenv shell -- ./swift/run-swift run beckon-control-panel --demo --no-save
+
+Next demo replays working, idle, done, blocked, unknown, disconnect/reconnect,
+reorder and a coordinator pane mismatch. Demo edits never persist.
+
+Source-only canary:
+
+    devenv shell -- ./swift/run-swift run beckon-control-panel --herdr-socket /absolute/path/herdr.sock --config /absolute/path/panel.json --no-save
+
+Only --demo, --no-save, --herdr-socket and --config are supported. Default paths
+expand once under the current user's home: .config/herdr/herdr.sock and
+.config/beckon/control-panel.json. No named/remote sessions are discovered.
+
+For native macOS inspection, devenv shell -- ./swift/package-panel produces an
+unsigned local .build/BeckonStatusPanel.app, installing nothing. Its executable
+accepts the same options. Normal Quit exits only this panel and cancels/waits for
+its bounded reads. SwiftPM package/SDK flags precede the run executable.
+
+### Assignment and authority
+
+The panel owns a version-1 file containing six optional assignments, one socket
+and up to six explicit boards. Deliberate edits save atomically; --no-save retains
+changes in memory. Corrupt/unsupported files are preserved with editing disabled.
+Existing Beckon/Input settings are untouched.
+
+Assign lists all observed agents with exact harness/session identity; titles are
+display labels. Missing/duplicate IDs cannot be assigned. Direct-native slots
+survive array reorder and uniquely observed pane moves, without focus capability.
+
+Coordinator selection requires explicit absolute Trellis executable, workflow
+config, boards registry and board-config paths, plus alias, UID and ledger.
+Select/refresh executes only paths, board-context and board-agents with pinned
+argv and scrubbed routing environment. No agent inspect/read/send, provider
+executable or open/focus operation runs.
+
+Coordinator assignments retain authoritative registration/full Herdr bindings.
+Board drift, changed provider/session/native identity, moved/missing surfaces and
+ambiguity remain unavailable until reselected. Matched surfaces are labeled
+"Live surface matched (provider command not revalidated)". Metadata refresh is
+explicit and separate from status ticks.
+
+### Bounded observation and cleanup
+
+The visible panel polls agent.list every 2.5 seconds, one newline-framed Unix
+socket request at a time. Deadline: two monotonic seconds; response cap: 1 MiB.
+Failures discard state immediately and back off 1/2/4/8 seconds, capped at ten.
+Source changes/disconnects invalidate previews. Assigned samples expire in ten
+seconds; titles, pane order and foreground application never select the source.
+
+Working is blue pulse, idle white, done green, blocked amber, unknown/stale
+neutral and unassigned off. Done means Herdr-reported done/unread (server seen
+state), not task acceptance/universal unread. Blocked implies no structured
+approval request or reason.
+
+Preview serializes and fences generation, source, assignment and metadata around
+fresh reads. It shows the exact identity and live-focus-unavailable message.
+Cancellation/reassignment/source change/shutdown refuse delayed publication.
+
+Metadata uses absolute executable/allowlisted argv, a new process group before
+exec, stdin /dev/null, bounded concurrent pipe draining, three-second command
+and eight-second shared operation deadlines. Overflow, cancellation, deadline
+or exited roots retaining idle pipes trigger TERM/KILL only on the owned group.
+Success requires the direct child reaped and its process group gone, including
+descendants with redirected output. Detached/escaping providers are unsupported and not
+invoked. Unconfirmed cleanup locks capacity until exit/reap evidence and explicit
+Reconcile metadata cleanup. Quit is refused while supervision remains unresolved;
+reconcile explicitly and Quit again. Quit never stops Herdr or other applications.
+
+### Acceptance limits
+
+Fixture coverage includes identities, config preservation on write failure,
+socket framing/caps/timeouts/cancellation, inherited-child cleanup, shared
+metadata deadlines, cancelled previews and demo replay. Cleanup-unconfirmed
+lockout uses simulated supervision state; no destructive live reproduction.
+
+Manual demo labels/colors, preview, disabled focus, reconnect, reorder and
+coordinator mismatch were verified. A short nonpersistent source canary exposed
+43 live agents (41 native identities) and an exact identity preview without
+navigation or config writes. Two naturally occurring state transitions were not
+observed: live transition acceptance remains unverified. Focus, hardware/LED
+integration and runtime installation are deferred.
+
+### Creator Micro personal slot convention
+
+The agreed personal profile uses slot 1 for the Chief of Staff, slot 2 for the
+selected project coordinator, slot 3 for releases, and slots 4–6 for explicitly
+selected individual agents. Use coordinator references where appropriate and
+direct-native assignments for selected workers. Unselected/missing roles remain
+unavailable. This convention does not discover, create or take over coordinators.
+The optional `slotLabels` array names all six cards and assignment-menu targets.
+Omit it to retain generic Slot 1–6 labels. Labels are display guidance only: they
+do not assign, discover or relink a session. Each label is nonempty, contains no
+control characters, and is limited to 128 UTF-8 bytes.
+The generic version-1 format retains six configurable slots; it contains no
+four-fixed/two-dynamic split or hard-coded session IDs. Input owns the physical
+profile, joystick navigation/tools, wheel and cheat sheet.
+
+Optional mic feedback remains a capability assessment. The requested cue is a
+slow red breathing pulse: confirmed capture when a supported observer supplies
+that evidence, otherwise explicitly labeled button-held feedback after real
+press/release verification. Native ChatGPT behavior stays unchanged. No VoiceInk
+patch, shortcut synthesis or per-key writer is enabled. Per-key AG bindings and
+controller handoff require review before replacing an existing microphone chord.

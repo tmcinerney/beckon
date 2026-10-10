@@ -6,11 +6,17 @@ let package = Package(
     platforms: [.macOS(.v13)],
     products: [
         .library(name: "BeckonControl", targets: ["BeckonControl"]),
+        .library(name: "BeckonPanelModel", targets: ["BeckonPanelModel"]),
         .executable(name: "beckon-control-preview", targets: ["BeckonPreview"]),
+        .executable(name: "beckon-control-panel", targets: ["BeckonPanel"]),
     ],
     targets: [
         .target(name: "BeckonControl"),
+        .target(name: "PanelSupport"),
+        .target(name: "BeckonPanelModel", dependencies: ["PanelSupport"]),
         .executableTarget(name: "BeckonPreview", dependencies: ["BeckonControl"]),
+        .executableTarget(name: "BeckonPanel", dependencies: ["BeckonPanelModel"]),
         .testTarget(name: "BeckonControlTests", dependencies: ["BeckonControl"]),
+        .testTarget(name: "BeckonPanelModelTests", dependencies: ["BeckonPanelModel"]),
     ]
 )

@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+set -euo pipefail
+task_swift_dir="$(cd "$(dirname "$0")" && pwd)"
+"$task_swift_dir/run-swift" build --product beckon-control-panel
+task_bin_dir="$("$task_swift_dir/run-swift" build --show-bin-path)"
+task_bundle="$task_swift_dir/.build/BeckonStatusPanel.app"
+mkdir -p "$task_bundle/Contents/MacOS"
+cp "$task_bin_dir/beckon-control-panel" "$task_bundle/Contents/MacOS/beckon-control-panel"
+cat > "$task_bundle/Contents/Info.plist" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleExecutable</key><string>beckon-control-panel</string>
+<key>CFBundleIdentifier</key><string>org.beckon.preview.status-panel</string>
+<key>CFBundleName</key><string>Beckon Status Panel</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+<key>CFBundleVersion</key><string>1</string>
+<key>NSHighResolutionCapable</key><true/>
+</dict></plist>
+PLIST
+printf '%s\n' "$task_bundle"
