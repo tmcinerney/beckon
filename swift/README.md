@@ -49,6 +49,14 @@ unsigned local .build/BeckonStatusPanel.app, installing nothing. Its executable
 accepts the same options. Normal Quit exits only this panel and cancels/waits for
 its bounded reads. SwiftPM package/SDK flags precede the run executable.
 
+GUI acceptance is separate from sandboxed build/test execution. Run GUI commands
+from an interactive macOS desktop terminal, or through a separately authorized
+desktop launch. A restricted agent-shell acceptance launch aborted during
+`_RegisterApplication` / `NSApplication` initialization; the same bundle succeeded
+in the authorized desktop launch. This comparison does not identify the precise
+OS denial. Retain the diagnostic on initialization failure; do not retry
+automatically, change trust/permissions or infer a Herdr/HID failure.
+
 ### Assignment and authority
 
 The panel owns a version-1 file containing six optional assignments, one socket
@@ -111,7 +119,9 @@ coordinator mismatch were verified. A short nonpersistent source canary exposed
 43 live agents (41 native identities) and an exact identity preview without
 navigation or config writes. Two naturally occurring state transitions were not
 observed: live transition acceptance remains unverified. Focus, hardware/LED
-integration and runtime installation are deferred.
+integration and runtime installation are deferred. A later bounded no-save
+desktop pass also verified explicit metadata refresh and normal Quit. The assigned
+agent stayed idle throughout; live transition acceptance remains unverified.
 
 ### Creator Micro personal slot convention
 
