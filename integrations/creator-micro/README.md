@@ -135,3 +135,39 @@ keyboard-setting change.
 
 Fixture tests and compilation do not establish GUI visual acceptance or physical
 LED behavior. No device or live server test is part of the fixture suite.
+
+
+## Offline Input one-key pilot
+
+The same preview executable accepts `--input-pilot` as its only argument in this
+mode. It does not mount the live panel, read panel assignment settings or start
+Herdr observation. It offers a bundled sample and a read-only JSON file importer;
+no app was launched to validate this increment.
+
+For a later approved manual check, use the existing SDK wrapper above with
+`swift run --package-path integrations/creator-micro beckon-creator-micro-preview
+--input-pilot`. Choose **Use sample snapshot**, then explicitly select
+**Daily Workflow · ID 2** and **Herdr · ID 0**, shown at current position 3.
+For an Input export, enter its device-directory ID and choose **Import Input JSON**.
+**Reload file** re-resolves the same IDs without selecting the first layer.
+Deleting a selection or a bad import makes it unavailable. File imports are
+limited to 256 KiB, regular files and Input schema version 1; detected concurrent
+edits, duplicate IDs and unsupported geometry are refused. No file is written.
+The device ID labels a snapshot source; it is not authenticated hardware identity.
+
+The six cards use physical reading order 1,0,2,3,4,5. Only worker slot4 (firmware
+key3 / matrix1,1) has the bundled `beckon.display` v1 `f4` working treatment.
+Other slots remain unassigned. **Simulate AG03 press** increments a local
+acknowledgment only; it is not a HID listener or binding/focus/approval action.
+Snapshot, selection and render changes clear old acknowledgments. Colors and
+motion labels come from the existing Rust RenderPlan shape and palette, not
+Micro Manager's list order or a second Herdr watcher. Fixture status is always
+labeled as such; it supplies no native identity or observation freshness.
+
+Input keeps layers, AppSense, ordinary key actions, joystick, dial, microphone,
+Smart Actions, backlight and underglow. No keymap apply/BridgeController or device
+transport is used. CLI/UI authoritative binding migration remains a separate
+increment. Physical acceptance requires full profile backup/restore, exact device
+and active-layer verification, controller coexistence/ownership, narrow one-key
+write/cleanup isolation, an approved event route, and native focus contracts.
+Fixture tests/build success does not satisfy those gates or prove GUI usability.

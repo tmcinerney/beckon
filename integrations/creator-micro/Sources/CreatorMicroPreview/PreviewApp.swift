@@ -21,22 +21,30 @@ private enum DemoAppearance: String, CaseIterable, Hashable {
     private let demo: DemoSource?
     private let notice: String?
     private let writable: Bool
+    private let inputPilot: Bool
     init() {
         do {
-            // AIDEV-NOTE: This preview can load panel settings but never owns a configuration writer.
-            let bootstrap = try PanelBootstrap(arguments: Array(CommandLine.arguments.dropFirst()),
+            let arguments = Array(CommandLine.arguments.dropFirst())
+            inputPilot = try InputPilotLaunch.isRequested(arguments: arguments)
+            // AIDEV-NOTE: Input mode never mounts PanelView or starts its observer. Its unused
+            // lifecycle model uses only a demo source, with no socket or config-file reader.
+            let bootstrap = try PanelBootstrap(arguments: inputPilot ? ["--demo", "--no-save"] : arguments,
                 home: FileManager.default.homeDirectoryForCurrentUser.path, allowPersistence: false)
             _model = StateObject(wrappedValue: bootstrap.model)
             demo = bootstrap.demo; notice = bootstrap.notice; writable = bootstrap.writable
         } catch {
-            FileHandle.standardError.write(Data("Preview unavailable: \(error.localizedDescription)\nUsage: beckon-creator-micro-preview [--demo] [--no-save] [--herdr-socket ABSOLUTE] [--config ABSOLUTE]\nSaving, hardware and focus are unavailable.\n".utf8))
+            FileHandle.standardError.write(Data("Preview unavailable: \(error.localizedDescription)\nUsage: beckon-creator-micro-preview [--input-pilot] OR [--demo] [--no-save] [--herdr-socket ABSOLUTE] [--config ABSOLUTE]\nSaving, hardware and focus are unavailable.\n".utf8))
             exit(2)
         }
     }
     var body: some Scene {
         WindowGroup("Creator Micro · Status Preview", id: "panel") {
-            CreatorMicroPreviewWindow(model: model, demo: demo, notice: notice, writable: writable)
-            .onAppear {delegate.model = model}
+            if inputPilot {
+                InputPilotView()
+            } else {
+                CreatorMicroPreviewWindow(model: model, demo: demo, notice: notice, writable: writable)
+                    .onAppear {delegate.model = model}
+            }
         }.defaultSize(width: 1100, height: 840)
         MenuBarExtra("Creator Micro Preview", systemImage: "circle.grid.2x2") {
             OpenPanelButton()

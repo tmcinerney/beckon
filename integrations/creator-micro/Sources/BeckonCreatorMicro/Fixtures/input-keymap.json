@@ -1,0 +1,266 @@
+{
+  "version": 1,
+  "activeProfileId": 0,
+  "profiles": [
+    {
+      "id": 2,
+      "name": "Daily Workflow",
+      "layers": [
+        {
+          "id": 3,
+          "name": "ChatGPT",
+          "color": 16711680,
+          "layout": {
+            "keymap": [
+              [
+                "KC_NONE",
+                "KC_NONE"
+              ],
+              [
+                "KC_NONE",
+                "KC_NONE",
+                "KC_NONE",
+                "KC_NONE"
+              ],
+              [
+                "KA_A38",
+                "KA_M2",
+                "KA_M3",
+                "KC_ESC"
+              ],
+              [
+                "KC_NONE",
+                "KA_M1",
+                "KC_ENT"
+              ]
+            ],
+            "encoders": [
+              [
+                "KC_NONE",
+                "KC_NONE",
+                "KI_CS_TOGGLE"
+              ]
+            ],
+            "joystick": {
+              "type": "RADIAL",
+              "sectors": [
+                {
+                  "k": "KA_A21",
+                  "a1": 0.1875,
+                  "a2": 0.3125
+                }
+              ]
+            }
+          }
+        },
+        {
+          "id": 1,
+          "name": "Home",
+          "color": 16711680,
+          "layout": {
+            "keymap": [
+              [
+                "KC_NONE",
+                "KC_NONE"
+              ],
+              [
+                "KC_NONE",
+                "KC_NONE",
+                "KC_NONE",
+                "KC_NONE"
+              ],
+              [
+                "KA_A38",
+                "KA_M2",
+                "KA_M3",
+                "KC_ESC"
+              ],
+              [
+                "KC_NONE",
+                "KA_M1",
+                "KC_ENT"
+              ]
+            ],
+            "encoders": [
+              [
+                "KC_NONE",
+                "KC_NONE",
+                "KI_CS_TOGGLE"
+              ]
+            ],
+            "joystick": {
+              "type": "RADIAL",
+              "sectors": [
+                {
+                  "k": "KA_A21",
+                  "a1": 0.1875,
+                  "a2": 0.3125
+                }
+              ]
+            }
+          }
+        },
+        {
+          "id": 0,
+          "name": "Herdr",
+          "color": 16711680,
+          "layout": {
+            "keymap": [
+              [
+                "KC_NONE",
+                "KC_NONE"
+              ],
+              [
+                "KC_NONE",
+                "KC_NONE",
+                "KC_NONE",
+                "KC_NONE"
+              ],
+              [
+                "KA_A38",
+                "KA_M2",
+                "KA_M3",
+                "KC_ESC"
+              ],
+              [
+                "KC_NONE",
+                "KA_M1",
+                "KC_ENT"
+              ]
+            ],
+            "encoders": [
+              [
+                "KC_NONE",
+                "KC_NONE",
+                "KI_CS_TOGGLE"
+              ]
+            ],
+            "joystick": {
+              "type": "RADIAL",
+              "sectors": [
+                {
+                  "k": "KA_A21",
+                  "a1": 0.1875,
+                  "a2": 0.3125
+                }
+              ]
+            }
+          },
+          "linkedAppId": 0
+        },
+        {
+          "id": 5,
+          "name": "Delta",
+          "color": 16711680,
+          "layout": {
+            "keymap": [
+              [
+                "KC_NONE",
+                "KC_NONE"
+              ],
+              [
+                "KC_NONE",
+                "KC_NONE",
+                "KC_NONE",
+                "KC_NONE"
+              ],
+              [
+                "KA_A38",
+                "KA_M2",
+                "KA_M3",
+                "KC_ESC"
+              ],
+              [
+                "KC_NONE",
+                "KA_M1",
+                "KC_ENT"
+              ]
+            ],
+            "encoders": [
+              [
+                "KC_NONE",
+                "KC_NONE",
+                "KI_CS_TOGGLE"
+              ]
+            ],
+            "joystick": {
+              "type": "RADIAL",
+              "sectors": [
+                {
+                  "k": "KA_A21",
+                  "a1": 0.1875,
+                  "a2": 0.3125
+                }
+              ]
+            }
+          },
+          "linkedAppId": 1
+        },
+        {
+          "id": 4,
+          "name": "Premiere Mac",
+          "color": 16711680,
+          "layout": {
+            "keymap": [
+              [
+                "KC_NONE",
+                "KC_NONE"
+              ],
+              [
+                "KC_NONE",
+                "KC_NONE",
+                "KC_NONE",
+                "KC_NONE"
+              ],
+              [
+                "KA_A38",
+                "KA_M2",
+                "KA_M3",
+                "KC_ESC"
+              ],
+              [
+                "KC_NONE",
+                "KA_M1",
+                "KC_ENT"
+              ]
+            ],
+            "encoders": [
+              [
+                "KC_NONE",
+                "KC_NONE",
+                "KI_CS_TOGGLE"
+              ]
+            ],
+            "joystick": {
+              "type": "RADIAL",
+              "sectors": [
+                {
+                  "k": "KA_A21",
+                  "a1": 0.1875,
+                  "a2": 0.3125
+                }
+              ]
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "linkedApps": [
+    {
+      "id": 0,
+      "name": "Ghostty-mac",
+      "process": "com.mitchellh.ghostty",
+      "path": ""
+    },
+    {
+      "id": 1,
+      "name": "Delta-mac",
+      "process": "com.zed-industries.delta",
+      "path": ""
+    }
+  ],
+  "deviceSpecificConfig": "{}",
+  "macros": [],
+  "multiActions": []
+}

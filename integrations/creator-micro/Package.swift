@@ -21,7 +21,7 @@ let package = Package(
         .target(name: "BeckonCreatorMicro", dependencies: [
             .product(name: "BeckonPanelModel", package: "swift"),
             .product(name: "WLKit", package: "WLTools"),
-        ]),
+        ], resources: [.process("Fixtures")]),
         .executableTarget(name: "CreatorMicroPreview", dependencies: [
             "BeckonCreatorMicro",
             .product(name: "BeckonPanelUI", package: "swift"),
