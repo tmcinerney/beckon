@@ -31,12 +31,14 @@ pub fn decode_pair(
     panes: serde_json::Value,
     agents: serde_json::Value,
 ) -> Result<Vec<Observation>> {
-    let mut panes: Vec<Observation> = serde_json::from_value(panes)?;
+    let panes: Vec<Observation> = serde_json::from_value(panes)?;
     let agents: Vec<Observation> = serde_json::from_value(agents)?;
     let mut ids = std::collections::BTreeSet::new();
     let mut terminals = std::collections::BTreeSet::new();
     let mut native_ids = std::collections::BTreeSet::new();
-    for pane in &mut panes {
+    let had_panes = !panes.is_empty();
+    let mut verified = Vec::new();
+    for pane in panes {
         if pane.pane.pane_id.is_empty()
             || pane.terminal_id.is_empty()
             || !ids.insert(pane.pane.pane_id.clone())
@@ -44,35 +46,47 @@ pub fn decode_pair(
         {
             bail!("missing or duplicate native pane/terminal identity");
         }
+        if let Some(native) = &pane.agent_session
+            && !native_ids.insert((native.agent.clone(), native.value.clone()))
+        {
+            bail!("duplicate native agent identity");
+        }
         let matches: Vec<_> = agents
             .iter()
             .filter(|agent| agent.pane.pane_id == pane.pane.pane_id)
             .collect();
+        // AIDEV-NOTE: Quarantine incomplete per-pane joins; unrelated panes must not hide a verified target.
+        // Global duplicate identities still invalidate the snapshot rather than choosing an arbitrary owner.
         if pane.pane.agent.is_some() {
             if matches.len() != 1 {
-                bail!("agent observation absent or ambiguous");
+                continue;
             }
             let agent = matches[0];
             let Some(native) = &pane.agent_session else {
-                bail!("native agent session absent");
+                continue;
             };
             if agent.terminal_id != pane.terminal_id
                 || agent.pane.agent != pane.pane.agent
                 || agent.agent_session != pane.agent_session
                 || agent.pane.agent_status != pane.pane.agent_status
-                || !native_ids.insert((native.agent.clone(), native.value.clone()))
                 || native.kind != "id"
                 || native.value.is_empty()
                 || Some(&native.agent) != pane.pane.agent.as_ref()
             {
-                bail!("native observations inconsistent");
+                continue;
             }
-        } else {
-            if !matches.is_empty() || pane.agent_session.is_some() {
-                bail!("shell identity inconsistent");
-            }
-            // Preserve the normal cache status; normalize only the pilot projection.
+        } else if pane.agent_session.is_some()
+            || matches.len() > 1
+            || matches.iter().any(|agent| {
+                agent.terminal_id != pane.terminal_id
+                    || agent.pane.agent.is_some()
+                    || agent.agent_session.is_some()
+            })
+        {
+            continue;
         }
+        // Preserve normal cache status; shell metadata is normalized only in the pilot projection.
+        verified.push(pane);
     }
     if agents
         .iter()
@@ -80,7 +94,10 @@ pub fn decode_pair(
     {
         bail!("orphan agent observation");
     }
-    Ok(panes)
+    if had_panes && verified.is_empty() {
+        bail!("no verified pane observations");
+    }
+    Ok(verified)
 }
 pub fn project(
     store: &dyn BindingStore,
@@ -236,6 +253,49 @@ mod tests {
         assert_eq!(frame["available"], false);
         assert_eq!(frame["binding"]["pane_id"], "w1:t1:p1");
     }
+    #[test]
+    fn incomplete_unrelated_agents_do_not_hide_verified_target() {
+        let native = json!({"pane_id":"chosen","terminal_id":"chosen-terminal","agent":"codex",
+            "agent_status":"idle","agent_session":{"agent":"codex","kind":"id","value":"chosen-native"}});
+        let incomplete = json!({"pane_id":"incomplete","terminal_id":"other-terminal","agent":"codex",
+            "agent_status":"idle"});
+        let shell = json!({"pane_id":"shell","terminal_id":"shell-terminal","agent":null,
+            "agent_status":"idle"});
+        let observations = decode_pair(
+            json!([native.clone(), incomplete.clone(), shell.clone()]),
+            json!([native.clone(), incomplete, shell]),
+        )
+        .unwrap();
+        assert_eq!(observations.len(), 2);
+        let now = Instant::now();
+        let mut source = ReadOnly {
+            state: BindingState {
+                state_version: 1,
+                bindings: vec![Binding {
+                    key: "f4".into(),
+                    session: "test".into(),
+                    pane_id: "chosen".into(),
+                }],
+            },
+            snapshot: Some(Snapshot {
+                socket: "/test.sock".into(),
+                generation: 1,
+                refresh: 1,
+                at: now,
+                observations,
+            }),
+        };
+        let display = crate::render::DisplayConfig::default();
+        let frame = project(&source, &source, &display, now).unwrap();
+        assert_eq!(frame["available"], true);
+        assert_eq!(frame["agent_session"]["value"], "chosen-native");
+        source.state.bindings[0].pane_id = "incomplete".into();
+        assert_eq!(
+            project(&source, &source, &display, now).unwrap()["available"],
+            false
+        );
+    }
+
     #[test]
     fn requires_matching_real_native_agent_pair() {
         let agent = serde_json::json!({"pane_id":"p1","terminal_id":"t1","agent":"codex","agent_status":"blocked","agent_session":{"agent":"codex","kind":"id","value":"native-1"}});
