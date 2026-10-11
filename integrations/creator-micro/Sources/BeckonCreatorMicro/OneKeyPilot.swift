@@ -163,16 +163,28 @@ public enum OneKeyLED {
 }
 @MainActor public protocol OneKeyDevicePort:AnyObject {
     var generation:UInt64 {get}
+    var transportDeadline:Double {get}
+    var remainingRequests:Int {get}
     func connect() throws
     func read(_ method:String) async throws -> Any?
     func paint(_ record:OAI.Thread) async throws
+    func cleanupStatus() async throws -> Any?
+    func cleanupPaint() async throws
     func disconnect()
+}
+extension OneKeyDevicePort {
+    public var transportDeadline:Double {-.infinity}
+    public var remainingRequests:Int {0}
+    public func cleanupStatus() async throws -> Any? {throw InputPilotError.invalid("Cleanup port unavailable")}
+    public func cleanupPaint() async throws {throw InputPilotError.invalid("Cleanup port unavailable")}
 }
 @MainActor final class OneKeyUSBPort:OneKeyDevicePort {
     let device:WLDevice
     private var connectedAt:Double?
     init(selector:PilotDeviceSelector) {device=WLDevice(pilotSelector:selector)}
     var generation:UInt64 {device.connectionGeneration}
+    var transportDeadline:Double {device.pilotBudgetState?.deadline ?? -.infinity}
+    var remainingRequests:Int {device.pilotBudgetState?.remainingRequests ?? 0}
     func connect() throws {try device.connect();connectedAt=ProcessInfo.processInfo.systemUptime}
     func read(_ method:String) async throws -> Any? {
         let expected=generation
@@ -181,23 +193,30 @@ public enum OneKeyLED {
             if method=="keymap.probe" {
                 let result=try await OneKeyFileReader.probe(deadline:connectedAt+60,clock:{ProcessInfo.processInfo.systemUptime},
                     valid:{self.device.isConnected && self.generation==expected}) {method,params in
-                        try await self.device.callAsync(method,params:params,expectedGeneration:expected)
+                        try await self.device.callAsync(method,params:params,expectedGeneration:expected,reserving:2)
                     }
                 return ["requested":result.requested,"received":result.received,"total":result.total]
             }
             let result=try await OneKeyFileReader.read(deadline:connectedAt+60,clock:{ProcessInfo.processInfo.systemUptime},
                 valid:{self.device.isConnected && self.generation==expected}) {method,params in
-                    try await self.device.callAsync(method,params:params,expectedGeneration:expected)
+                    try await self.device.callAsync(method,params:params,expectedGeneration:expected,reserving:2)
                 }
             guard let text=String(data:result.bytes,encoding:.utf8) else {throw InputPilotError.invalid("Chunked keymap is not UTF-8")}
             return ["data":text,"chunks":result.chunks,"checksum_verified":true]
         }
         guard ["sys.version","device.status"].contains(method) else {throw InputPilotError.invalid("Pilot read refused")}
-        return try await device.callAsync(method,params:nil,expectedGeneration:expected)
+        return try await device.callAsync(method,params:nil,expectedGeneration:expected,reserving:2)
     }
-    func paint(_ record:OAI.Thread) async throws {
+    func cleanupStatus() async throws -> Any? {
+        try await device.callAsync("device.status",params:nil,expectedGeneration:generation)
+    }
+    func cleanupPaint() async throws {try await paint(OneKeyLED.cleanup,reserving:0)}
+    func paint(_ record:OAI.Thread) async throws {try await paint(record,reserving:2)}
+    private func paint(_ record:OAI.Thread,reserving:Int) async throws {
         guard record.id==3,record.syncKeys==false,record.syncAmbient==false else {throw InputPilotError.invalid("Only unsynchronized id3 allowed")}
-        _ = try await device.callAsync(OAI.methodThreads,params:OAI.threadsParams([record]),expectedGeneration:generation)
+        let reply=try await device.callAsync(OAI.methodThreads,params:OAI.threadsParams([record]),expectedGeneration:generation,reserving:reserving)
+        guard let dict=reply as? [String:Any],let ok=dict["ok"] as? NSNumber,
+              CFGetTypeID(ok) != CFBooleanGetTypeID(),ok.doubleValue==1 else {throw InputPilotError.invalid("Slot4 LED acknowledgment missing; no physical success claimed")}
     }
     func disconnect() {device.disconnect(reason:nil)}
 }

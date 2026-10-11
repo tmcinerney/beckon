@@ -92,10 +92,10 @@ private enum DemoAppearance: String, CaseIterable, Hashable {
     var model:PanelModel?
     var oneKey:OneKeyLiveModel?
     func applicationShouldTerminate(_ sender:NSApplication)->NSApplication.TerminateReply {
-        oneKey?.stop()
-        guard let model else {return .terminateNow}
+        guard oneKey != nil || model != nil else {return .terminateNow}
         Task {
-            do {try await model.shutdownAndWait();sender.reply(toApplicationShouldTerminate:true)}
+            if let oneKey {await oneKey.shutdownAndWait()}
+            do {try await model?.shutdownAndWait();sender.reply(toApplicationShouldTerminate:true)}
             catch {sender.reply(toApplicationShouldTerminate:false)}
         }
         return .terminateLater

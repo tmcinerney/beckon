@@ -14,6 +14,11 @@ import BeckonPanelModel
     @Published public private(set) var layerIndex:Int?
     @Published public private(set) var running=false
     @Published public private(set) var usbRunning=false
+    @Published public private(set) var acceptanceActive=false
+    @Published public private(set) var acceptanceStatus="Slot4 pilot disabled · explicit start required"
+    @Published public private(set) var stoppingUSB=false
+    private var acceptance:OneKeyAcceptance?
+    private var usbStopTask:Task<Void,Never>?
     private var observation=OneKeyObservation(),events=AG03Observer()
     private var backendTask:Task<Void,Never>?,usbTask:Task<Void,Never>?
     private var backendRun=0,usbRun=0
@@ -22,7 +27,7 @@ import BeckonPanelModel
     public init(launch:OneKeyLaunch) {self.launch=launch;port=OneKeyUSBPort(selector:launch.selector)}
     public var currentFrame:OneKeyFrame? {observation.current(now:ProcessInfo.processInfo.systemUptime)}
     public var reselectionRequired:Bool {observation.requiresReselection}
-    public var ledStatus:String {"LED writer DISARMED · ownership, reply drain, omitted-ID preservation, layer scope and cleanup remain unverified"}
+    public var ledStatus:String {acceptanceActive ? "Bounded slot4 LED/event pilot · focus unavailable":"LED writer DISARMED · no production enable"}
     public func selectAndObserve() {
         stopBackend();observation.select();running=true;backendRun+=1;let run=backendRun
         backendTask=Task { [weak self] in
@@ -52,27 +57,51 @@ import BeckonPanelModel
     func recordLayerStatus(_ reply:[String:Any]?,observedAt:Double) {
         layerIndex=reply?["layer_index"] as? Int;layerObservedAt=observedAt
     }
-    public func observeUSB(probe:Bool=false) {
-        guard !usbRunning else {return}
+    public func startSlot4Acceptance() {
+        guard launch.allowLEDs else {acceptanceStatus="Launch was not authorized for slot4 acceptance";return}
+        selectAndObserve();observeUSB(pilot:true)
+    }
+    public func observeUSB(probe:Bool=false,pilot:Bool=false) {
+        guard !usbRunning,!stoppingUSB,!pilot || launch.allowLEDs else {return}
+        if pilot,port.transportDeadline-ProcessInfo.processInfo.systemUptime<=OneKeyAcceptance.cleanupReserve {
+            acceptanceStatus="Process USB budget cannot reserve cleanup; close stopped pilot app before a new coordinated run";return
+        }
         // No reconnect loop, no constructor I/O and no automatic native permission response.
         do {try port.connect()} catch {deviceStatus=error.localizedDescription;return}
         usbRun+=1;let run=usbRun,generation=port.generation
         events.connection(generation);usbRunning=true;receipt=nil;usbDiagnostics="Connected · no USB replies captured in this observation"
         port.device.onNotification={ [weak self] method,params in
             guard let self,self.usbRun==run,self.usbRunning,self.port.generation==generation else {return}
-            if let receipt=self.events.receive(method:method,params:params,generation:generation,now:ProcessInfo.processInfo.systemUptime) {self.receipt=receipt}
+            if let receipt=self.events.receive(method:method,params:params,generation:generation,now:ProcessInfo.processInfo.systemUptime) {
+                self.receipt=receipt
+                if let acceptance=self.acceptance {
+                    Task { [weak self] in
+                        guard let self,self.usbRun==run,self.usbRunning else {return}
+                        do {
+                            let status=try await acceptance.acceptEvent(receipt)
+                            guard self.usbRun==run,self.usbRunning else {return}
+                            self.acceptanceStatus="AG03 press received · event-time layer unknown · \(status)"
+                        } catch {if self.usbRun==run {self.stopUSB(error.localizedDescription)}}
+                    }
+                }
+            }
         }
         port.device.onDisconnect={ [weak self] reason in self?.stopUSB(reason) }
         usbTask=Task { [weak self] in
             guard let self else {return}
-            let deadline=ProcessInfo.processInfo.systemUptime+60
+            let deadline=min(ProcessInfo.processInfo.systemUptime+60,port.transportDeadline)
+            let acceptanceDeadline=deadline-OneKeyAcceptance.cleanupReserve
             var phase="sys.version",snapshotReadInThisRun=false,fileEvidence:String?
+            var verifiedDeviceScope:OneKeyVerifiedScope?
             do {
                 let version=try await port.read("sys.version") as? [String:Any]
                 guard usbRun==run,!Task.isCancelled else {return}
                 guard version?["version"] as? String=="0.6.3" else {throw InputPilotError.invalid("Unsupported or missing firmware version")}
                 usbDiagnostics="sys.version accepted firmware 0.6.3"
                 while !Task.isCancelled,usbRun==run,ProcessInfo.processInfo.systemUptime<deadline {
+                    if pilot,ProcessInfo.processInfo.systemUptime>=acceptanceDeadline {
+                        stopUSB("Slot4 acceptance ended · remaining budget reserved for cleanup");return
+                    }
                     phase="device.status"
                     let statusReply=try await port.read("device.status")
                     guard usbRun==run,!Task.isCancelled,port.generation==generation else {return}
@@ -82,6 +111,15 @@ import BeckonPanelModel
                     let statusEvidence="device.status: \(OneKeyUSBReply.summary(statusReply)); layerIndex=\(rawStatus?["layer_index"] as? Int ?? -1)"
                     usbDiagnostics="firmware 0.6.3 · \(statusEvidence)"+(fileEvidence.map {" · "+$0} ?? "")
                     if snapshotReadInThisRun {
+                        if pilot {
+                            if acceptance==nil,let verifiedDeviceScope,let rawStatus {
+                                let scope=try verifiedDeviceScope.resolve(status:rawStatus,generation:generation)
+                                acceptance=try OneKeyAcceptance(port:port,scope:scope,allowed:launch.allowLEDs,deadline:acceptanceDeadline,clock:{ProcessInfo.processInfo.systemUptime})
+                                acceptanceActive=true;acceptanceStatus="Slot4 only · temporary light/event acceptance · \(OneKeyAcceptance.focusUnavailable)"
+                            }
+                            try await acceptance?.update({self.currentFrame?.render})
+                            guard usbRun==run,!Task.isCancelled,port.generation==generation else {return}
+                        }
                         try? await Task.sleep(nanoseconds:1_000_000_000);continue
                     }
                     if probe {
@@ -101,7 +139,9 @@ import BeckonPanelModel
                     phase="keymap JSON"
                     try OneKeyUSBReply.validateJSON(text)
                     phase="keymap schema"
-                    snapshot=try InputSnapshot.decode(Data(text.utf8),deviceID:launch.selector.serial)
+                    let verifiedSnapshot=try InputSnapshot.decode(Data(text.utf8),deviceID:launch.selector.serial)
+                    verifiedDeviceScope=OneKeyVerifiedScope(deviceSnapshot:verifiedSnapshot,generation:generation)
+                    snapshot=verifiedSnapshot
                     snapshotReadInThisRun=true
                     deviceStatus="USB reports observed · correlation unverified until owner/reset/drain proof · no layer attribution or LED writes"
                     try? await Task.sleep(nanoseconds:1_000_000_000)
@@ -111,13 +151,26 @@ import BeckonPanelModel
         }
     }
     public func stopUSB(_ reason:String="Stopped") {
+        guard !stoppingUSB else {return}
         usbRun+=1;usbTask?.cancel();usbTask=nil;usbRunning=false
-        port.device.onNotification=nil;port.device.onDisconnect=nil;port.disconnect()
+        port.device.onNotification=nil;port.device.onDisconnect=nil
+        let retired=acceptance;acceptance=nil;acceptanceActive=false
+        if let retired {
+            stoppingUSB=true
+            usbStopTask=Task { [weak self] in
+                await retired.stop()
+                guard let self else {return}
+                if self.port.generation==retired.generation {self.port.disconnect()}
+                self.stoppingUSB=false;self.usbStopTask=nil
+                self.acceptanceStatus="Stopped · id3 cleanup ACK=\(retired.cleanupAcknowledged) · Input owner must restore binding/appearance"
+            }
+        } else {port.disconnect()}
         layerIndex=nil;layerObservedAt=nil;deviceStatus=reason+" · writer disarmed; no hardware cleanup claimed"
     }
     public func retainView(_ id:UUID) {viewOwners.insert(id)}
     public func releaseView(_ id:UUID) {guard viewOwners.remove(id) != nil else {return};if viewOwners.isEmpty {stop()}}
     public func stop() {stopBackend();stopUSB()}
+    public func shutdownAndWait() async {stop();await usbStopTask?.value}
 }
 @MainActor public struct OneKeyPilotView:View {
     @ObservedObject private var model:OneKeyLiveModel
@@ -148,10 +201,13 @@ import BeckonPanelModel
             }
             Divider()
             HStack {
-                Button("Observe exact USB device for 60 seconds") {model.observeUSB()}.disabled(model.usbRunning || model.launch.selector.serial=="STATUS-ONLY-NOT-A-DEVICE")
-                Button("Experimental single ≤192-byte prefix read") {model.observeUSB(probe:true)}.disabled(model.usbRunning || model.launch.selector.serial=="STATUS-ONLY-NOT-A-DEVICE")
+                Button("Observe exact USB device for 60 seconds") {model.observeUSB()}.disabled(model.usbRunning || model.stoppingUSB || model.launch.selector.serial=="STATUS-ONLY-NOT-A-DEVICE")
+                Button("Experimental single ≤192-byte prefix read") {model.observeUSB(probe:true)}.disabled(model.usbRunning || model.stoppingUSB || model.launch.selector.serial=="STATUS-ONLY-NOT-A-DEVICE")
                 Button("Stop USB") {model.stopUSB()}.disabled(!model.usbRunning)
             }
+            Button("Start bounded slot4 light/event pilot (focus unavailable)") {model.startSlot4Acceptance()}
+                .disabled(!model.launch.allowLEDs || model.usbRunning || model.stoppingUSB || model.launch.selector.serial=="STATUS-ONLY-NOT-A-DEVICE")
+            Text(model.acceptanceStatus).textSelection(.enabled)
             Text(model.deviceStatus).textSelection(.enabled)
             Text(model.usbDiagnostics).font(.caption).textSelection(.enabled)
             if let snapshot=model.snapshot {
