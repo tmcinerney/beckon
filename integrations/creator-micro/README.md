@@ -1,9 +1,10 @@
-# Creator Micro status frames
+# Creator Micro status preview
 
 Optional, source-only integration of Beckon's selected native agent slots with
 Micro Manager's WLKit library. The core Beckon package has no WLKit dependency.
-There is no executable, device writer, polling loop, HID listener, activation flag,
-keymap editor, focus action or approval sender in this package.
+The optional `beckon-creator-micro-preview` app displays the prepared status on
+screen. It uses the existing panel observer and has no device writer, HID listener,
+activation flag, keymap editor, focus action or approval sender.
 
 `StatusAdapter.prepare(configuration:snapshot:directory:now:)` uses the same
 `PanelConfiguration` and `SlotResolver` as the panel. Call it with an existing
@@ -35,7 +36,8 @@ off. Coordinator rebindings require explicit reselection through existing policy
 The frame represents Herdr's latest reported state. It cannot detect a native
 session replacement before Herdr reports it. `focusAvailable` and
 `liveWriterAvailable` are always false. Frames must be recomputed for new status,
-configuration or time; this library cannot clear physical lights when disconnected.
+configuration or time. The preview recomputes against the shared panel model and
+clock; neither the library nor the preview can clear physical lights when disconnected.
 
 Future hardware activation requires a negotiated single writer with Input, a
 backed-up/read-back profile, and proven layer-scoped write/revocation support.
@@ -68,3 +70,45 @@ devenv shell -- bash -c '
 Use `swift build` instead of `swift test` for the library build. The integration
 suite uses decoded fixtures only; upstream WLKit live-device/server tests are not
 run. Core verification remains `devenv shell -- ./swift/run-swift test`.
+
+## Preview app
+
+The optional app composes the core `BeckonPanelUI` and `PanelModel` with the status
+adapter. The core package stays independent of WLKit. A single observer supplies
+both the assignment panel and the physical two-key/four-key layout; no second
+service or device connection is started. Every mode disables saving, hardware and
+agent focus. Assignments, source selection and explicit coordinator metadata
+selection affect memory only. Existing panel configuration may be read but is
+never written; corrupt files are preserved and editing is disabled.
+
+Expand **Assign agents to the six slots** for the existing chooser. Slots use
+explicit native identities or accepted coordinator bindings. Missing identities
+and roles stay unassigned; titles or tab order never select a replacement.
+Changing a source, disconnecting or expiring an observation turns the prepared
+indicators off. Displayed unavailable reasons and connection errors come from the
+existing model, not a claim that an agent has crashed.
+
+Build without launching (same shell/SDK and pinned WLKit selection as above):
+
+```sh
+devenv shell -- bash -c '
+  unset SDKROOT DEVELOPER_DIR
+  export DEVELOPER_DIR="$(/usr/bin/xcode-select -p)"
+  export SDKROOT="$(/usr/bin/xcrun --sdk macosx --show-sdk-path)"
+  exec /usr/bin/xcrun swift build --package-path integrations/creator-micro \
+    --product beckon-creator-micro-preview --sdk "$SDKROOT"
+'
+```
+
+Launching and installing are separate decisions. For a later approved manual
+check, `swift run` with that same wrapper, SDK and package takes
+`beckon-creator-micro-preview --demo --no-save`. A bounded live canary additionally
+selects `--herdr-socket ABSOLUTE` and optionally `--config ABSOLUTE`; it reads the
+existing default server without starting or restarting it. `--save`, `--focus` and
+hardware options are rejected. No automatic AppSense link or layer switch exists.
+Input owns the active profile; its documented manual native ChatGPT layer fallback
+is preserved. A hardware pilot still requires exact device/profile/layer ownership
+and proven write revocation.
+
+Fixture tests and compilation do not establish GUI visual acceptance or physical
+LED behavior. No device or live server test is part of the fixture suite.

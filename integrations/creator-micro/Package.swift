@@ -12,12 +12,19 @@ if let path = ProcessInfo.processInfo.environment["BECKON_WLKIT_PATH"] {
 let package = Package(
     name: "BeckonCreatorMicro",
     platforms: [.macOS(.v13)],
-    products: [.library(name: "BeckonCreatorMicro", targets: ["BeckonCreatorMicro"])],
+    products: [
+        .library(name: "BeckonCreatorMicro", targets: ["BeckonCreatorMicro"]),
+        .executable(name: "beckon-creator-micro-preview", targets: ["CreatorMicroPreview"]),
+    ],
     dependencies: [.package(path: "../../swift"), wlKitDependency],
     targets: [
         .target(name: "BeckonCreatorMicro", dependencies: [
             .product(name: "BeckonPanelModel", package: "swift"),
             .product(name: "WLKit", package: "WLTools"),
+        ]),
+        .executableTarget(name: "CreatorMicroPreview", dependencies: [
+            "BeckonCreatorMicro",
+            .product(name: "BeckonPanelUI", package: "swift"),
         ]),
         .testTarget(name: "BeckonCreatorMicroTests", dependencies: ["BeckonCreatorMicro"]),
     ]

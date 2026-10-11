@@ -285,4 +285,6 @@ enable it only when that behavior is intended.
 
 The optional [Creator Micro integration](integrations/creator-micro/README.md)
 prepares six per-key WLKit status records using the panel's existing assignments.
-It has no live device writer or focus action; physical activation remains separate.
+Its optional Swift preview app shows the physical six-slot layout with in-memory
+assignment controls and read-only observations. Saving, device writes and focus
+are disabled; launch and physical activation remain separate decisions.

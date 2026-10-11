@@ -7,6 +7,7 @@ let package = Package(
     products: [
         .library(name: "BeckonControl", targets: ["BeckonControl"]),
         .library(name: "BeckonPanelModel", targets: ["BeckonPanelModel"]),
+        .library(name: "BeckonPanelUI", targets: ["BeckonPanelUI"]),
         .executable(name: "beckon-control-preview", targets: ["BeckonPreview"]),
         .executable(name: "beckon-control-panel", targets: ["BeckonPanel"]),
     ],
@@ -15,7 +16,8 @@ let package = Package(
         .target(name: "PanelSupport"),
         .target(name: "BeckonPanelModel", dependencies: ["PanelSupport"]),
         .executableTarget(name: "BeckonPreview", dependencies: ["BeckonControl"]),
-        .executableTarget(name: "BeckonPanel", dependencies: ["BeckonPanelModel"]),
+        .target(name: "BeckonPanelUI", dependencies: ["BeckonPanelModel"]),
+        .executableTarget(name: "BeckonPanel", dependencies: ["BeckonPanelUI"]),
         .testTarget(name: "BeckonControlTests", dependencies: ["BeckonControl"]),
         .testTarget(name: "BeckonPanelModelTests", dependencies: ["BeckonPanelModel"]),
     ]

@@ -1,17 +1,21 @@
 import SwiftUI
 import BeckonPanelModel
 
-struct PanelView:View {
+@MainActor public struct PanelView:View {
     @ObservedObject var model:PanelModel
     let demo:DemoSource?
     let notice:String?
     let writable:Bool
+    let supplement:AnyView?
     @State private var socket=""
     @State private var editError=""
     @State private var demoLabel="Working / idle"
     @State private var board=BoardSelection(executable:"",config:"",registry:"",boardConfig:"",alias:"",uid:"",ledger:"")
     @State private var showMetadata=false
-    var body:some View {
+    public init(model:PanelModel,demo:DemoSource?=nil,notice:String?=nil,writable:Bool=true,supplement:AnyView?=nil) {
+        self.model=model;self.demo=demo;self.notice=notice;self.writable=writable;self.supplement=supplement
+    }
+    public var body:some View {
         ScrollView {
             VStack(alignment:.leading,spacing:16) {
                 HStack {
@@ -39,11 +43,10 @@ struct PanelView:View {
                 }
                 Text("Read-only observations. Live focus unavailable: atomic identity-targeted transport not implemented.")
                     .font(.callout).foregroundStyle(.secondary)
-                TimelineView(.periodic(from:.now,by:0.5)) { timeline in
-                    LazyVGrid(columns:[GridItem(.flexible()),GridItem(.flexible()),GridItem(.flexible())],spacing:12) {
-                        ForEach(0..<6,id:\.self) {slot in slotView(slot,now:timeline.date.timeIntervalSince1970)}
-                    }
-                }
+                if let supplement {
+                    supplement
+                    DisclosureGroup("Assign agents to the six slots") {assignmentGrid}
+                } else {assignmentGrid}
                 if !model.preview.isEmpty {
                     Text(model.preview).font(.system(.callout,design:.monospaced))
                         .textSelection(.enabled).padding().frame(maxWidth:.infinity,alignment:.leading)
@@ -105,6 +108,13 @@ struct PanelView:View {
             if let selected=model.configuration.boards.first {board=selected}
         }
     }
+    private var assignmentGrid:some View {
+TimelineView(.periodic(from:.now,by:0.5)) { timeline in
+                    LazyVGrid(columns:[GridItem(.flexible()),GridItem(.flexible()),GridItem(.flexible())],spacing:12) {
+                        ForEach(0..<6,id:\.self) {slot in slotView(slot,now:timeline.date.timeIntervalSince1970)}
+                    }
+                }
+    }
     @ViewBuilder private func slotView(_ slot:Int,now:Double)->some View {
         let native=model.configuration.slots[slot] ?? model.configuration.coordinators[slot]?.native
         let record=try? model.record(slot:slot,now:now)
@@ -112,7 +122,7 @@ struct PanelView:View {
         VStack(alignment:.leading,spacing:9) {
             HStack {
                 Circle().fill(color(presentation?.color,native:native))
-                    .frame(width:14,height:14)
+                    .frame(width:14,height:14).accessibilityHidden(true)
                     .opacity(presentation?.pulse==true ? 0.45+0.55*abs(sin(now*2.5)) : 1)
                 Text(model.configuration.slotTitle(slot)).font(.headline)
                 Spacer()
@@ -144,7 +154,7 @@ struct PanelView:View {
                     Task {do {try await model.preview(slot:slot)} catch {editError=error.localizedDescription}}
                 }.disabled(model.busy || native==nil || record==nil)
             }
-            Button("Focus unavailable") {}.disabled(true).font(.caption)
+            Text("Focus unavailable").font(.caption).foregroundStyle(.secondary)
         }
         .padding(14).frame(maxWidth:.infinity,minHeight:190,alignment:.topLeading)
         .background(.quaternary,in:RoundedRectangle(cornerRadius:12))
