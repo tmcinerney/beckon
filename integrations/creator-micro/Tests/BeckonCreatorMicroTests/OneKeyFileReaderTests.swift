@@ -1,5 +1,6 @@
 import XCTest
 import CryptoKit
+import WLKit
 @testable import BeckonCreatorMicro
 @MainActor final class OneKeyFileReaderTests:XCTestCase {
     func digest(_ data:Data)->String {Insecure.SHA1.hash(data:data).map {String(format:"%02x",$0)}.joined()}
@@ -60,4 +61,61 @@ import CryptoKit
         let task=Task {try await OneKeyFileReader.read(deadline:60,clock:{0},valid:{true}) {_,_ in calls+=1;throw CancellationError()}}
         task.cancel();do {_ = try await task.value;XCTFail("Accepted cancellation")} catch {XCTAssertEqual(calls,1)}
     }
+    func testRPCFailureIncludesExactFailedOffsetLengthAndCompletedChunksWithoutRetry() async throws {
+        let data=Data(repeating:65,count:4000);var reads=0
+        do {_ = try await OneKeyFileReader.read(deadline:60,clock:{0},valid:{true}) {method,params in
+            if method=="fs.list" {return self.listing(data)}
+            reads+=1
+            if reads==2 {throw WLDevice.Failure.rpc("fs.readbin","json pool overflow",-32000)}
+            return ["total_size":4000,"data":data.prefix(3072).base64EncodedString()]
+        };XCTFail("Expected device error")}
+        catch {
+            for text in ["offset=3072","requested=928","completedChunks=1","rpcCode=-32000"] {XCTAssertTrue(error.localizedDescription.contains(text))}
+            XCTAssertEqual(reads,2)
+        }
+    }
+    func testExperimentalProbeIsOneBoundedPrefixNotFullSnapshotOrFallback() async throws {
+        let data=Data(repeating:65,count:4000);var methods:[String]=[]
+        let result=try await OneKeyFileReader.probe(deadline:60,clock:{0},valid:{true}) {method,params in
+            methods.append(method)
+            if method=="fs.list" {return self.listing(data)}
+            XCTAssertEqual(params["offset"] as? Int,0);XCTAssertEqual(params["len"] as? Int,192)
+            return ["total_size":4000,"data":data.prefix(192).base64EncodedString()]
+        }
+        XCTAssertEqual(methods,["fs.list","fs.readbin","fs.list"]);XCTAssertEqual(result.received,192);XCTAssertEqual(result.total,4000)
+        var calls=0
+        do {_ = try await OneKeyFileReader.probe(deadline:60,clock:{0},valid:{true}) {method,_ in
+            calls+=1;if method=="fs.list" {return self.listing(data)}
+            throw WLDevice.Failure.rpc("fs.readbin","json pool overflow",-32000)
+        };XCTFail("Expected failed probe")}
+        catch {XCTAssertEqual(calls,2);XCTAssertTrue(error.localizedDescription.contains("completedChunks=0"))}
+    }
+
+    func testLongDeviceMessageCannotHideRPCCodeAndProbeRejectsMalformedRetiredChangedReplies() async throws {
+        let data=Data(repeating:65,count:4000)
+        for code:Int? in [-32000,nil] {
+            do {_ = try await OneKeyFileReader.probe(deadline:60,clock:{0},valid:{true}) {method,_ in
+                if method=="fs.list" {return self.listing(data)}
+                throw WLDevice.Failure.rpc("fs.readbin",String(repeating:"x",count:700),code)
+            };XCTFail("Expected error")}
+            catch {XCTAssertTrue(error.localizedDescription.contains("rpcCode=\(code.map(String.init) ?? "unavailable")"));XCTAssertLessThan(error.localizedDescription.count,650)}
+        }
+        for bad:Any in [NSNull(),["total_size":4000,"data":""],["total_size":4001,"data":data.prefix(192).base64EncodedString()],["total_size":4000,"data":data.prefix(193).base64EncodedString()]] {
+            var calls=0
+            do {_ = try await OneKeyFileReader.probe(deadline:60,clock:{0},valid:{true}) {method,_ in calls+=1;return method=="fs.list" ? self.listing(data):bad};XCTFail("Accepted malformed probe")}
+            catch {XCTAssertEqual(calls,2)}
+        }
+        var valid=true,calls=0
+        do {_ = try await OneKeyFileReader.probe(deadline:60,clock:{0},valid:{valid}) {_,_ in calls+=1;valid=false;return self.listing(data)};XCTFail("Accepted retirement")}
+        catch {XCTAssertEqual(calls,1)}
+        do {_ = try await OneKeyFileReader.probe(deadline:0,clock:{0},valid:{true}) {_,_ in calls+=1;return nil};XCTFail("Accepted expired probe")}
+        catch {XCTAssertEqual(calls,1)}
+        var lists=0
+        do {_ = try await OneKeyFileReader.probe(deadline:60,clock:{0},valid:{true}) {method,_ in
+            if method=="fs.list" {lists+=1;return self.listing(lists==1 ? data:Data("[]".utf8))}
+            return ["total_size":4000,"data":data.prefix(192).base64EncodedString()]
+        };XCTFail("Accepted changed probe listing")}
+        catch {XCTAssertEqual(lists,2)}
+    }
+
 }

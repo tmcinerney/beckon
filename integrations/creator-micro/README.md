@@ -229,3 +229,6 @@ This slice is source/software verification only. Live backend replacement,
 GUI usability and the backed-up, owner-verified USB experiment remain separate
 acceptance gates. The optional package requires the reviewed WLKit transport
 revision; BECKON_WLKIT_PATH may point at its isolated development worktree.
+
+
+The optional **Experimental single ≤192-byte prefix read** makes exactly one `fs.readbin` call at offset0 between stable file listings, after firmware/status checks. It does not fall back, retry, build a snapshot, validate full-file checksum/schema, or enable a writer.192raw bytes yield at most256base64 characters; this is an experimental response-size reduction from the SDK default3072raw bytes, not a documented firmware limit or a fix. Success establishes a small prefix read on that attempt; it suggests size/load sensitivity only if the failed larger request was indeed larger. The previous screenshot lacks that request size. Failure preserves offset/requested length/completed chunks and matched numeric RPC code, or explicitly unavailable code. Neither outcome proves controller exclusivity or physical mapping. Full read errors now include the same request metadata. Do not request another physical test before review and an explicit coordinated handoff.

@@ -52,7 +52,7 @@ import BeckonPanelModel
     func recordLayerStatus(_ reply:[String:Any]?,observedAt:Double) {
         layerIndex=reply?["layer_index"] as? Int;layerObservedAt=observedAt
     }
-    public func observeUSB() {
+    public func observeUSB(probe:Bool=false) {
         guard !usbRunning else {return}
         // No reconnect loop, no constructor I/O and no automatic native permission response.
         do {try port.connect()} catch {deviceStatus=error.localizedDescription;return}
@@ -83,6 +83,14 @@ import BeckonPanelModel
                     usbDiagnostics="firmware 0.6.3 · \(statusEvidence)"+(fileEvidence.map {" · "+$0} ?? "")
                     if snapshotReadInThisRun {
                         try? await Task.sleep(nanoseconds:1_000_000_000);continue
+                    }
+                    if probe {
+                        phase="EXPERIMENTAL single prefix read"
+                        let result=try await port.read("keymap.probe") as? [String:Any]
+                        guard usbRun==run,!Task.isCancelled,port.generation==generation else {return}
+                        usbDiagnostics="firmware 0.6.3 · \(statusEvidence) · experimental prefix: requested=\(result?["requested"] as? Int ?? -1); received=\(result?["received"] as? Int ?? -1); total=\(result?["total"] as? Int ?? -1); full checksum/schema NOT verified"
+                        stopUSB("Experimental prefix read completed; not a keymap snapshot or fix")
+                        return
                     }
                     phase="fs.list / fs.readbin keymap.json"
                     let rawKeymap=try await port.read("keymap.readbin")
@@ -141,6 +149,7 @@ import BeckonPanelModel
             Divider()
             HStack {
                 Button("Observe exact USB device for 60 seconds") {model.observeUSB()}.disabled(model.usbRunning || model.launch.selector.serial=="STATUS-ONLY-NOT-A-DEVICE")
+                Button("Experimental single ≤192-byte prefix read") {model.observeUSB(probe:true)}.disabled(model.usbRunning || model.launch.selector.serial=="STATUS-ONLY-NOT-A-DEVICE")
                 Button("Stop USB") {model.stopUSB()}.disabled(!model.usbRunning)
             }
             Text(model.deviceStatus).textSelection(.enabled)

@@ -176,8 +176,15 @@ public enum OneKeyLED {
     func connect() throws {try device.connect();connectedAt=ProcessInfo.processInfo.systemUptime}
     func read(_ method:String) async throws -> Any? {
         let expected=generation
-        if method=="keymap.readbin" {
+        if method=="keymap.readbin" || method=="keymap.probe" {
             guard let connectedAt else {throw InputPilotError.invalid("USB observation not connected")}
+            if method=="keymap.probe" {
+                let result=try await OneKeyFileReader.probe(deadline:connectedAt+60,clock:{ProcessInfo.processInfo.systemUptime},
+                    valid:{self.device.isConnected && self.generation==expected}) {method,params in
+                        try await self.device.callAsync(method,params:params,expectedGeneration:expected)
+                    }
+                return ["requested":result.requested,"received":result.received,"total":result.total]
+            }
             let result=try await OneKeyFileReader.read(deadline:connectedAt+60,clock:{ProcessInfo.processInfo.systemUptime},
                 valid:{self.device.isConnected && self.generation==expected}) {method,params in
                     try await self.device.callAsync(method,params:params,expectedGeneration:expected)
