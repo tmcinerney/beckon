@@ -86,6 +86,33 @@ import XCTest
         XCTAssertNil(model.snapshot); XCTAssertTrue(model.keys.allSatisfy { !$0.enabled })
         XCTAssertNotNil(model.error)
     }
+    func testFailedPickerRevokesPreviousSelectionAndAcknowledgment() throws {
+        let model = try ready(); XCTAssertTrue(model.acknowledgeFakeAG("AG03"))
+        model.reportImportFailure(NSError(domain: NSCocoaErrorDomain, code: NSFileReadNoPermissionError))
+        XCTAssertNil(model.snapshot); XCTAssertNil(model.profileID); XCTAssertNil(model.layerID)
+        XCTAssertNil(model.lastAcknowledgment); XCTAssertEqual(model.acknowledgmentCount, 0)
+        XCTAssertNotNil(model.error); XCTAssertTrue(model.keys.allSatisfy { !$0.enabled })
+        XCTAssertFalse(model.acknowledgeFakeAG("AG03"))
+    }
+    func testOnlyCocoaPickerCancellationPreservesPreviousSelectionAndReceipt() throws {
+        let model = try ready(); XCTAssertTrue(model.acknowledgeFakeAG("AG03"))
+        let snapshot = model.snapshot?.fingerprint, receipt = model.lastAcknowledgment
+        model.reportImportFailure(NSError(domain: NSCocoaErrorDomain, code: NSUserCancelledError))
+        XCTAssertEqual(model.snapshot?.fingerprint, snapshot)
+        XCTAssertEqual(model.profileID, 2); XCTAssertEqual(model.layerID, 0)
+        XCTAssertEqual(model.lastAcknowledgment, receipt); XCTAssertEqual(model.acknowledgmentCount, 1)
+        XCTAssertNil(model.error)
+        model.reportImportFailure(NSError(domain: "different.domain", code: NSUserCancelledError))
+        XCTAssertNil(model.snapshot); XCTAssertNil(model.lastAcknowledgment)
+        XCTAssertFalse(model.acknowledgeFakeAG("AG03"))
+    }
+    func testRenderResourceFailureRevokesPreviousTreatmentAndReceipt() throws {
+        let model = try ready(); XCTAssertTrue(model.acknowledgeFakeAG("AG03"))
+        model.reportRenderFailure(NSError(domain: NSCocoaErrorDomain, code: NSFileReadNoSuchFileError))
+        XCTAssertNil(model.render); XCTAssertNil(model.lastAcknowledgment)
+        XCTAssertEqual(model.acknowledgmentCount, 0); XCTAssertNotNil(model.error)
+        XCTAssertFalse(model.acknowledgeFakeAG("AG03"))
+    }
     func testDeviceAndProfileChangesClearSelectionAndAcknowledgments() throws {
         let model = try ready(); _ = model.acknowledgeFakeAG("AG03")
         model.loadSnapshot(try input(), deviceID: "other-device")

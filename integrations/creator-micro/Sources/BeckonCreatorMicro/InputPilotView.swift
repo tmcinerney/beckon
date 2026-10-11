@@ -8,7 +8,6 @@ import UniformTypeIdentifiers
     @State private var importing = false
     @State private var sourceURL: URL?
     @State private var sourceLabel = "No snapshot imported"
-    @State private var fileError: String?
     public init() {}
 
     public var body: some View {
@@ -50,7 +49,7 @@ import UniformTypeIdentifiers
                         }
                     }.padding(8)
                 }
-                if let error = fileError ?? model.error {
+                if let error = model.error {
                     Text("Unavailable: \(error)").foregroundStyle(.red).textSelection(.enabled)
                 }
                 VStack(alignment: .leading, spacing: 12) {
@@ -69,7 +68,7 @@ import UniformTypeIdentifiers
                         .font(.callout).foregroundStyle(.secondary)
                     Button("Reset render fixture") {
                         do { model.loadRender(try InputPilotExamples.renderPlan()) }
-                        catch { fileError = error.localizedDescription }
+                        catch { model.reportRenderFailure(error) }
                     }
                 }
                 if let receipt = model.lastAcknowledgment {
@@ -86,7 +85,7 @@ import UniformTypeIdentifiers
             switch result {
             case .success(let urls):
                 if let url = urls.first { readFile(url) }
-            case .failure(let error): fileError = error.localizedDescription
+            case .failure(let error): model.reportImportFailure(error)
             }
         }
     }
@@ -123,13 +122,13 @@ import UniformTypeIdentifiers
     }
     private func loadExample() {
         deviceID = "33432"; sourceURL = nil; sourceLabel = "Bundled sample · actual Input shape, fictional worker"
-        do { model.loadSnapshot(try InputPilotExamples.inputSnapshot(), deviceID: deviceID); fileError = nil }
-        catch { fileError = error.localizedDescription }
+        do { model.loadSnapshot(try InputPilotExamples.inputSnapshot(), deviceID: deviceID) }
+        catch { model.reportImportFailure(error) }
     }
     private func readFile(_ url: URL) {
         let scoped = url.startAccessingSecurityScopedResource()
         defer { if scoped { url.stopAccessingSecurityScopedResource() } }
         sourceURL = url; sourceLabel = "Imported file · \(url.lastPathComponent)"
-        model.importSnapshot(url, deviceID: deviceID); fileError = nil
+        model.importSnapshot(url, deviceID: deviceID)
     }
 }

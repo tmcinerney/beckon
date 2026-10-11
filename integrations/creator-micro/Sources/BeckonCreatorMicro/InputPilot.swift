@@ -175,7 +175,7 @@ public struct InputPilotKey {
     @Published public private(set) var error: String?
     public init() {
         do { loadRender(try InputPilotExamples.renderPlan()) }
-        catch { self.error = error.localizedDescription }
+        catch { reportRenderFailure(error) }
     }
     public var selectedProfile: InputProfile? { snapshot?.profiles.first { $0.id == profileID } }
     public var selectedLayer: InputLayer? { selectedProfile?.layers.first { $0.id == layerID } }
@@ -196,6 +196,14 @@ public struct InputPilotKey {
     public func importSnapshot(_ url: URL, deviceID: String) {
         do { apply(try InputSnapshotReader.read(url, deviceID: deviceID)) }
         catch { invalidateSnapshot(error) }
+    }
+    public func reportImportFailure(_ failure: Error) {
+        let cocoa = failure as NSError
+        if cocoa.domain == NSCocoaErrorDomain && cocoa.code == NSUserCancelledError { return }
+        invalidateSnapshot(failure)
+    }
+    public func reportRenderFailure(_ failure: Error) {
+        render = nil; clearAcknowledgment(); error = failure.localizedDescription
     }
     private func apply(_ candidate: InputSnapshot) {
         clearAcknowledgment()
@@ -218,7 +226,7 @@ public struct InputPilotKey {
     public func loadRender(_ data: Data) {
         clearAcknowledgment()
         do { render = try InputRenderPlan.decode(data); error = nil }
-        catch { render = nil; self.error = error.localizedDescription }
+        catch { reportRenderFailure(error) }
     }
     /// A simulated local button only. No event listener, binding, focus, device or prompt action.
     public func acknowledgeFakeAG(_ name: String) -> Bool {
