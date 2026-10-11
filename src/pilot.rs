@@ -33,6 +33,14 @@ pub fn decode_pair(
 ) -> Result<Vec<Observation>> {
     let panes: Vec<Observation> = serde_json::from_value(panes)?;
     let agents: Vec<Observation> = serde_json::from_value(agents)?;
+    let mut agent_native_ids = std::collections::BTreeSet::new();
+    for agent in &agents {
+        if let Some(native) = &agent.agent_session
+            && !agent_native_ids.insert((native.agent.clone(), native.value.clone()))
+        {
+            bail!("duplicate native agent identity in agent observations");
+        }
+    }
     let mut ids = std::collections::BTreeSet::new();
     let mut terminals = std::collections::BTreeSet::new();
     let mut native_ids = std::collections::BTreeSet::new();
@@ -293,6 +301,23 @@ mod tests {
         assert_eq!(
             project(&source, &source, &display, now).unwrap()["available"],
             false
+        );
+    }
+
+    #[test]
+    fn duplicate_native_identity_in_agent_list_invalidates_snapshot() {
+        let chosen = json!({"pane_id":"chosen","terminal_id":"chosen-terminal","agent":"codex",
+            "agent_status":"idle","agent_session":{"agent":"codex","kind":"id","value":"same-native"}});
+        let incomplete = json!({"pane_id":"incomplete","terminal_id":"other-terminal","agent":"codex",
+            "agent_status":"idle"});
+        let mut duplicate = incomplete.clone();
+        duplicate["agent_session"] = chosen["agent_session"].clone();
+        assert!(
+            decode_pair(
+                json!([chosen.clone(), incomplete]),
+                json!([chosen, duplicate])
+            )
+            .is_err()
         );
     }
 
