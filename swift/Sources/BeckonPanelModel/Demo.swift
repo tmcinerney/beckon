@@ -19,7 +19,7 @@ public actor DemoSource:AgentStateSource {
             let data=try JSONSerialization.data(withJSONObject:[
                 "agent_session":["agent":harness,"kind":"id","source":"herdr:\(harness)","value":"demo-\(suffix)"],
                 "terminal_id":"demo-terminal-\(suffix)","pane_id":step==7 && i==0 ? "moved-pane" : "demo-pane-\(suffix)",
-                "agent_status":statuses[i],"name":i==0 ? "Demo coordinator" : "Demo feature worker",
+                "agent_status":statuses[i],"name":i==0 ? "Demo coordinator" : "Demo feature worker — release readiness, review feedback and deployment verification",
                 "revision":step+1,"completion_seq":i+1
             ])
             records.append(try JSONDecoder().decode(AgentRecord.self,from:data))

@@ -16,6 +16,9 @@ import Foundation
         var demoReader: DemoSource?
         if options.demo {
             demoReader = DemoSource()
+            // AIDEV-NOTE: Example headings are demo fixtures, not live role defaults or assignments.
+            configuration.slotLabels = ["Chief of Staff", "Project Coordinator", "Releases",
+                "Selectable agent 4", "Selectable agent 5", "Selectable agent 6"]
             configuration.coordinators[0] = try DemoSource.directorySnapshot().assignment(id: "demo-coordinator")
             configuration.slots[1] = NativeID(harness: "claude", sessionID: "demo-b")
         } else {

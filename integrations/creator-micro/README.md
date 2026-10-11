@@ -110,5 +110,22 @@ Input owns the active profile; its documented manual native ChatGPT layer fallba
 is preserved. A hardware pilot still requires exact device/profile/layer ownership
 and proven write revocation.
 
+In `--demo`, the six example headings are Chief of Staff, Project Coordinator,
+Releases and three selectable agents. They label fictional slots; they do not
+register real roles, assign real agents or change non-demo defaults. The same two
+fixed demo identities remain assigned and the other four slots remain empty. The
+feature worker has a long fictional name for wrapping checks. **Demo appearance**
+offers System, Light and Dark for this preview window only, stays in memory and
+is absent outside demo. It never changes macOS appearance settings.
+
+For a reviewed demo build, check the example headings and long name at the normal
+and minimum permitted 920-point window width in both appearances. Open a second
+preview window and confirm changing one window's appearance leaves the other
+unchanged. Replay all
+eight states and verify identity retention, mismatch rejection and unavailable
+hardware/focus/saving. Keyboard and VoiceOver checks remain separate; a Tab key
+that does not move AX focus does not establish its cause or justify a global
+keyboard-setting change.
+
 Fixture tests and compilation do not establish GUI visual acceptance or physical
 LED behavior. No device or live server test is part of the fixture suite.
