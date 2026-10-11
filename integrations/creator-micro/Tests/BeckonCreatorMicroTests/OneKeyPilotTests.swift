@@ -57,7 +57,7 @@ import WLKit
         }
         for raw:Any? in [nil,"secret-payload",["error":"secret-payload"],["data":42]] {
             XCTAssertThrowsError(try OneKeyUSBReply.keymapText(raw)) {error in
-                XCTAssertTrue(error.localizedDescription.contains("fs.read keymap.json"))
+                XCTAssertTrue(error.localizedDescription.contains("fs.readbin keymap.json"))
                 XCTAssertFalse(error.localizedDescription.contains("secret-payload"))
             }
         }

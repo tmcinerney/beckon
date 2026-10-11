@@ -60,22 +60,22 @@ enum OneKeyUSBReply {
     }
     static func keymapText(_ raw:Any?) throws -> String {
         guard let dict=raw as? [String:Any] else {
-            throw InputPilotError.invalid("fs.read keymap.json wrong response type; \(summary(raw))")
+            throw InputPilotError.invalid("fs.readbin keymap.json wrong response type; \(summary(raw))")
         }
         guard let data=dict["data"] else {
-            throw InputPilotError.invalid("fs.read keymap.json missing data field; \(summary(raw))")
+            throw InputPilotError.invalid("fs.readbin keymap.json missing data field; \(summary(raw))")
         }
         guard let text=data as? String else {
-            throw InputPilotError.invalid("fs.read keymap.json wrong data type; \(summary(raw))")
+            throw InputPilotError.invalid("fs.readbin keymap.json wrong data type; \(summary(raw))")
         }
         guard text.utf8.count<=262_144 else {
-            throw InputPilotError.invalid("fs.read keymap.json data exceeds 262144-byte limit: \(text.utf8.count) bytes")
+            throw InputPilotError.invalid("fs.readbin keymap.json data exceeds 262144-byte limit: \(text.utf8.count) bytes")
         }
         return text
     }
     static func validateJSON(_ text:String) throws {
         do {_ = try JSONSerialization.jsonObject(with:Data(text.utf8))}
-        catch {throw InputPilotError.invalid("fs.read keymap.json malformed JSON; dataBytes=\(text.utf8.count)")}
+        catch {throw InputPilotError.invalid("fs.readbin keymap.json malformed JSON; dataBytes=\(text.utf8.count)")}
     }
 }
 public struct OneKeyFrame:Decodable {
@@ -170,12 +170,23 @@ public enum OneKeyLED {
 }
 @MainActor final class OneKeyUSBPort:OneKeyDevicePort {
     let device:WLDevice
+    private var connectedAt:Double?
     init(selector:PilotDeviceSelector) {device=WLDevice(pilotSelector:selector)}
     var generation:UInt64 {device.connectionGeneration}
-    func connect() throws {try device.connect()}
+    func connect() throws {try device.connect();connectedAt=ProcessInfo.processInfo.systemUptime}
     func read(_ method:String) async throws -> Any? {
-        guard ["sys.version","device.status","fs.read"].contains(method) else {throw InputPilotError.invalid("Pilot read refused")}
-        return try await device.callAsync(method,params:method=="fs.read" ? ["file":"keymap.json"]:nil,expectedGeneration:generation)
+        let expected=generation
+        if method=="keymap.readbin" {
+            guard let connectedAt else {throw InputPilotError.invalid("USB observation not connected")}
+            let result=try await OneKeyFileReader.read(deadline:connectedAt+60,clock:{ProcessInfo.processInfo.systemUptime},
+                valid:{self.device.isConnected && self.generation==expected}) {method,params in
+                    try await self.device.callAsync(method,params:params,expectedGeneration:expected)
+                }
+            guard let text=String(data:result.bytes,encoding:.utf8) else {throw InputPilotError.invalid("Chunked keymap is not UTF-8")}
+            return ["data":text,"chunks":result.chunks,"checksum_verified":true]
+        }
+        guard ["sys.version","device.status"].contains(method) else {throw InputPilotError.invalid("Pilot read refused")}
+        return try await device.callAsync(method,params:nil,expectedGeneration:expected)
     }
     func paint(_ record:OAI.Thread) async throws {
         guard record.id==3,record.syncKeys==false,record.syncAmbient==false else {throw InputPilotError.invalid("Only unsynchronized id3 allowed")}

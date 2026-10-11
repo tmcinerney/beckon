@@ -49,6 +49,9 @@ import BeckonPanelModel
         do {snapshot=try InputSnapshotReader.read(url,deviceID:launch.selector.serial);deviceStatus="Disk import only · no device/layer authority"}
         catch {snapshot=nil;deviceStatus=error.localizedDescription}
     }
+    func recordLayerStatus(_ reply:[String:Any]?,observedAt:Double) {
+        layerIndex=reply?["layer_index"] as? Int;layerObservedAt=observedAt
+    }
     public func observeUSB() {
         guard !usbRunning else {return}
         // No reconnect loop, no constructor I/O and no automatic native permission response.
@@ -63,7 +66,7 @@ import BeckonPanelModel
         usbTask=Task { [weak self] in
             guard let self else {return}
             let deadline=ProcessInfo.processInfo.systemUptime+60
-            var phase="sys.version"
+            var phase="sys.version",snapshotReadInThisRun=false,fileEvidence:String?
             do {
                 let version=try await port.read("sys.version") as? [String:Any]
                 guard usbRun==run,!Task.isCancelled else {return}
@@ -73,19 +76,25 @@ import BeckonPanelModel
                     phase="device.status"
                     let statusReply=try await port.read("device.status")
                     guard usbRun==run,!Task.isCancelled,port.generation==generation else {return}
+                    let statusObservedAt=ProcessInfo.processInfo.systemUptime
                     let rawStatus=statusReply as? [String:Any]
+                    recordLayerStatus(rawStatus,observedAt:statusObservedAt)
                     let statusEvidence="device.status: \(OneKeyUSBReply.summary(statusReply)); layerIndex=\(rawStatus?["layer_index"] as? Int ?? -1)"
-                    usbDiagnostics="firmware 0.6.3 · \(statusEvidence)"
-                    phase="fs.read keymap.json"
-                    let rawKeymap=try await port.read("fs.read")
+                    usbDiagnostics="firmware 0.6.3 · \(statusEvidence)"+(fileEvidence.map {" · "+$0} ?? "")
+                    if snapshotReadInThisRun {
+                        try? await Task.sleep(nanoseconds:1_000_000_000);continue
+                    }
+                    phase="fs.list / fs.readbin keymap.json"
+                    let rawKeymap=try await port.read("keymap.readbin")
                     guard usbRun==run,!Task.isCancelled,port.generation==generation else {return}
-                    usbDiagnostics="firmware 0.6.3 · \(statusEvidence) · fs.read: \(OneKeyUSBReply.summary(rawKeymap))"
+                    fileEvidence="fs.readbin assembled: \(OneKeyUSBReply.summary(rawKeymap)); chunks=\((rawKeymap as? [String:Any])?["chunks"] as? Int ?? 0); checksum verified"
+                    usbDiagnostics="firmware 0.6.3 · \(statusEvidence) · \(fileEvidence!)"
                     let text=try OneKeyUSBReply.keymapText(rawKeymap)
                     phase="keymap JSON"
                     try OneKeyUSBReply.validateJSON(text)
                     phase="keymap schema"
                     snapshot=try InputSnapshot.decode(Data(text.utf8),deviceID:launch.selector.serial)
-                    layerIndex=rawStatus?["layer_index"] as? Int;layerObservedAt=ProcessInfo.processInfo.systemUptime
+                    snapshotReadInThisRun=true
                     deviceStatus="USB reports observed · correlation unverified until owner/reset/drain proof · no layer attribution or LED writes"
                     try? await Task.sleep(nanoseconds:1_000_000_000)
                 }

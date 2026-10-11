@@ -194,10 +194,20 @@ monotonic elapsed time; repeated old refreshes cannot extend it.
 
 A separate explicit UI action observes the exact USB serial/VID/PID/vendor usage
 collection for at most 60 seconds. It reads only sys.version, device.status and
-fs.read keymap.json. Replies and layer reports are labelled unverified because
+keymap.json through fs.list/fs.readbin. Replies and layer reports are labelled unverified because
 fresh-process reset/drain and controller coexistence have not been established.
 It never auto-reconnects or changes Input, keymaps, AppSense, other controls,
 permissions, running agents or services. Reconnection needs a fresh release/press.
+
+The keymap is read once per observation via `fs.list` and `fs.readbin`, following
+Input's chunked file contract rather than the older whole-file `fs.read`. The
+reader uses 3072-byte chunks, canonical base64, a 256 KiB file cap, a 96-chunk
+budget and the connection's 60-second deadline. It checks exact file metadata
+before and after the read and verifies SHA-1 before publishing the snapshot.
+Changed size/checksum, unexpected chunks, cancellation or generation changes
+reject the snapshot. Status polling afterward does not reread the keymap.
+Diagnostics show reply types, bounded field names and sizes, never file contents.
+
 
 Physical slot 4 is firmware id3 / AG03 / matrix[1][1]. Exact v.oai.hid AG03 press
 observations are debounced and labelled **UN-ATTRIBUTED**. The notification has no
