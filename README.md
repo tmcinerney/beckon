@@ -282,3 +282,9 @@ within the window sends Herdr's logical `enter` key only when that exact pane is
 still focused. `keys` is passed to Herdr as logical key names, which Herdr
 validates before writing anything. This can confirm an agent or tool prompt, so
 enable it only when that behavior is intended.
+
+The optional [Creator Micro integration](integrations/creator-micro/README.md)
+prepares six per-key WLKit status records using the panel's existing assignments.
+Its optional Swift preview app shows the physical six-slot layout with in-memory
+assignment controls and read-only observations. Saving, device writes and focus
+are disabled; launch and physical activation remain separate decisions.

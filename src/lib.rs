@@ -8,6 +8,7 @@ pub mod herdr;
 pub mod hid;
 pub mod input;
 pub mod pane_cache;
+pub mod pilot;
 pub mod render;
 pub mod session;
 pub mod state;

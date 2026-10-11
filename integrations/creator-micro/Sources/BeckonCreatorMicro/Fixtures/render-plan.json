@@ -1,0 +1,107 @@
+{
+  "type": "render",
+  "protocol": "beckon.display",
+  "version": 1,
+  "sequence": 1,
+  "plan": {
+    "keys": [
+      {
+        "key": "f1",
+        "state": null,
+        "color": "#6C7086",
+        "brightness": 0,
+        "motion": "steady"
+      },
+      {
+        "key": "f2",
+        "state": null,
+        "color": "#6C7086",
+        "brightness": 0,
+        "motion": "steady"
+      },
+      {
+        "key": "f3",
+        "state": null,
+        "color": "#6C7086",
+        "brightness": 0,
+        "motion": "steady"
+      },
+      {
+        "key": "f4",
+        "state": "working",
+        "color": "#F9E2AF",
+        "brightness": 0.6,
+        "motion": "breathe"
+      },
+      {
+        "key": "f5",
+        "state": null,
+        "color": "#6C7086",
+        "brightness": 0,
+        "motion": "steady"
+      },
+      {
+        "key": "f6",
+        "state": null,
+        "color": "#6C7086",
+        "brightness": 0,
+        "motion": "steady"
+      },
+      {
+        "key": "f7",
+        "state": null,
+        "color": "#6C7086",
+        "brightness": 0,
+        "motion": "steady"
+      },
+      {
+        "key": "f8",
+        "state": null,
+        "color": "#6C7086",
+        "brightness": 0,
+        "motion": "steady"
+      },
+      {
+        "key": "f9",
+        "state": null,
+        "color": "#6C7086",
+        "brightness": 0,
+        "motion": "steady"
+      },
+      {
+        "key": "f10",
+        "state": null,
+        "color": "#6C7086",
+        "brightness": 0,
+        "motion": "steady"
+      }
+    ],
+    "treatments": {
+      "idle": {
+        "brightness": 0.2,
+        "motion": "steady",
+        "color": "#3BA0FF"
+      },
+      "working": {
+        "brightness": 0.6,
+        "motion": "breathe",
+        "color": "#F9E2AF"
+      },
+      "blocked": {
+        "brightness": 0.8,
+        "motion": "pulse",
+        "color": "#F38BA8"
+      },
+      "done": {
+        "brightness": 0.8,
+        "motion": "steady",
+        "color": "#A6E3A1"
+      },
+      "unknown": {
+        "brightness": 0.3,
+        "motion": "flicker",
+        "color": "#6C7086"
+      }
+    }
+  }
+}

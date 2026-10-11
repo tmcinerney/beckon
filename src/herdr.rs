@@ -1,7 +1,7 @@
 use std::{
     collections::BTreeSet,
     env, fs,
-    io::{BufRead, BufReader, Write},
+    io::{BufRead, BufReader, Read, Write},
     os::unix::net::UnixStream,
     path::{Path, PathBuf},
     process::Command,
@@ -153,6 +153,11 @@ impl LivePaneDirectory {
 }
 
 impl PaneDirectory for LivePaneDirectory {
+    fn pilot_snapshot(&self, session: &str) -> Option<crate::pilot::Snapshot> {
+        (session == self.session.name)
+            .then(|| self.cache.pilot_snapshot())
+            .flatten()
+    }
     fn panes(&self) -> Result<Vec<Pane>> {
         Ok(self.cache.panes())
     }
@@ -189,6 +194,11 @@ pub struct HerdrSocket {
     path: PathBuf,
 }
 
+pub(crate) struct PaneRefresh {
+    pub panes: Vec<Pane>,
+    pub pilot: Result<Vec<crate::pilot::Observation>>,
+}
+
 impl HerdrSocket {
     pub fn new(path: PathBuf) -> Self {
         Self { path }
@@ -207,7 +217,41 @@ impl HerdrSocket {
 
     /// Subscribe once per socket connection. Returning from the callback ends
     /// the monitor only when Herdr closes the stream or returns malformed data.
-    pub fn monitor(&self, mut apply: impl FnMut(PaneEvent)) -> Result<()> {
+    pub fn path_string(&self) -> String {
+        self.path.to_string_lossy().into_owned()
+    }
+    pub(crate) fn refresh(&self) -> Result<PaneRefresh> {
+        let response =
+            self.request(json!({"id":"beckond:pilot-panes","method":"pane.list","params":{}}))?;
+        if response["id"] != "beckond:pilot-panes" {
+            bail!("pane response identity mismatch");
+        }
+        // A valid normal pane snapshot must survive any optional native join failure.
+        let panes = serde_json::from_value::<PaneListResponse>(response.clone())?
+            .result
+            .panes;
+        let pilot = (|| {
+            let agents = self
+                .request(json!({"id":"beckond:pilot-agents","method":"agent.list","params":{}}))?;
+            if agents["id"] != "beckond:pilot-agents" {
+                bail!("agent response identity mismatch");
+            }
+            crate::pilot::decode_pair(
+                response["result"]["panes"].clone(),
+                agents["result"]["agents"].clone(),
+            )
+        })();
+        Ok(PaneRefresh { panes, pilot })
+    }
+
+    pub fn monitor(&self, apply: impl FnMut(PaneEvent)) -> Result<()> {
+        self.monitor_ready(|| {}, apply)
+    }
+    pub fn monitor_ready(
+        &self,
+        ready: impl FnOnce(),
+        mut apply: impl FnMut(PaneEvent),
+    ) -> Result<()> {
         let mut stream = self.connect()?;
         let subscription = json!({
             "id": "beckond:pane-events",
@@ -221,6 +265,7 @@ impl HerdrSocket {
         });
         writeln!(stream, "{}", serde_json::to_string(&subscription)?)?;
         stream.flush()?;
+        ready();
         let mut reader = BufReader::new(stream);
         let mut line = String::new();
         loop {
@@ -267,10 +312,17 @@ impl HerdrSocket {
 
     fn request(&self, request: Value) -> Result<Value> {
         let mut stream = self.connect()?;
+        stream.set_read_timeout(Some(std::time::Duration::from_secs(1)))?;
+        stream.set_write_timeout(Some(std::time::Duration::from_secs(1)))?;
         writeln!(stream, "{}", serde_json::to_string(&request)?)?;
         stream.flush()?;
         let mut response = String::new();
-        BufReader::new(stream).read_line(&mut response)?;
+        BufReader::new(stream)
+            .take(262_145)
+            .read_line(&mut response)?;
+        if response.len() > 262_144 || !response.ends_with('\n') {
+            bail!("Herdr response incomplete or exceeds budget");
+        }
         if response.trim().is_empty() {
             bail!("Herdr closed request stream without a response");
         }

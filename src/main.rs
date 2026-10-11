@@ -267,6 +267,7 @@ enum Request {
     },
     ReleaseAll,
     Status,
+    StatusPilot,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -1013,6 +1014,12 @@ fn dispatch<D: PaneDirectory>(request: Request, panes: &D) -> Result<Value> {
             let released = bindings.release_all()?;
             Ok(json!({"released": released.len(), "bindings": released}))
         }
+        Request::StatusPilot => beckon::pilot::project(
+            &store,
+            panes,
+            &config::load()?.display,
+            std::time::Instant::now(),
+        ),
         Request::Status => Ok(json!({
             "bindings": bindings.status()?.into_iter().map(|(binding, pane)| json!({
                 "key": binding.key,

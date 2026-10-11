@@ -2,3 +2,11 @@
 /devenv.local.nix
 /devenv.local.yaml
 /devenv.lock
+
+# Native Swift package build products
+/swift/.build/
+/swift/.swiftpm/
+
+# Optional Creator Micro integration build products
+/integrations/creator-micro/.build/
+/integrations/creator-micro/.swiftpm/

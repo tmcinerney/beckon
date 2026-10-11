@@ -52,6 +52,9 @@ impl<D> SessionRouter<D> {
 }
 
 impl<D: PaneDirectory> PaneDirectory for SessionRouter<D> {
+    fn pilot_snapshot(&self, session: &str) -> Option<crate::pilot::Snapshot> {
+        self.directories.get(session)?.pilot_snapshot(session)
+    }
     fn panes(&self) -> Result<Vec<Pane>> {
         let mut panes = Vec::new();
         for (session, directory) in &self.directories {

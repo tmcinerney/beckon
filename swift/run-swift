@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+set -euo pipefail
+# Nix's Apple SDK is for its Rust/C toolchain. Native Swift must use the SDK
+# belonging to the selected Xcode, without changing global developer settings.
+unset SDKROOT DEVELOPER_DIR
+export DEVELOPER_DIR="$(/usr/bin/xcode-select -p)"
+export SDKROOT="$(/usr/bin/xcrun --sdk macosx --show-sdk-path)"
+task_package_dir="$(cd "$(dirname "$0")" && pwd)"
+# SwiftPM treats flags after the run executable as application arguments.
+if [[ "${1:-}" == run ]]; then
+  shift
+  exec /usr/bin/xcrun swift run --package-path "$task_package_dir" --sdk "$SDKROOT" "$@"
+fi
+exec /usr/bin/xcrun swift "$@" --package-path "$task_package_dir" --sdk "$SDKROOT"

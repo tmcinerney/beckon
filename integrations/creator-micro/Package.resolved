@@ -1,0 +1,13 @@
+{
+  "pins" : [
+    {
+      "identity" : "micro-manager",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/tmcinerney/micro-manager.git",
+      "state" : {
+        "revision" : "e08a7214dfbe1166161533d03dc40ca478c52f5b"
+      }
+    }
+  ],
+  "version" : 2
+}
