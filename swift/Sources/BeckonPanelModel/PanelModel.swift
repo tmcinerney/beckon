@@ -93,13 +93,9 @@ import Combine
             guard !closed,g==generation,s==sourceGeneration,m==metadataGeneration,
                   native==(configuration.slots[slot] ?? configuration.coordinators[slot]?.native),
                   coordinator==configuration.coordinators[slot] else {throw PanelError.cancelled}
-            let record:AgentRecord
-            var qualifier=""
-            if let coordinator {
-                guard let directorySnapshot else {throw PanelError.unavailable("Refresh registered board metadata first")}
-                record=try directorySnapshot.match(coordinator,snapshot:result,now:Date().timeIntervalSince1970)
-                qualifier="\nLive surface matched (provider command not revalidated)."
-            } else {record=try result.resolve(native,now:Date().timeIntervalSince1970)}
+            let record = try SlotResolver.resolve(slot: slot, configuration: configuration,
+                snapshot: result, directory: directorySnapshot, now: Date().timeIntervalSince1970)
+            let qualifier = coordinator == nil ? "" : "\nLive surface matched (provider command not revalidated)."
             snapshot=result;health="Connected · read-only";failures=0
             preview="Would target \(native.harness):\(native.sessionID)\n\(record.label) · \(record.paneID ?? "?") · revision \(record.revision.map(String.init) ?? "unknown")\(qualifier)\nLive focus unavailable: atomic identity-targeted transport not implemented."
         } catch {
@@ -151,12 +147,8 @@ import Combine
     }
     public func record(slot:Int,now:Double=Date().timeIntervalSince1970) throws -> AgentRecord {
         guard (0..<6).contains(slot),let snapshot else {throw PanelError.unavailable("No fresh observation")}
-        if let coordinator=configuration.coordinators[slot] {
-            guard let directorySnapshot else {throw PanelError.unavailable("Registered metadata not refreshed")}
-            return try directorySnapshot.match(coordinator,snapshot:snapshot,now:now)
-        }
-        guard let id=configuration.slots[slot] else {throw PanelError.unavailable("Unassigned")}
-        return try snapshot.resolve(id,now:now)
+        return try SlotResolver.resolve(slot: slot, configuration: configuration,
+            snapshot: snapshot, directory: directorySnapshot, now: now)
     }
     public func reconcileMetadataCleanup() async {
         do {try await directory.runner.reconcileCleanup();metadataHealth="Cleanup reconciled; refresh explicitly"}

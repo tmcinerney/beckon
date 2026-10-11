@@ -181,3 +181,21 @@ public struct ConfigStore: Sendable {
         try bytes.write(to: url, options: .atomic)
     }
 }
+
+/// Shared read-only selection for previews and optional status integrations.
+public enum SlotResolver {
+    public static func resolve(slot: Int, configuration: PanelConfiguration,
+                               snapshot: AgentSnapshot, directory: CoordinatorSnapshot? = nil,
+                               now: Double) throws -> AgentRecord {
+        try configuration.validate()
+        guard (0..<6).contains(slot), snapshot.source == configuration.source else {
+            throw PanelError.unavailable("Wrong slot or observation source")
+        }
+        if let coordinator = configuration.coordinators[slot] {
+            guard let directory else { throw PanelError.unavailable("Registered metadata not refreshed") }
+            return try directory.match(coordinator, snapshot: snapshot, now: now)
+        }
+        guard let native = configuration.slots[slot] else { throw PanelError.unavailable("Unassigned") }
+        return try snapshot.resolve(native, now: now)
+    }
+}
