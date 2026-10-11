@@ -5,7 +5,7 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/tmcinerney/micro-manager.git",
       "state" : {
-        "revision" : "8ea3f5a7fa8901fcf1fd6175092d8e41c41cf45e"
+        "revision" : "e08a7214dfbe1166161533d03dc40ca478c52f5b"
       }
     }
   ],

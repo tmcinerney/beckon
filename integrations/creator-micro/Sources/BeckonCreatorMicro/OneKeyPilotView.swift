@@ -17,6 +17,9 @@ import BeckonPanelModel
     @Published public private(set) var acceptanceActive=false
     @Published public private(set) var acceptanceStatus="Slot4 pilot disabled · explicit start required"
     @Published public private(set) var stoppingUSB=false
+    @Published public private(set) var configuring=false
+    @Published public private(set) var configurationStatus="Configuration disabled; explicit Apply/Restore only"
+    private var configTask:Task<Void,Never>?
     private var acceptance:OneKeyAcceptance?
     private var usbStopTask:Task<Void,Never>?
     private var observation=OneKeyObservation(),events=AG03Observer()
@@ -24,7 +27,7 @@ import BeckonPanelModel
     private var backendRun=0,usbRun=0
     private var viewOwners:Set<UUID>=[]
     private let port:OneKeyUSBPort
-    public init(launch:OneKeyLaunch) {self.launch=launch;port=OneKeyUSBPort(selector:launch.selector)}
+    public init(launch:OneKeyLaunch) {self.launch=launch;port=OneKeyUSBPort(selector:launch.selector,configuration:launch.configurationBackup != nil)}
     public var currentFrame:OneKeyFrame? {observation.current(now:ProcessInfo.processInfo.systemUptime)}
     public var reselectionRequired:Bool {observation.requiresReselection}
     public var ledStatus:String {acceptanceActive ? "Bounded slot4 LED/event pilot · focus unavailable":"LED writer DISARMED · no production enable"}
@@ -62,8 +65,8 @@ import BeckonPanelModel
         selectAndObserve();observeUSB(pilot:true)
     }
     public func observeUSB(probe:Bool=false,pilot:Bool=false) {
-        guard !usbRunning,!stoppingUSB,!pilot || launch.allowLEDs else {return}
-        if pilot,port.transportDeadline-ProcessInfo.processInfo.systemUptime<=OneKeyAcceptance.cleanupReserve {
+        guard !configuring,!usbRunning,!stoppingUSB,!pilot || launch.allowLEDs else {return}
+        if pilot,port.transportDeadline-ProcessInfo.processInfo.systemUptime<=port.cleanupTimeReserve {
             acceptanceStatus="Process USB budget cannot reserve cleanup; close stopped pilot app before a new coordinated run";return
         }
         // No reconnect loop, no constructor I/O and no automatic native permission response.
@@ -89,7 +92,7 @@ import BeckonPanelModel
         port.device.onDisconnect={ [weak self] reason in self?.stopUSB(reason) }
         usbTask=Task { [weak self] in
             guard let self else {return}
-            let deadline=min(ProcessInfo.processInfo.systemUptime+60,port.transportDeadline)
+            let deadline=min(ProcessInfo.processInfo.systemUptime+60,port.transportDeadline-(launch.configurationBackup == nil ? 0:60))
             let acceptanceDeadline=deadline-OneKeyAcceptance.cleanupReserve
             var phase="sys.version",snapshotReadInThisRun=false,fileEvidence:String?
             var verifiedDeviceScope:OneKeyVerifiedScope?
@@ -167,10 +170,42 @@ import BeckonPanelModel
         } else {port.disconnect()}
         layerIndex=nil;layerObservedAt=nil;deviceStatus=reason+" · writer disarmed; no hardware cleanup claimed"
     }
+    public func configureSlot4(restoring:Bool) {
+        guard let url=launch.configurationBackup,!configuring,!usbRunning,!stoppingUSB,
+              launch.selector.serial != "STATUS-ONLY-NOT-A-DEVICE" else {return}
+        configuring=true;configurationStatus=restoring ? "Restoring with whole-file conflict guard":"Applying one-cell patch; durable backup precedes mutation"
+        configTask=Task { [weak self] in
+            guard let self else {return}
+            defer {port.disconnect();configuring=false;configTask=nil}
+            let clock={ProcessInfo.processInfo.systemUptime}
+            do {
+                try port.connect();let generation=port.generation
+                // These are bounded opportunities, not a guarantee of recovery from an unresponsive device.
+                let outerDeadline=clock()+60
+                let version=try await port.configurationCall("sys.version",[:],restoring:restoring,generation:generation,deadline:outerDeadline) as? [String:Any]
+                guard version?["version"] as? String=="0.6.3" else {throw InputPilotError.invalid("Configuration firmware must be 0.6.3")}
+                let deadline=restoring ? min(clock()+60,port.transportDeadline-5):min(clock()+45,port.transportDeadline-70)
+                guard deadline-clock()>=20,port.remainingRequests >= (restoring ? 300:600) else {throw InputPilotError.invalid("Insufficient time/IDs; no transaction started")}
+                let backup=OneKeyConfigBackup(directory:url,serial:launch.selector.serial)
+                let call:(String,[String:Any]) async throws -> Any?={method,params in
+                    try await self.port.configurationCall(method,params,restoring:restoring,generation:generation,deadline:deadline)
+                }
+                let valid={self.port.generation==generation && self.port.device.isConnected}
+                let result:OneKeyConfigTransfer.Result
+                if restoring {
+                    result=try await OneKeyConfigTransfer.restore(patch:backup.load(),deviceID:launch.selector.serial,deadline:deadline,clock:clock,valid:valid,journal:backup.journal,call:call)
+                } else {
+                    result=try await OneKeyConfigTransfer.apply(deviceID:launch.selector.serial,deadline:deadline,clock:clock,valid:valid,persist:backup.persist,journal:backup.journal,call:call)
+                }
+                snapshot=try InputSnapshot.decode(result.readback,deviceID:launch.selector.serial)
+                configurationStatus=result.restored ? "Original keymap verified by full readback":"Slot4 candidate verified by full readback; original backup retained"
+            } catch {configurationStatus=error.localizedDescription}
+        }
+    }
     public func retainView(_ id:UUID) {viewOwners.insert(id)}
     public func releaseView(_ id:UUID) {guard viewOwners.remove(id) != nil else {return};if viewOwners.isEmpty {stop()}}
-    public func stop() {stopBackend();stopUSB()}
-    public func shutdownAndWait() async {stop();await usbStopTask?.value}
+    public func stop() {stopBackend();if configuring {configTask?.cancel()} else {stopUSB()}}
+    public func shutdownAndWait() async {stop();await configTask?.value;await usbStopTask?.value}
 }
 @MainActor public struct OneKeyPilotView:View {
     @ObservedObject private var model:OneKeyLiveModel
@@ -186,7 +221,7 @@ import BeckonPanelModel
             HStack {
                 Button("Select target and observe backend") {model.selectAndObserve()}
                 Button("Stop backend") {model.stopBackend()}.disabled(!model.running)
-                Button("Import read-only Input snapshot") {importing=true}
+                Button("Import read-only Input snapshot") {importing=true}.disabled(model.configuring)
             }
             TimelineView(.periodic(from:.now,by:1)) {_ in
                 VStack(alignment:.leading) {
@@ -201,12 +236,19 @@ import BeckonPanelModel
             }
             Divider()
             HStack {
-                Button("Observe exact USB device for 60 seconds") {model.observeUSB()}.disabled(model.usbRunning || model.stoppingUSB || model.launch.selector.serial=="STATUS-ONLY-NOT-A-DEVICE")
-                Button("Experimental single ≤192-byte prefix read") {model.observeUSB(probe:true)}.disabled(model.usbRunning || model.stoppingUSB || model.launch.selector.serial=="STATUS-ONLY-NOT-A-DEVICE")
+                Button("Observe exact USB device for 60 seconds") {model.observeUSB()}.disabled(model.configuring || model.usbRunning || model.stoppingUSB || model.launch.selector.serial=="STATUS-ONLY-NOT-A-DEVICE")
+                Button("Experimental single ≤192-byte prefix read") {model.observeUSB(probe:true)}.disabled(model.configuring || model.usbRunning || model.stoppingUSB || model.launch.selector.serial=="STATUS-ONLY-NOT-A-DEVICE")
                 Button("Stop USB") {model.stopUSB()}.disabled(!model.usbRunning)
             }
             Button("Start bounded slot4 light/event pilot (focus unavailable)") {model.startSlot4Acceptance()}
-                .disabled(!model.launch.allowLEDs || model.usbRunning || model.stoppingUSB || model.launch.selector.serial=="STATUS-ONLY-NOT-A-DEVICE")
+                .disabled(!model.launch.allowLEDs || model.configuring || model.usbRunning || model.stoppingUSB || model.launch.selector.serial=="STATUS-ONLY-NOT-A-DEVICE")
+            if model.launch.configurationBackup != nil {
+                HStack {
+                    Button("Apply slot4") {model.configureSlot4(restoring:false)}
+                    Button("Restore original") {model.configureSlot4(restoring:true)}
+                }.disabled(model.configuring || model.usbRunning || model.stoppingUSB || model.launch.selector.serial=="STATUS-ONLY-NOT-A-DEVICE")
+                Text(model.configurationStatus).textSelection(.enabled)
+            }
             Text(model.acceptanceStatus).textSelection(.enabled)
             Text(model.deviceStatus).textSelection(.enabled)
             Text(model.usbDiagnostics).font(.caption).textSelection(.enabled)

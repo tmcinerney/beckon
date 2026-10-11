@@ -138,4 +138,13 @@ import WLKit
         XCTAssertNil(observation.current(now:21))
     }
 
+    func testConfigurationRequiresPairedFlagsAndDurablePathWithoutChangingDefault() throws {
+        let expected=String(data:try JSONEncoder().encode(target()),encoding:.utf8)!
+        let args=["--input-one-key-live","--backend-socket","/backend.sock","--device-serial","1020BA73CBCC","--device-product-id","0x8298","--profile-id","2","--layer-id","0","--expected-target",expected]
+        XCTAssertNil(try OneKeyLaunch.parse(args)?.configurationBackup)
+        XCTAssertThrowsError(try OneKeyLaunch.parse(args+["--allow-slot4-config"]))
+        XCTAssertThrowsError(try OneKeyLaunch.parse(args+["--config-backup-directory","/durable/recovery"]))
+        XCTAssertThrowsError(try OneKeyLaunch.parse(args+["--allow-slot4-config","--config-backup-directory","/private/tmp/recovery"]))
+        XCTAssertEqual(try OneKeyLaunch.parse(args+["--allow-slot4-config","--config-backup-directory","/durable/recovery"])?.configurationBackup?.path,"/durable/recovery")
+    }
 }

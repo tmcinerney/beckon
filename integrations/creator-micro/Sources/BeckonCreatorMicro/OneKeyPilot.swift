@@ -19,13 +19,15 @@ public struct OneKeyTarget:Codable,Equatable {
 public struct OneKeyLaunch {
     public let socket:String,selector:PilotDeviceSelector,target:OneKeyTarget
     public let profileID:Int,layerID:Int,allowLEDs:Bool
+    public let configurationBackup:URL?
     public static func parse(_ args:[String]) throws -> OneKeyLaunch? {
         guard args.contains("--input-one-key-live") else {return nil}
-        var values:[String:String]=[:],allow=false,i=0
-        let valued:Set<String>=["--backend-socket","--device-serial","--device-product-id","--profile-id","--layer-id","--expected-target"]
+        var values:[String:String]=[:],allow=false,config=false,i=0
+        let valued:Set<String>=["--backend-socket","--device-serial","--device-product-id","--profile-id","--layer-id","--expected-target","--config-backup-directory"]
         while i<args.count {
             let a=args[i]
             if a=="--input-one-key-live" {guard args.filter({$0==a}).count==1 else {throw InputPilotError.invalid("Duplicate live flag")};i+=1}
+            else if a=="--allow-slot4-config" {guard !config else {throw InputPilotError.invalid("Duplicate configuration flag")};config=true;i+=1}
             else if a=="--allow-one-key-leds" {guard !allow else {throw InputPilotError.invalid("Duplicate arm flag")};allow=true;i+=1}
             else if valued.contains(a),i+1<args.count,values[a]==nil {values[a]=args[i+1];i+=2}
             else {throw InputPilotError.invalid("Live pilot does not accept other preview/autostart flags")}
@@ -35,8 +37,13 @@ public struct OneKeyLaunch {
               let product=values["--device-product-id"],["0x8297","0x8298"].contains(product),
               let productID=Int(product.dropFirst(2),radix:16),let expected=values["--expected-target"],expected.utf8.count<=4096,
               values["--profile-id"]=="2",values["--layer-id"]=="0" else {throw InputPilotError.invalid("Explicit backend, USB serial/product ID (0x8297 or 0x8298), profile 2/layer 0 and target JSON required")}
+        guard config == (values["--config-backup-directory"] != nil) else {throw InputPilotError.invalid("Configuration requires explicit flag and durable backup directory")}
+        let backup=values["--config-backup-directory"].map {URL(fileURLWithPath:$0)}
+        if let path=values["--config-backup-directory"] {
+            guard path.hasPrefix("/"),!path.hasPrefix("/tmp/"),!path.hasPrefix("/private/tmp/"),!path.hasPrefix("/var/folders/"),!path.hasPrefix("/private/var/folders/"),!path.contains("..") else {throw InputPilotError.invalid("Recoverable configuration backup cannot use temporary locations")}
+        }
         let target=try JSONDecoder().decode(OneKeyTarget.self,from:Data(expected.utf8));try target.validate()
-        return OneKeyLaunch(socket:socket,selector:try PilotDeviceSelector(serial:serial,productID:productID),target:target,profileID:2,layerID:0,allowLEDs:allow)
+        return OneKeyLaunch(socket:socket,selector:try PilotDeviceSelector(serial:serial,productID:productID),target:target,profileID:2,layerID:0,allowLEDs:allow,configurationBackup:backup)
     }
 }
 /// Diagnose reply envelopes without retaining keymap contents or other field values.
@@ -181,42 +188,55 @@ extension OneKeyDevicePort {
 @MainActor final class OneKeyUSBPort:OneKeyDevicePort {
     let device:WLDevice
     private var connectedAt:Double?
-    init(selector:PilotDeviceSelector) {device=WLDevice(pilotSelector:selector)}
+    private let configuration:Bool
+    private var configurationError:String?
+    private var ordinaryReserve:Int {configuration ? 302:2}
+    var cleanupTimeReserve:Double {configuration ? 70:10}
+    init(selector:PilotDeviceSelector,configuration:Bool=false) {
+        device=WLDevice(pilotSelector:selector);self.configuration=configuration
+        if configuration {do {try device.configureSingleKeyMutationBeforeFirstRequest()} catch {configurationError=error.localizedDescription}}
+    }
     var generation:UInt64 {device.connectionGeneration}
     var transportDeadline:Double {device.pilotBudgetState?.deadline ?? -.infinity}
     var remainingRequests:Int {device.pilotBudgetState?.remainingRequests ?? 0}
-    func connect() throws {try device.connect();connectedAt=ProcessInfo.processInfo.systemUptime}
+    func connect() throws {if let configurationError {throw InputPilotError.invalid(configurationError)};try device.connect();connectedAt=ProcessInfo.processInfo.systemUptime}
     func read(_ method:String) async throws -> Any? {
         let expected=generation
         if method=="keymap.readbin" || method=="keymap.probe" {
             guard let connectedAt else {throw InputPilotError.invalid("USB observation not connected")}
             if method=="keymap.probe" {
-                let result=try await OneKeyFileReader.probe(deadline:connectedAt+60,clock:{ProcessInfo.processInfo.systemUptime},
+                let result=try await OneKeyFileReader.probe(deadline:min(connectedAt+60,transportDeadline-(configuration ? 70:0)),clock:{ProcessInfo.processInfo.systemUptime},
                     valid:{self.device.isConnected && self.generation==expected}) {method,params in
-                        try await self.device.callAsync(method,params:params,expectedGeneration:expected,reserving:2)
+                        try await self.device.callAsync(method,params:params,expectedGeneration:expected,reserving:ordinaryReserve)
                     }
                 return ["requested":result.requested,"received":result.received,"total":result.total]
             }
-            let result=try await OneKeyFileReader.read(deadline:connectedAt+60,clock:{ProcessInfo.processInfo.systemUptime},
+            let result=try await OneKeyFileReader.read(deadline:min(connectedAt+60,transportDeadline-(configuration ? 70:0)),clock:{ProcessInfo.processInfo.systemUptime},
                 valid:{self.device.isConnected && self.generation==expected}) {method,params in
-                    try await self.device.callAsync(method,params:params,expectedGeneration:expected,reserving:2)
+                    try await self.device.callAsync(method,params:params,expectedGeneration:expected,reserving:ordinaryReserve)
                 }
             guard let text=String(data:result.bytes,encoding:.utf8) else {throw InputPilotError.invalid("Chunked keymap is not UTF-8")}
             return ["data":text,"chunks":result.chunks,"checksum_verified":true]
         }
         guard ["sys.version","device.status"].contains(method) else {throw InputPilotError.invalid("Pilot read refused")}
-        return try await device.callAsync(method,params:nil,expectedGeneration:expected,reserving:2)
+        return try await device.callAsync(method,params:nil,expectedGeneration:expected,reserving:ordinaryReserve)
     }
     func cleanupStatus() async throws -> Any? {
-        try await device.callAsync("device.status",params:nil,expectedGeneration:generation)
+        try await device.callAsync("device.status",params:nil,expectedGeneration:generation,reserving:configuration ? 300:0)
     }
-    func cleanupPaint() async throws {try await paint(OneKeyLED.cleanup,reserving:0)}
-    func paint(_ record:OAI.Thread) async throws {try await paint(record,reserving:2)}
+    func cleanupPaint() async throws {try await paint(OneKeyLED.cleanup,reserving:configuration ? 300:0)}
+    func paint(_ record:OAI.Thread) async throws {try await paint(record,reserving:ordinaryReserve)}
     private func paint(_ record:OAI.Thread,reserving:Int) async throws {
         guard record.id==3,record.syncKeys==false,record.syncAmbient==false else {throw InputPilotError.invalid("Only unsynchronized id3 allowed")}
         let reply=try await device.callAsync(OAI.methodThreads,params:OAI.threadsParams([record]),expectedGeneration:generation,reserving:reserving)
         guard let dict=reply as? [String:Any],let ok=dict["ok"] as? NSNumber,
               CFGetTypeID(ok) != CFBooleanGetTypeID(),ok.doubleValue==1 else {throw InputPilotError.invalid("Slot4 LED acknowledgment missing; no physical success claimed")}
+    }
+    func configurationCall(_ method:String,_ params:[String:Any],restoring:Bool,generation:UInt64,deadline:Double) async throws -> Any? {
+        guard configuration,configurationError==nil,device.isConnected,self.generation==generation,
+              ProcessInfo.processInfo.systemUptime<deadline else {throw InputPilotError.invalid("Configuration authority retired or expired")}
+        guard ["fs.list","fs.readbin","fs.txbegin","fs.writebin","fs.txcommit","sys.version","device.status"].contains(method) else {throw InputPilotError.invalid("Configuration method refused")}
+        return try await device.callAsync(method,params:params,expectedGeneration:generation,reserving:restoring ? 2:302)
     }
     func disconnect() {device.disconnect(reason:nil)}
 }

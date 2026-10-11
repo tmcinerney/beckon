@@ -7,7 +7,7 @@ if let path = ProcessInfo.processInfo.environment["BECKON_WLKIT_PATH"] {
     wlKitDependency = .package(name: "WLTools", path: path)
 } else {
     wlKitDependency = .package(name: "WLTools", url: "https://github.com/tmcinerney/micro-manager.git",
-                              revision: "8ea3f5a7fa8901fcf1fd6175092d8e41c41cf45e")
+                              revision: "e08a7214dfbe1166161533d03dc40ca478c52f5b")
 }
 let package = Package(
     name: "BeckonCreatorMicro",
