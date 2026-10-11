@@ -22,7 +22,7 @@ public struct OneKeyLaunch {
     public static func parse(_ args:[String]) throws -> OneKeyLaunch? {
         guard args.contains("--input-one-key-live") else {return nil}
         var values:[String:String]=[:],allow=false,i=0
-        let valued:Set<String>=["--backend-socket","--device-serial","--profile-id","--layer-id","--expected-target"]
+        let valued:Set<String>=["--backend-socket","--device-serial","--device-product-id","--profile-id","--layer-id","--expected-target"]
         while i<args.count {
             let a=args[i]
             if a=="--input-one-key-live" {guard args.filter({$0==a}).count==1 else {throw InputPilotError.invalid("Duplicate live flag")};i+=1}
@@ -31,10 +31,12 @@ public struct OneKeyLaunch {
             else {throw InputPilotError.invalid("Live pilot does not accept other preview/autostart flags")}
         }
         guard let socket=values["--backend-socket"],socket.hasPrefix("/"),socket.utf8.count<104,!socket.utf8.contains(0),
-              let serial=values["--device-serial"],let expected=values["--expected-target"],expected.utf8.count<=4096,
-              values["--profile-id"]=="2",values["--layer-id"]=="0" else {throw InputPilotError.invalid("Explicit backend, USB serial, profile 2/layer 0 and target JSON required")}
+              let serial=values["--device-serial"],
+              let product=values["--device-product-id"],["0x8297","0x8298"].contains(product),
+              let productID=Int(product.dropFirst(2),radix:16),let expected=values["--expected-target"],expected.utf8.count<=4096,
+              values["--profile-id"]=="2",values["--layer-id"]=="0" else {throw InputPilotError.invalid("Explicit backend, USB serial/product ID (0x8297 or 0x8298), profile 2/layer 0 and target JSON required")}
         let target=try JSONDecoder().decode(OneKeyTarget.self,from:Data(expected.utf8));try target.validate()
-        return OneKeyLaunch(socket:socket,selector:try PilotDeviceSelector(serial:serial),target:target,profileID:2,layerID:0,allowLEDs:allow)
+        return OneKeyLaunch(socket:socket,selector:try PilotDeviceSelector(serial:serial,productID:productID),target:target,profileID:2,layerID:0,allowLEDs:allow)
     }
 }
 public struct OneKeyFrame:Decodable {

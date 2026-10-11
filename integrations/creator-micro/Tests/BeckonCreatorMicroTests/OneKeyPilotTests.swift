@@ -35,6 +35,19 @@ import WLKit
         XCTAssertThrowsError(try OneKeyLaunch.parse(["--input-one-key-live","--demo"]))
         XCTAssertThrowsError(try OneKeyLaunch.parse(["--input-one-key-live"]))
     }
+    func testLiveLaunchRequiresExactProductAndSelectsCreatorMicro2() throws {
+        let expected=String(data:try JSONEncoder().encode(target()),encoding:.utf8)!
+        let args=["--input-one-key-live","--backend-socket","/backend.sock","--device-serial","1020BA73CBCC","--profile-id","2","--layer-id","0","--expected-target",expected]
+        XCTAssertThrowsError(try OneKeyLaunch.parse(args))
+        let launch=try XCTUnwrap(OneKeyLaunch.parse(args+["--device-product-id","0x8298"]))
+        XCTAssertEqual(launch.selector.productID,0x8298)
+        let actual=PilotDeviceSelector.Candidate(vendorID:0x303a,productID:0x8298,usagePage:0xff00,usage:1,serial:"1020BA73CBCC",transport:"USB")
+        let other=PilotDeviceSelector.Candidate(vendorID:0x303a,productID:0x8297,usagePage:0xff00,usage:1,serial:"1020BA73CBCC",transport:"USB")
+        XCTAssertEqual(try launch.selector.index(in:[other,actual]),1)
+        XCTAssertThrowsError(try launch.selector.index(in:[other]))
+        XCTAssertThrowsError(try OneKeyLaunch.parse(args+["--device-product-id","0x8299"]))
+        XCTAssertThrowsError(try OneKeyLaunch.parse(args+["--device-product-id","33432junk"]))
+    }
     func testOneRecordOnlyAndUnsupportedMotionFallsBackWithoutZoneSync() throws {
         let f=try frame();let record=try OneKeyLED.record(try XCTUnwrap(f.render))
         let params=OAI.threadsParams([record])

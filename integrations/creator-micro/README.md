@@ -175,7 +175,7 @@ Fixture tests/build success does not satisfy those gates or prove GUI usability.
 ## Bounded one-key observation (source prototype)
 
 `--input-one-key-live` is exclusive with all earlier preview flags. It requires
-`--backend-socket ABSOLUTE`, `--device-serial EXACT`, `--profile-id 2`, `--layer-id 0`
+`--backend-socket ABSOLUTE`, `--device-serial EXACT`, `--device-product-id 0x8297|0x8298`, `--profile-id 2`, `--layer-id 0`
 and `--expected-target JSON`. The JSON contains `session`, `socket` (Herdr source),
 `pane_id`, `terminal_id` and optionally `agent_session: {agent,kind:"id",value}`.
 There is no Chief of Staff preset or role inference. Shell observations retain the
