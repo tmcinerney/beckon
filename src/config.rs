@@ -297,6 +297,7 @@ impl InputConfig {
     /// Resolves the enabled physical input profiles.
     ///
     /// Leaving `[input]` absent preserves the original Glove80-only behavior.
+    /// An explicit empty list disables navigation for status-only operation.
     /// `profile` remains supported for existing configurations, while
     /// `profiles` permits multiple sources such as a desktop Glove80 and a
     /// mobile MacBook keyboard.
@@ -313,10 +314,6 @@ impl InputConfig {
             (None, Some(profiles)) => profiles.clone(),
             (Some(_), Some(_)) => unreachable!("mixed input configuration is rejected above"),
         };
-
-        if profiles.is_empty() {
-            bail!("input.profiles must enable at least one profile");
-        }
 
         let mut seen = std::collections::BTreeSet::new();
         for profile in &profiles {
@@ -562,6 +559,7 @@ config_version = 2
 # need the normal macOS brightness, media, or volume behavior.
 # [input]
 # profiles = ["glove80", "macbook-function-keys"]
+# Use profiles = [] to explicitly disable navigation for status-only operation.
 
 # Herdr topology. By default Beckon uses the `herdr` program from PATH, the
 # default session socket, and every live session (the default session plus
@@ -829,16 +827,23 @@ profiles = ["glove80", "glove80"]
         )
         .unwrap();
         assert!(duplicate.input.enabled_profiles().is_err());
+    }
 
+    #[test]
+    fn explicit_empty_inputs_allow_status_only_without_navigation() {
         let empty = parse(
             r#"
 config_version = 2
 [input]
 profiles = []
+[outputs]
+adapters = []
 "#,
         )
         .unwrap();
-        assert!(empty.input.enabled_profiles().is_err());
+        assert_eq!(empty.input.enabled_profiles().unwrap(), vec![]);
+        assert!(empty.outputs.ids().is_empty());
+        assert!(!empty.actions.confirm.enabled);
     }
 
     #[test]
