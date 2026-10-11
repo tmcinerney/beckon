@@ -5,18 +5,18 @@ import WLKit
 @MainActor final class OneKeyFileReaderTests:XCTestCase {
     func digest(_ data:Data)->String {Insecure.SHA1.hash(data:data).map {String(format:"%02x",$0)}.joined()}
     func listing(_ data:Data)->[[String:Any]] {[["name":"keymap.json","size":String(data.count),"checksum":digest(data)]]}
-    func testFollowsInstalledChunkedContractAndChecksCompleteFile() async throws {
+    func testUsesDemonstratedSmallChunkContractAndChecksCompleteFile() async throws {
         let data=Data(repeating:65,count:4000);var calls:[String]=[]
         let result=try await OneKeyFileReader.read(deadline:60,clock:{0},valid:{true}) {method,params in
             calls.append(method)
             if method=="fs.list" {XCTAssertEqual(params["checksum"] as? Bool,true);return self.listing(data)}
             XCTAssertEqual(method,"fs.readbin");XCTAssertEqual(params["file"] as? String,"keymap.json")
             let offset=try XCTUnwrap(params["offset"] as? Int),length=try XCTUnwrap(params["len"] as? Int)
-            XCTAssertEqual(length,min(3072,data.count-offset))
+            XCTAssertEqual(length,min(192,data.count-offset))
             return ["total_size":data.count,"data":data.subdata(in:offset..<(offset+length)).base64EncodedString()]
         }
-        XCTAssertEqual(result.bytes,data);XCTAssertEqual(result.chunks,2)
-        XCTAssertEqual(calls,["fs.list","fs.readbin","fs.readbin","fs.list"])
+        XCTAssertEqual(result.bytes,data);XCTAssertEqual(result.chunks,21)
+        XCTAssertEqual(calls,["fs.list"]+Array(repeating:"fs.readbin",count:21)+["fs.list"])
     }
     func testRejectsNullEmptyOversizeChangingTotalInvalidBase64AndCorruption() async throws {
         let data=Data("{}".utf8)
@@ -67,10 +67,10 @@ import WLKit
             if method=="fs.list" {return self.listing(data)}
             reads+=1
             if reads==2 {throw WLDevice.Failure.rpc("fs.readbin","json pool overflow",-32000)}
-            return ["total_size":4000,"data":data.prefix(3072).base64EncodedString()]
+            return ["total_size":4000,"data":data.prefix(192).base64EncodedString()]
         };XCTFail("Expected device error")}
         catch {
-            for text in ["offset=3072","requested=928","completedChunks=1","rpcCode=-32000"] {XCTAssertTrue(error.localizedDescription.contains(text))}
+            for text in ["offset=192","requested=192","completedChunks=1","rpcCode=-32000"] {XCTAssertTrue(error.localizedDescription.contains(text))}
             XCTAssertEqual(reads,2)
         }
     }
@@ -116,6 +116,39 @@ import WLKit
             return ["total_size":4000,"data":data.prefix(192).base64EncodedString()]
         };XCTFail("Accepted changed probe listing")}
         catch {XCTAssertEqual(lists,2)}
+    }
+
+    func testActual13298ByteShapeSeventyChunksFinalFiftyAndSchema() async throws {
+        let original=try InputPilotExamples.inputSnapshot()
+        XCTAssertLessThan(original.count,13298)
+        let data=original+Data(repeating:32,count:13298-original.count)
+        var offsets:[Int]=[],lengths:[Int]=[],lists=0
+        let result=try await OneKeyFileReader.read(deadline:60,clock:{0},valid:{true}) {method,params in
+            if method=="fs.list" {lists+=1;return self.listing(data)}
+            let offset=try XCTUnwrap(params["offset"] as? Int),length=try XCTUnwrap(params["len"] as? Int)
+            offsets.append(offset);lengths.append(length)
+            return ["total_size":13298,"data":data.subdata(in:offset..<(offset+length)).base64EncodedString()]
+        }
+        XCTAssertEqual(result.bytes,data);XCTAssertEqual(result.chunks,70);XCTAssertEqual(lists,2)
+        XCTAssertEqual(offsets,Array(stride(from:0,to:13298,by:192)))
+        XCTAssertEqual(lengths,Array(repeating:192,count:69)+[50])
+        try OneKeyUSBReply.validateJSON(String(decoding:result.bytes,as:UTF8.self))
+        let snapshot=try InputSnapshot.decode(result.bytes,deviceID:"33432")
+        XCTAssertEqual(snapshot.profiles[0].id,2)
+    }
+    func testFinalChunkCorruptionRejectedAndOversizeBudgetFailsBeforeRead() async throws {
+        let data=Data(repeating:65,count:13298);var reads=0
+        do {_ = try await OneKeyFileReader.read(deadline:60,clock:{0},valid:{true}) {method,params in
+            if method=="fs.list" {return self.listing(data)}
+            reads+=1
+            let offset=try XCTUnwrap(params["offset"] as? Int),length=try XCTUnwrap(params["len"] as? Int)
+            var bytes=data.subdata(in:offset..<(offset+length));if offset==13248 {bytes[0]=66}
+            return ["total_size":13298,"data":bytes.base64EncodedString()]
+        };XCTFail("Accepted final chunk corruption")}
+        catch {XCTAssertTrue(error.localizedDescription.contains("SHA-1 mismatch"));XCTAssertEqual(reads,70)}
+        var calls:[String]=[];let tooBig=Data(repeating:65,count:18433)
+        do {_ = try await OneKeyFileReader.read(deadline:60,clock:{0},valid:{true}) {method,_ in calls.append(method);return self.listing(tooBig)};XCTFail("Accepted impossible request budget")}
+        catch {XCTAssertEqual(calls,["fs.list"]);XCTAssertTrue(error.localizedDescription.contains("18432-byte"))}
     }
 
 }

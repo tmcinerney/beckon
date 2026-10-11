@@ -201,7 +201,7 @@ permissions, running agents or services. Reconnection needs a fresh release/pres
 
 The keymap is read once per observation via `fs.list` and `fs.readbin`, following
 Input's chunked file contract rather than the older whole-file `fs.read`. The
-reader uses 3072-byte chunks, canonical base64, a 256 KiB file cap, a 96-chunk
+reader uses the physically demonstrated 192-byte chunks, canonical base64, a 256 KiB metadata cap with an effective 18,432-byte transfer cap, a 96-chunk
 budget and the connection's 60-second deadline. It checks exact file metadata
 before and after the read and verifies SHA-1 before publishing the snapshot.
 Changed size/checksum, unexpected chunks, cancellation or generation changes
@@ -232,3 +232,6 @@ revision; BECKON_WLKIT_PATH may point at its isolated development worktree.
 
 
 The optional **Experimental single ≤192-byte prefix read** makes exactly one `fs.readbin` call at offset0 between stable file listings, after firmware/status checks. It does not fall back, retry, build a snapshot, validate full-file checksum/schema, or enable a writer.192raw bytes yield at most256base64 characters; this is an experimental response-size reduction from the SDK default3072raw bytes, not a documented firmware limit or a fix. Success establishes a small prefix read on that attempt; it suggests size/load sensitivity only if the failed larger request was indeed larger. The previous screenshot lacks that request size. Failure preserves offset/requested length/completed chunks and matched numeric RPC code, or explicitly unavailable code. Neither outcome proves controller exclusivity or physical mapping. Full read errors now include the same request metadata. Do not request another physical test before review and an explicit coordinated handoff.
+
+
+The a0b1ccf human prefix attempt accepted requested192/received192/total13298 on firmware0.6.3, reported layerIndex2 and stopped with writer disarmed. This establishes prefix success only and supports size sensitivity; it does not establish the firmware's exact allocation limit. The replacement full reader uses fixed <=192byte requests,50ms pacing,96chunk maximum, and rejects files over18432bytes before reading. The actual13298byte file fits70chunks (69x192 plus50). Stable size/SHA1 before-after, final digest, JSON/schema, generation, cancellation and60second deadline are still required. No adaptive retry or configuration/LED/focus writes. Next physical test uses the replacement normal full-read button once; do not rerun the prior3072byte build or claim prefix success as full snapshot acceptance. Backend panel status is independent of USB read acceptance.

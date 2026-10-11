@@ -79,14 +79,16 @@ import WLKit
             try check();let result=try await call(method,params);try check();return result
         }
         let before=try metadata(await invoke("fs.list",["checksum":true,"rec":false]))
+        // 96 requests remain the bounded budget; reject files that cannot fit before transfer.
+        guard before.size<=192*96 else {throw InputPilotError.invalid("keymap.json exceeds 18432-byte capacity of 96 bounded 192-byte chunks")}
         var bytes=Data(),chunks=0
         while bytes.count<before.size {
             guard chunks<96 else {throw InputPilotError.invalid("Chunked keymap request budget exhausted")}
-            let length=min(3072,before.size-bytes.count)
+            let length=min(192,before.size-bytes.count)
             let raw=try await request(offset:bytes.count,length:length,completed:chunks,call:invoke)
             let chunk=try chunk(raw,size:before.size,length:length,offset:bytes.count)
             bytes.append(chunk);chunks+=1
-            // Input uses 3072-byte chunks and 50 ms pacing; never issue a zero-length EOF call.
+            // The exact device accepted a 192-byte prefix; retain Input's 50 ms pacing and no EOF call.
             try await Task.sleep(nanoseconds:50_000_000)
         }
         let after=try metadata(await invoke("fs.list",["checksum":true,"rec":false]))
