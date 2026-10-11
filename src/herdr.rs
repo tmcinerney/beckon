@@ -194,6 +194,11 @@ pub struct HerdrSocket {
     path: PathBuf,
 }
 
+pub(crate) struct PaneRefresh {
+    pub panes: Vec<Pane>,
+    pub pilot: Result<Vec<crate::pilot::Observation>>,
+}
+
 impl HerdrSocket {
     pub fn new(path: PathBuf) -> Self {
         Self { path }
@@ -215,19 +220,30 @@ impl HerdrSocket {
     pub fn path_string(&self) -> String {
         self.path.to_string_lossy().into_owned()
     }
-    pub fn pilot_observations(&self) -> Result<Vec<crate::pilot::Observation>> {
-        let panes =
+    pub(crate) fn refresh(&self) -> Result<PaneRefresh> {
+        let response =
             self.request(json!({"id":"beckond:pilot-panes","method":"pane.list","params":{}}))?;
-        let agents =
-            self.request(json!({"id":"beckond:pilot-agents","method":"agent.list","params":{}}))?;
-        if panes["id"] != "beckond:pilot-panes" || agents["id"] != "beckond:pilot-agents" {
-            bail!("pilot response identity mismatch");
+        if response["id"] != "beckond:pilot-panes" {
+            bail!("pane response identity mismatch");
         }
-        crate::pilot::decode_pair(
-            panes["result"]["panes"].clone(),
-            agents["result"]["agents"].clone(),
-        )
+        // A valid normal pane snapshot must survive any optional native join failure.
+        let panes = serde_json::from_value::<PaneListResponse>(response.clone())?
+            .result
+            .panes;
+        let pilot = (|| {
+            let agents = self
+                .request(json!({"id":"beckond:pilot-agents","method":"agent.list","params":{}}))?;
+            if agents["id"] != "beckond:pilot-agents" {
+                bail!("agent response identity mismatch");
+            }
+            crate::pilot::decode_pair(
+                response["result"]["panes"].clone(),
+                agents["result"]["agents"].clone(),
+            )
+        })();
+        Ok(PaneRefresh { panes, pilot })
     }
+
     pub fn monitor(&self, apply: impl FnMut(PaneEvent)) -> Result<()> {
         self.monitor_ready(|| {}, apply)
     }
