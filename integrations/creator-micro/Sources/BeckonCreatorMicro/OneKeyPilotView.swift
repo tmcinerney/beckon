@@ -31,7 +31,7 @@ import BeckonPanelModel
                 do {
                     let data=try await PilotSocketReader.read(path:launch.socket)
                     guard !Task.isCancelled,self.backendRun==run else {return}
-                    try observation.accept(OneKeyFrame.decode(data),target:launch.target,now:ProcessInfo.processInfo.systemUptime)
+                    try observation.accept(OneKeyFrame.decode(data),target:launch.target,now:ProcessInfo.processInfo.systemUptime,requestStartedAt:start)
                     status="Observed f4 · \(currentFrame?.raw_status ?? "unavailable") · IDs do not prove runtime lifetime"
                 } catch {
                     guard !Task.isCancelled,self.backendRun==run else {return}

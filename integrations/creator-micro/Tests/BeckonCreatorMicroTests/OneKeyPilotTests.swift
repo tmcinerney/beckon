@@ -8,12 +8,12 @@ import WLKit
     }
     func testMonotonicExpiryAndExplicitReselectionOnEpochChange() throws {
         var observation=OneKeyObservation()
-        try observation.accept(frame(age:9000),target:target(),now:20)
+        try observation.accept(frame(age:9000),target:target(),now:20,requestStartedAt:20)
         XCTAssertNotNil(observation.current(now:20.9));XCTAssertNil(observation.current(now:21))
-        XCTAssertThrowsError(try observation.accept(frame(epoch:"two"),target:target(),now:22))
+        XCTAssertThrowsError(try observation.accept(frame(epoch:"two"),target:target(),now:22,requestStartedAt:22))
         XCTAssertTrue(observation.requiresReselection)
-        XCTAssertThrowsError(try observation.accept(frame(),target:target(),now:23))
-        observation.select();try observation.accept(frame(epoch:"two"),target:target(),now:24)
+        XCTAssertThrowsError(try observation.accept(frame(),target:target(),now:23,requestStartedAt:23))
+        observation.select();try observation.accept(frame(epoch:"two"),target:target(),now:24,requestStartedAt:24)
         XCTAssertNotNil(observation.current(now:24))
     }
     func testAG03IsUnattributedExactAndDebouncedAcrossLayerRaceAndReconnect() throws {
@@ -90,12 +90,21 @@ import WLKit
         XCTAssertTrue(p.records.isEmpty);XCTAssertTrue(p.disconnected);XCTAssertFalse(writer.cleanupConfirmed)
     }
     func testRepeatedSameRefreshCannotRenewOldObservationAndOldRefreshFails() throws {
-        var observation=OneKeyObservation();try observation.accept(frame(age:9000),target:target(),now:20)
-        try observation.accept(frame(age:9000),target:target(),now:20.9)
+        var observation=OneKeyObservation();try observation.accept(frame(age:9000),target:target(),now:20,requestStartedAt:20)
+        try observation.accept(frame(age:9000),target:target(),now:20.9,requestStartedAt:20.9)
         XCTAssertNil(observation.current(now:21))
-        try observation.accept(frame(refresh:3),target:target(),now:22)
-        XCTAssertThrowsError(try observation.accept(frame(refresh:2),target:target(),now:23))
+        try observation.accept(frame(refresh:3),target:target(),now:22,requestStartedAt:22)
+        XCTAssertThrowsError(try observation.accept(frame(refresh:2),target:target(),now:23,requestStartedAt:23))
         XCTAssertNil(observation.current(now:23))
+    }
+
+    func testResponseTransitCountsAgainstSourceFreshness() throws {
+        var observation=OneKeyObservation()
+        XCTAssertThrowsError(try observation.accept(frame(age:9000),target:target(),now:20,requestStartedAt:18.5))
+        XCTAssertNil(observation.current(now:20))
+        try observation.accept(frame(age:9000),target:target(),now:20.5,requestStartedAt:20)
+        XCTAssertNotNil(observation.current(now:20.9))
+        XCTAssertNil(observation.current(now:21))
     }
 
 }

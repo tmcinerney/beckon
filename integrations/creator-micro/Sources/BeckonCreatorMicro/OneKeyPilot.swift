@@ -59,9 +59,9 @@ public struct OneKeyObservation {
     private var epoch:String?,generation:UInt64?,refresh:UInt64=0
     public private(set) var requiresReselection=false
     public mutating func select() {frame=nil;epoch=nil;generation=nil;refresh=0;requiresReselection=false}
-    public mutating func accept(_ input:OneKeyFrame,target:OneKeyTarget,now:Double) throws {
+    public mutating func accept(_ input:OneKeyFrame,target:OneKeyTarget,now:Double,requestStartedAt:Double) throws {
         frame=nil
-        guard now.isFinite,now>=0,!requiresReselection,input.version=="beckon.pilot.v1",!input.epoch.isEmpty else {throw InputPilotError.invalid("Pilot requires explicit selection")}
+        guard now.isFinite,now>=0,requestStartedAt.isFinite,requestStartedAt>=0,requestStartedAt<=now,!requiresReselection,input.version=="beckon.pilot.v1",!input.epoch.isEmpty else {throw InputPilotError.invalid("Pilot requires explicit selection")}
         if let epoch,epoch != input.epoch {requiresReselection=true;throw InputPilotError.invalid("Backend epoch changed; explicitly reselect")}
         guard input.available,let source=input.source,let binding=input.binding,let render=input.render,
               source.age_ms.isFinite,(0..<10_000).contains(source.age_ms),source.generation>0,source.refresh>0 else {throw InputPilotError.invalid("Native observation unavailable or stale")}
@@ -73,7 +73,9 @@ public struct OneKeyObservation {
               ["unknown","idle","working","blocked","done"].contains(render.state),
               (target.agent_session != nil || status=="unknown"),render.state==(["idle","working","blocked","done"].contains(status) ? status:"unknown") else {throw InputPilotError.invalid("Out-of-order or inconsistent observation")}
         _ = try OneKeyLED.record(render)
-        let deadline=now+(10_000-source.age_ms)/1000
+        // Count the entire request duration conservatively against source freshness.
+        let deadline=requestStartedAt+(10_000-source.age_ms)/1000
+        guard now<deadline else {throw InputPilotError.invalid("Native observation expired in transit")}
         expiresAt=source.refresh==refresh ? min(expiresAt,deadline):deadline
         epoch=input.epoch;generation=source.generation;refresh=source.refresh;receivedAt=now;frame=input
     }
