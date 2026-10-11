@@ -152,3 +152,42 @@ that evidence, otherwise explicitly labeled button-held feedback after real
 press/release verification. Native ChatGPT behavior stays unchanged. No VoiceInk
 patch, shortcut synthesis or per-key writer is enabled. Per-key AG bindings and
 controller handoff require review before replacing an existing microphone chord.
+
+## Offline Herdr focus contract
+
+`HerdrFocusController` models six deliberately accepted Herdr runtime assignments
+(Chief of Staff, project coordinator, releases and three workers). It does not
+select the original native Codex/Claude conversation. `HerdrFocusConfiguration`
+is an ephemeral projection, not another settings file or agent registry. The
+existing panel and hardware dispatch are not wired to this prototype.
+
+Runtime, client and terminal-host ports prepare without effects, guard commit,
+identify output commitment and retire both host focus queues before replacement.
+Outcomes distinguish refusal, partial/unconfirmed selection and host selection
+with identified output commitment; the latter is not GPU/pixel confirmation.
+Default construction supplies unavailable ports. All functioning adapters live
+in the test target and use in-memory state; no sockets or native focus adapter
+are implemented. Production negotiation, authenticated host association and
+native queue retirement remain separate feasibility gates.
+
+Time inputs are nondecreasing monotonic milliseconds; requests have a maximum
+30-second lifetime. The bounded in-memory transaction table retains refusals and
+completed outcomes without eviction/re-execution, refuses when full, and marks
+replays as historical. This is not durable or cross-process deduplication, nor
+authentication of caller-supplied references. Owner reservations are contractual
+requirements, not guarantees created by this controller. Unproved retirement
+keeps upstream reservations and blocks new transactions until explicit
+reconciliation; there is no automatic retry or rollback.
+
+Run only the offline control suite, excluding the panel's real-socket tests:
+
+    devenv shell -- ./swift/run-swift test --filter HerdrFocusContractTests
+    devenv shell -- ./swift/run-swift test --filter BeckonControlTests
+
+The deterministic fixtures exercise stable slot mapping, reused terminal IDs,
+postcommit runtime/client replacement, both delayed host queues, partial
+acknowledgements, replay and owner cleanup. They provide an emulator-like loop
+without a virtual-pad app or device dependency. Micro Manager inspired the
+shared mapping and explicit-unavailable patterns; no code or dependencies were
+copied, and its list-order allocation and app-level Ghostty activation are not
+used. Fixture success does not enable physical keys, LEDs or approval responses.
