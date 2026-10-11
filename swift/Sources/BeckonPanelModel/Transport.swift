@@ -107,3 +107,21 @@ public struct SocketAgentSource: AgentStateSource {
         return try AgentSnapshot.decode(data, source: source, observedAt: Date().timeIntervalSince1970)
     }
 }
+
+/// Reuse the panel's bounded/cancellable socket reader for Beckon's pure pilot IPC.
+/// No subprocess, Herdr poller, persistent connection or write command is introduced.
+public enum PilotSocketReader {
+    public static func read(path:String) async throws -> Data {
+        guard path.hasPrefix("/"), !path.utf8.contains(0),path.utf8.count<104 else {throw PanelError.invalid("Invalid backend socket path")}
+        try Task.checkCancellation()
+        let token=CancelToken()
+        let result=await withTaskCancellationHandler(operation:{
+            await Task.detached(priority:.utility) {
+                CapturedResult(bp_socket_limit(path,"{\"op\":\"status_pilot\"}\n",2000,262_144,token.raw))
+            }.value
+        },onCancel:{token.cancel()})
+        let bytes=try result.checked()
+        guard bytes.count<=262_144 else {throw PanelError.outputLimit}
+        return bytes
+    }
+}

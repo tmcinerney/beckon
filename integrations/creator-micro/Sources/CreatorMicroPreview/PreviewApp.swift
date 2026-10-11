@@ -16,19 +16,23 @@ private enum DemoAppearance: String, CaseIterable, Hashable {
 }
 
 @main struct CreatorMicroPreviewApp: App {
-    @NSApplicationDelegateAdaptor(PanelDelegate.self) var delegate
+    @NSApplicationDelegateAdaptor(CreatorMicroDelegate.self) private var delegate
     @StateObject private var model: PanelModel
     private let demo: DemoSource?
     private let notice: String?
     private let writable: Bool
     private let inputPilot: Bool
+    private let oneKey:OneKeyLaunch?
+    private let oneKeyModel:OneKeyLiveModel?
     init() {
         do {
             let arguments = Array(CommandLine.arguments.dropFirst())
-            inputPilot = try InputPilotLaunch.isRequested(arguments: arguments)
+            oneKey=try OneKeyLaunch.parse(arguments)
+            oneKeyModel=oneKey.map {OneKeyLiveModel(launch:$0)}
+            inputPilot = oneKey == nil ? try InputPilotLaunch.isRequested(arguments: arguments):false
             // AIDEV-NOTE: Input mode never mounts PanelView or starts its observer. Its unused
             // lifecycle model uses only a demo source, with no socket or config-file reader.
-            let bootstrap = try PanelBootstrap(arguments: inputPilot ? ["--demo", "--no-save"] : arguments,
+            let bootstrap = try PanelBootstrap(arguments: (inputPilot || oneKey != nil) ? ["--demo", "--no-save"] : arguments,
                 home: FileManager.default.homeDirectoryForCurrentUser.path, allowPersistence: false)
             _model = StateObject(wrappedValue: bootstrap.model)
             demo = bootstrap.demo; notice = bootstrap.notice; writable = bootstrap.writable
@@ -39,7 +43,8 @@ private enum DemoAppearance: String, CaseIterable, Hashable {
     }
     var body: some Scene {
         WindowGroup("Creator Micro · Status Preview", id: "panel") {
-            if inputPilot {
+            if let oneKeyModel {OneKeyPilotView(model:oneKeyModel).onAppear {delegate.oneKey=oneKeyModel}}
+            else if inputPilot {
                 InputPilotView()
             } else {
                 CreatorMicroPreviewWindow(model: model, demo: demo, notice: notice, writable: writable)
@@ -80,5 +85,19 @@ private enum DemoAppearance: String, CaseIterable, Hashable {
         }
         .frame(minWidth: 920, minHeight: 640)
         .preferredColorScheme(demo == nil ? nil : demoAppearance.colorScheme)
+    }
+}
+
+@MainActor private final class CreatorMicroDelegate:NSObject,NSApplicationDelegate {
+    var model:PanelModel?
+    var oneKey:OneKeyLiveModel?
+    func applicationShouldTerminate(_ sender:NSApplication)->NSApplication.TerminateReply {
+        oneKey?.stop()
+        guard let model else {return .terminateNow}
+        Task {
+            do {try await model.shutdownAndWait();sender.reply(toApplicationShouldTerminate:true)}
+            catch {sender.reply(toApplicationShouldTerminate:false)}
+        }
+        return .terminateLater
     }
 }

@@ -10,4 +10,5 @@ void bp_token_destroy(BPToken *);
 void bp_result_free(BPResult *);
 BPResult bp_process(const char *executable, char *const argv[], char *const envp[], int milliseconds, BPToken *);
 BPResult bp_socket(const char *path, const char *request, int milliseconds, BPToken *);
+BPResult bp_socket_limit(const char *path, const char *request, int milliseconds, size_t cap, BPToken *);
 #endif

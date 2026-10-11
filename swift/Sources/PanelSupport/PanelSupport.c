@@ -118,10 +118,10 @@ before_spawn:
     close_fd(&op[0]);close_fd(&op[1]);close_fd(&ep[0]);close_fd(&ep[1]);
     free(errors);free(output);return r;
 }
-BPResult bp_socket(const char *path,const char *request,int ms,BPToken *token) {
+BPResult bp_socket_limit(const char *path,const char *request,int ms,size_t cap,BPToken *token) {
     BPResult r={0};r.code=5;
     struct stat st;
-    if(!path || strlen(path)>=sizeof(((struct sockaddr_un*)0)->sun_path) || ms<100 || ms>2000
+    if(cap==0 || cap>OUT_CAP || !request || strlen(request)>4096 || !path || strlen(path)>=sizeof(((struct sockaddr_un*)0)->sun_path) || ms<100 || ms>2000
        || stat(path,&st)<0 || !S_ISSOCK(st.st_mode)) return r;
     int fd=socket(AF_UNIX,SOCK_STREAM,0);if(fd<0)return r;
     fcntl(fd,F_SETFD,FD_CLOEXEC);
@@ -129,7 +129,7 @@ BPResult bp_socket(const char *path,const char *request,int ms,BPToken *token) {
     struct sockaddr_un addr={0};addr.sun_family=AF_UNIX;addr.sun_len=sizeof(addr);
     strcpy(addr.sun_path,path);
     double deadline=now_ms()+ms;size_t sent=0,total=strlen(request),used=0;
-    unsigned char *out=malloc(OUT_CAP);if(!out){close(fd);return r;}
+    unsigned char *out=malloc(cap);if(!out){close(fd);return r;}
     int connected=connect(fd,(struct sockaddr*)&addr,sizeof(addr));
     if(connected<0 && errno!=EINPROGRESS && errno!=EAGAIN) goto done;
     for(;;){
@@ -147,7 +147,7 @@ BPResult bp_socket(const char *path,const char *request,int ms,BPToken *token) {
             if(n==0)break;
             if(n<0){if(errno==EAGAIN||errno==EINTR)continue;break;}
             for(ssize_t i=0;i<n;i++){
-                if(used==OUT_CAP){r.code=3;goto done;}
+                if(used==cap){r.code=3;goto done;}
                 out[used++]=buf[i];
                 if(buf[i]=='\n'){r.code=0;goto done;}
             }
@@ -156,3 +156,5 @@ BPResult bp_socket(const char *path,const char *request,int ms,BPToken *token) {
 done:
     close(fd);r.bytes=out;r.length=used;return r;
 }
+
+BPResult bp_socket(const char *path,const char *request,int ms,BPToken *token) {return bp_socket_limit(path,request,ms,OUT_CAP,token);}

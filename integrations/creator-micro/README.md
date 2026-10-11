@@ -3,8 +3,9 @@
 Optional, source-only integration of Beckon's selected native agent slots with
 Micro Manager's WLKit library. The core Beckon package has no WLKit dependency.
 The optional `beckon-creator-micro-preview` app displays the prepared status on
-screen. It uses the existing panel observer and has no device writer, HID listener,
-activation flag, keymap editor, focus action or approval sender.
+screen. The original mode uses the existing panel observer and has no device writer or HID listener,
+keymap editor, focus action or approval sender in the original status and offline Input modes.
+The separately opt-in one-key observation mode below can open an exact USB vendor collection.
 
 `StatusAdapter.prepare(configuration:snapshot:directory:now:)` uses the same
 `PanelConfiguration` and `SlotResolver` as the panel. Call it with an existing
@@ -76,8 +77,7 @@ run. Core verification remains `devenv shell -- ./swift/run-swift test`.
 The optional app composes the core `BeckonPanelUI` and `PanelModel` with the status
 adapter. The core package stays independent of WLKit. A single observer supplies
 both the assignment panel and the physical two-key/four-key layout; no second
-service or device connection is started. Every mode disables saving, hardware and
-agent focus. Assignments, source selection and explicit coordinator metadata
+service or device connection is started. The original modes disable saving, hardware and agent focus. Assignments, source selection and explicit coordinator metadata
 selection affect memory only. Existing panel configuration may be read but is
 never written; corrupt files are preserved and editing is disabled.
 
@@ -171,3 +171,51 @@ increment. Physical acceptance requires full profile backup/restore, exact devic
 and active-layer verification, controller coexistence/ownership, narrow one-key
 write/cleanup isolation, an approved event route, and native focus contracts.
 Fixture tests/build success does not satisfy those gates or prove GUI usability.
+
+## Bounded one-key observation (source prototype)
+
+`--input-one-key-live` is exclusive with all earlier preview flags. It requires
+`--backend-socket ABSOLUTE`, `--device-serial EXACT`, `--profile-id 2`, `--layer-id 0`
+and `--expected-target JSON`. The JSON contains `session`, `socket` (Herdr source),
+`pane_id`, `terminal_id` and optionally `agent_session: {agent,kind:"id",value}`.
+There is no Chief of Staff preset or role inference. Shell observations retain the
+pane.list terminal ID and use unknown status. A change to f4, source generation,
+backend epoch or the observed native tuple requires explicit reselection. The IDs
+cannot establish an immutable runtime lifetime or detect every ABA replacement.
+
+The foreground UI starts no I/O in its constructor. Select the target to poll
+Beckon's pure `status_pilot` endpoint (one read/second, two-second and 256 KiB
+budgets). It uses the existing per-session cache and single binding ledger; this
+request never reconciles, saves, prunes, focuses or sends input. The existing
+five-second cache refresh joins pane.list and agent.list. Failure, disconnect,
+a native event lacking identity, or a lower revision makes the pilot unavailable
+until a fresh full observation. The ten-second expiry uses backend age plus local
+monotonic elapsed time; repeated old refreshes cannot extend it.
+
+A separate explicit UI action observes the exact USB serial/VID/PID/vendor usage
+collection for at most 60 seconds. It reads only sys.version, device.status and
+fs.read keymap.json. Replies and layer reports are labelled unverified because
+fresh-process reset/drain and controller coexistence have not been established.
+It never auto-reconnects or changes Input, keymaps, AppSense, other controls,
+permissions, running agents or services. Reconnection needs a fresh release/press.
+
+Physical slot 4 is firmware id3 / AG03 / matrix[1][1]. Exact v.oai.hid AG03 press
+observations are debounced and labelled **UN-ATTRIBUTED**. The notification has no
+event-time profile/layer identity. The native ChatGPT layer also uses AG03;
+polling Herdr before a press does not prove where that press originated. No event
+selects, focuses, approves or answers an agent. Last reported layer and age are
+shown separately, never used as event attribution.
+
+`--allow-one-key-leds` does not override missing firmware or ownership evidence.
+The production writer stays disarmed: omitted-ID preservation, layer scoping,
+Input/native-controller coexistence, wire draining and restoration after cleanup
+are unverified. The tested writer policy allows only one id3 array record with
+sk=sa=0, brightness at most 0.2, solid/breath effects; pulse/flicker fall back to
+solid. It serializes paint, retires pending paint before bounded cleanup and never
+clears a foreign/revoked layer. An off ACK cannot prove release of a black overlay.
+No broad reset, fs.write, rgbcfg or lights.preview is exposed by this mode.
+
+This slice is source/software verification only. Live backend replacement,
+GUI usability and the backed-up, owner-verified USB experiment remain separate
+acceptance gates. The optional package requires the reviewed WLKit transport
+revision; BECKON_WLKIT_PATH may point at its isolated development worktree.
