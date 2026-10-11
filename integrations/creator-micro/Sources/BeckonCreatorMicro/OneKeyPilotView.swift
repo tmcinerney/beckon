@@ -7,6 +7,7 @@ import BeckonPanelModel
     public let launch:OneKeyLaunch
     @Published public private(set) var status="Stopped · explicitly select to observe"
     @Published public private(set) var deviceStatus="Disconnected · firmware capabilities unverified"
+    @Published public private(set) var usbDiagnostics="No USB replies captured"
     @Published public private(set) var receipt:AG03Receipt?
     @Published public private(set) var snapshot:InputSnapshot?
     @Published public private(set) var layerObservedAt:Double?
@@ -53,7 +54,7 @@ import BeckonPanelModel
         // No reconnect loop, no constructor I/O and no automatic native permission response.
         do {try port.connect()} catch {deviceStatus=error.localizedDescription;return}
         usbRun+=1;let run=usbRun,generation=port.generation
-        events.connection(generation);usbRunning=true;receipt=nil
+        events.connection(generation);usbRunning=true;receipt=nil;usbDiagnostics="Connected · no USB replies captured in this observation"
         port.device.onNotification={ [weak self] method,params in
             guard let self,self.usbRun==run,self.usbRunning,self.port.generation==generation else {return}
             if let receipt=self.events.receive(method:method,params:params,generation:generation,now:ProcessInfo.processInfo.systemUptime) {self.receipt=receipt}
@@ -62,22 +63,34 @@ import BeckonPanelModel
         usbTask=Task { [weak self] in
             guard let self else {return}
             let deadline=ProcessInfo.processInfo.systemUptime+60
+            var phase="sys.version"
             do {
                 let version=try await port.read("sys.version") as? [String:Any]
                 guard usbRun==run,!Task.isCancelled else {return}
                 guard version?["version"] as? String=="0.6.3" else {throw InputPilotError.invalid("Unsupported or missing firmware version")}
+                usbDiagnostics="sys.version accepted firmware 0.6.3"
                 while !Task.isCancelled,usbRun==run,ProcessInfo.processInfo.systemUptime<deadline {
-                    let rawStatus=try await port.read("device.status") as? [String:Any]
-                    let rawKeymap=try await port.read("fs.read") as? [String:Any]
+                    phase="device.status"
+                    let statusReply=try await port.read("device.status")
                     guard usbRun==run,!Task.isCancelled,port.generation==generation else {return}
-                    guard let text=rawKeymap?["data"] as? String,text.utf8.count<=262_144 else {throw InputPilotError.invalid("Missing full keymap")}
+                    let rawStatus=statusReply as? [String:Any]
+                    let statusEvidence="device.status: \(OneKeyUSBReply.summary(statusReply)); layerIndex=\(rawStatus?["layer_index"] as? Int ?? -1)"
+                    usbDiagnostics="firmware 0.6.3 · \(statusEvidence)"
+                    phase="fs.read keymap.json"
+                    let rawKeymap=try await port.read("fs.read")
+                    guard usbRun==run,!Task.isCancelled,port.generation==generation else {return}
+                    usbDiagnostics="firmware 0.6.3 · \(statusEvidence) · fs.read: \(OneKeyUSBReply.summary(rawKeymap))"
+                    let text=try OneKeyUSBReply.keymapText(rawKeymap)
+                    phase="keymap JSON"
+                    try OneKeyUSBReply.validateJSON(text)
+                    phase="keymap schema"
                     snapshot=try InputSnapshot.decode(Data(text.utf8),deviceID:launch.selector.serial)
                     layerIndex=rawStatus?["layer_index"] as? Int;layerObservedAt=ProcessInfo.processInfo.systemUptime
                     deviceStatus="USB reports observed · correlation unverified until owner/reset/drain proof · no layer attribution or LED writes"
                     try? await Task.sleep(nanoseconds:1_000_000_000)
                 }
                 if usbRun==run {stopUSB("60-second observation complete")}
-            } catch {if usbRun==run {stopUSB(error.localizedDescription)}}
+            } catch {if usbRun==run {stopUSB("\(phase): \(error.localizedDescription)")}}
         }
     }
     public func stopUSB(_ reason:String="Stopped") {
@@ -96,7 +109,8 @@ import BeckonPanelModel
     public init(model:OneKeyLiveModel) {self.model=model}
     public var body:some View {
         VStack(alignment:.leading,spacing:18) {
-            Text("Creator Micro · One-key observation").font(.largeTitle)
+            Text(model.launch.selector.serial=="STATUS-ONLY-NOT-A-DEVICE" ? "Herdr · Status-only panel":"Creator Micro · USB observation").font(.largeTitle)
+            Text("USB serial \(model.launch.selector.serial) · product \(String(format:"0x%04X",model.launch.selector.productID))").textSelection(.enabled)
             Text("Physical slot 4 · firmware id3 / AG03 · ledger f4").font(.headline)
             Text("\(model.launch.target.session) · \(model.launch.target.pane_id) · \(model.launch.target.terminal_id)").textSelection(.enabled)
             HStack {
@@ -117,10 +131,11 @@ import BeckonPanelModel
             }
             Divider()
             HStack {
-                Button("Observe exact USB device for 60 seconds") {model.observeUSB()}.disabled(model.usbRunning)
+                Button("Observe exact USB device for 60 seconds") {model.observeUSB()}.disabled(model.usbRunning || model.launch.selector.serial=="STATUS-ONLY-NOT-A-DEVICE")
                 Button("Stop USB") {model.stopUSB()}.disabled(!model.usbRunning)
             }
             Text(model.deviceStatus).textSelection(.enabled)
+            Text(model.usbDiagnostics).font(.caption).textSelection(.enabled)
             if let snapshot=model.snapshot {
                 Text("Snapshot: profile ID \(snapshot.profiles[snapshot.activeProfileIndex].id) · imported \(snapshot.fingerprint.prefix(12))")
                 if let layer=model.layerIndex,let at=model.layerObservedAt {

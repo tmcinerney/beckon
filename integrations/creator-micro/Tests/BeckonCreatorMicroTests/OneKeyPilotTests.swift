@@ -48,6 +48,24 @@ import WLKit
         XCTAssertThrowsError(try OneKeyLaunch.parse(args+["--device-product-id","0x8299"]))
         XCTAssertThrowsError(try OneKeyLaunch.parse(args+["--device-product-id","33432junk"]))
     }
+    func testKeymapReplyDiagnosticsKeepPayloadPrivateAndIdentifyShape() throws {
+        XCTAssertEqual(try OneKeyUSBReply.keymapText(["data":"{}"]),"{}")
+        XCTAssertNoThrow(try OneKeyUSBReply.validateJSON("{}"))
+        XCTAssertThrowsError(try OneKeyUSBReply.validateJSON("secret-payload")) {error in
+            XCTAssertTrue(error.localizedDescription.contains("malformed JSON"))
+            XCTAssertFalse(error.localizedDescription.contains("secret-payload"))
+        }
+        for raw:Any? in [nil,"secret-payload",["error":"secret-payload"],["data":42]] {
+            XCTAssertThrowsError(try OneKeyUSBReply.keymapText(raw)) {error in
+                XCTAssertTrue(error.localizedDescription.contains("fs.read keymap.json"))
+                XCTAssertFalse(error.localizedDescription.contains("secret-payload"))
+            }
+        }
+        XCTAssertThrowsError(try OneKeyUSBReply.keymapText(["data":String(repeating:"x",count:262145)])) {error in
+            XCTAssertTrue(error.localizedDescription.contains("262145 bytes"))
+        }
+        XCTAssertEqual(try OneKeyUSBReply.keymapText(["data":String(repeating:"x",count:262144)]).utf8.count,262144)
+    }
     func testOneRecordOnlyAndUnsupportedMotionFallsBackWithoutZoneSync() throws {
         let f=try frame();let record=try OneKeyLED.record(try XCTUnwrap(f.render))
         let params=OAI.threadsParams([record])

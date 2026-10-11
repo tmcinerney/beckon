@@ -39,6 +39,45 @@ public struct OneKeyLaunch {
         return OneKeyLaunch(socket:socket,selector:try PilotDeviceSelector(serial:serial,productID:productID),target:target,profileID:2,layerID:0,allowLEDs:allow)
     }
 }
+/// Diagnose reply envelopes without retaining keymap contents or other field values.
+enum OneKeyUSBReply {
+    static func kind(_ raw:Any?) -> String {
+        guard let raw else {return "nil"}
+        if raw is NSNull {return "null"}
+        if raw is String {return "string"}
+        if raw is [String:Any] {return "object"}
+        if raw is [Any] {return "array"}
+        if raw is NSNumber {return "number"}
+        return "other"
+    }
+    static func summary(_ raw:Any?) -> String {
+        guard let dict=raw as? [String:Any] else {return "replyType=\(kind(raw))"}
+        let keys=dict.keys.sorted().prefix(12).map {key in
+            String(key.unicodeScalars.filter {!CharacterSet.controlCharacters.contains($0)}.prefix(48))
+        }.joined(separator:",")
+        let size=(dict["data"] as? String).map {"; dataBytes=\($0.utf8.count)"} ?? ""
+        return "replyType=object; fields=[\(keys)]; dataType=\(kind(dict["data"]))\(size)"
+    }
+    static func keymapText(_ raw:Any?) throws -> String {
+        guard let dict=raw as? [String:Any] else {
+            throw InputPilotError.invalid("fs.read keymap.json wrong response type; \(summary(raw))")
+        }
+        guard let data=dict["data"] else {
+            throw InputPilotError.invalid("fs.read keymap.json missing data field; \(summary(raw))")
+        }
+        guard let text=data as? String else {
+            throw InputPilotError.invalid("fs.read keymap.json wrong data type; \(summary(raw))")
+        }
+        guard text.utf8.count<=262_144 else {
+            throw InputPilotError.invalid("fs.read keymap.json data exceeds 262144-byte limit: \(text.utf8.count) bytes")
+        }
+        return text
+    }
+    static func validateJSON(_ text:String) throws {
+        do {_ = try JSONSerialization.jsonObject(with:Data(text.utf8))}
+        catch {throw InputPilotError.invalid("fs.read keymap.json malformed JSON; dataBytes=\(text.utf8.count)")}
+    }
+}
 public struct OneKeyFrame:Decodable {
     public struct Binding:Decodable {let key:String,session:String,pane_id:String}
     public struct Source:Decodable,Equatable {let session:String,socket:String,generation:UInt64,refresh:UInt64,age_ms:Double}
