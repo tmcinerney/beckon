@@ -166,6 +166,10 @@ pub enum PresentationTokenWrite {
 /// are per-session; callers that manage several sessions route through
 /// [`crate::session::SessionRouter`].
 pub trait PaneDirectory {
+    /// Pure optional pilot observation. Never reconciles or writes bindings.
+    fn pilot_snapshot(&self, _session: &str) -> Option<crate::pilot::Snapshot> {
+        None
+    }
     fn panes(&self) -> Result<Vec<Pane>>;
     /// Sessions whose pane snapshot is currently authoritative.
     ///

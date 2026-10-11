@@ -9,7 +9,7 @@
 use std::{
     sync::{Arc, RwLock},
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use anyhow::Result;
@@ -21,7 +21,16 @@ const RECONCILE_INTERVAL: Duration = Duration::from_secs(5);
 #[derive(Clone)]
 pub struct PaneCache {
     session: String,
-    panes: Arc<RwLock<Vec<Pane>>>,
+    inner: Arc<RwLock<CacheState>>,
+}
+
+struct CacheState {
+    panes: Vec<Pane>,
+    generation: u64,
+    request: u64,
+    refresh: u64,
+    connected: bool,
+    pilot: Option<crate::pilot::Snapshot>,
 }
 
 impl PaneCache {
@@ -33,7 +42,14 @@ impl PaneCache {
             .collect();
         Self {
             session,
-            panes: Arc::new(RwLock::new(panes)),
+            inner: Arc::new(RwLock::new(CacheState {
+                panes,
+                generation: 1,
+                request: 0,
+                refresh: 0,
+                connected: false,
+                pilot: None,
+            })),
         }
     }
 
@@ -49,14 +65,15 @@ impl PaneCache {
             .name("beckon-herdr-events".into())
             .spawn(move || {
                 loop {
-                    if let Err(error) = socket.monitor(|event| monitor.apply(event)) {
+                    let generation = monitor.generation();
+                    if let Err(error) = socket.monitor_ready(
+                        || monitor.connected(generation),
+                        |event| monitor.apply_fenced(generation, event),
+                    ) {
+                        monitor.failed(generation);
                         eprintln!("Herdr event stream disconnected: {error:#}");
                     }
                     thread::sleep(Duration::from_secs(1));
-                    match socket.panes() {
-                        Ok(panes) => monitor.replace(panes),
-                        Err(error) => eprintln!("refresh Herdr pane snapshot: {error:#}"),
-                    }
                 }
             })?;
         thread::Builder::new()
@@ -64,9 +81,18 @@ impl PaneCache {
             .spawn(move || {
                 loop {
                     thread::sleep(RECONCILE_INTERVAL);
-                    match reconcile_socket.panes() {
-                        Ok(panes) => reconcile.replace(panes),
-                        Err(error) => eprintln!("refresh Herdr pane snapshot: {error:#}"),
+                    let ticket = reconcile.begin_refresh();
+                    match reconcile_socket.pilot_observations() {
+                        Ok(observations) => reconcile.finish_refresh(
+                            ticket,
+                            observations,
+                            reconcile_socket.path_string(),
+                            Instant::now(),
+                        ),
+                        Err(error) => {
+                            reconcile.refresh_failed(ticket);
+                            eprintln!("refresh Herdr pane snapshot: {error:#}");
+                        }
                     }
                 }
             })?;
@@ -78,7 +104,11 @@ impl PaneCache {
     }
 
     pub fn panes(&self) -> Vec<Pane> {
-        self.panes.read().expect("pane cache lock poisoned").clone()
+        self.inner
+            .read()
+            .expect("pane cache lock poisoned")
+            .panes
+            .clone()
     }
 
     pub fn replace(&self, panes: Vec<Pane>) {
@@ -86,11 +116,105 @@ impl PaneCache {
             .into_iter()
             .map(|pane| stamp_session(pane, &self.session))
             .collect();
-        *self.panes.write().expect("pane cache lock poisoned") = panes;
+        let mut inner = self.inner.write().expect("pane cache lock poisoned");
+        inner.panes = panes;
+        inner.pilot = None;
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.inner.read().unwrap().generation
+    }
+    fn connected(&self, generation: u64) {
+        let mut s = self.inner.write().unwrap();
+        if s.generation == generation {
+            s.connected = true;
+        }
+    }
+    fn failed(&self, generation: u64) {
+        let mut s = self.inner.write().unwrap();
+        if s.generation == generation {
+            s.generation += 1;
+            s.connected = false;
+            s.pilot = None;
+        }
+    }
+    fn apply_fenced(&self, generation: u64, event: PaneEvent) {
+        // Both callbacks and refresh completions share the same lock/fence.
+        let mut s = self.inner.write().unwrap();
+        if s.generation != generation || !s.connected {
+            return;
+        }
+        s.pilot = None;
+        match event {
+            PaneEvent::Upsert(pane) => {
+                let pane = stamp_session(*pane, &self.session);
+                if let Some(old) = s.panes.iter_mut().find(|p| p.pane_id == pane.pane_id) {
+                    if pane.revision == 0 || pane.revision >= old.revision {
+                        *old = pane;
+                    }
+                } else {
+                    s.panes.push(pane);
+                }
+            }
+            PaneEvent::Remove(id) => s.panes.retain(|p| p.pane_id != id),
+        }
+    }
+    pub fn begin_refresh(&self) -> (u64, u64) {
+        let mut s = self.inner.write().unwrap();
+        s.request += 1;
+        (s.generation, s.request)
+    }
+    pub fn refresh_failed(&self, ticket: (u64, u64)) {
+        let mut s = self.inner.write().unwrap();
+        if ticket == (s.generation, s.request) {
+            s.pilot = None;
+        }
+    }
+    pub fn finish_refresh(
+        &self,
+        ticket: (u64, u64),
+        mut observations: Vec<crate::pilot::Observation>,
+        socket: String,
+        at: Instant,
+    ) {
+        let mut s = self.inner.write().unwrap();
+        if ticket != (s.generation, s.request) {
+            return;
+        }
+        if observations.iter().any(|new| {
+            s.panes
+                .iter()
+                .any(|old| old.pane_id == new.pane.pane_id && old.revision > new.pane.revision)
+        }) {
+            s.pilot = None;
+            return;
+        }
+        for o in &mut observations {
+            o.pane.session = self.session.clone();
+        }
+        s.panes = observations.iter().map(|o| o.pane.clone()).collect();
+        s.refresh += 1;
+        s.pilot = if s.connected {
+            Some(crate::pilot::Snapshot {
+                socket,
+                generation: s.generation,
+                refresh: s.refresh,
+                at,
+                observations,
+            })
+        } else {
+            None
+        };
+    }
+    pub fn pilot_snapshot(&self) -> Option<crate::pilot::Snapshot> {
+        self.inner.read().unwrap().pilot.clone()
     }
 
     pub fn apply(&self, event: PaneEvent) {
-        let mut panes = self.panes.write().expect("pane cache lock poisoned");
+        let mut inner = self.inner.write().expect("pane cache lock poisoned");
+        // Native event payloads do not prove terminal/session identity. Wait for a full pair.
+        inner.pilot = None;
+        let panes = &mut inner.panes;
         match event {
             PaneEvent::Upsert(pane) => {
                 let pane = stamp_session(*pane, &self.session);
@@ -169,5 +293,34 @@ mod tests {
         assert_eq!(cache.session(), "agent-workspace");
         assert_eq!(cache.panes()[0].session, "agent-workspace");
         assert_eq!(cache.panes()[0].pane_id, "w1:p3");
+    }
+    #[test]
+    fn pilot_fences_disconnect_late_refresh_and_event_revision() {
+        let cache = PaneCache::new("test", vec![pane("p1", 3, "working")]);
+        cache.connected(1);
+        let first = cache.begin_refresh();
+        let second = cache.begin_refresh();
+        let observed = || {
+            vec![crate::pilot::Observation {
+                pane: pane("p1", 3, "unknown"),
+                terminal_id: "t1".into(),
+                agent_session: None,
+            }]
+        };
+        cache.finish_refresh(first, observed(), "/s".into(), Instant::now());
+        assert!(cache.pilot_snapshot().is_none());
+        cache.finish_refresh(second, observed(), "/s".into(), Instant::now());
+        assert!(cache.pilot_snapshot().is_some());
+        cache.failed(1);
+        cache.apply_fenced(1, PaneEvent::Remove("p1".into()));
+        assert_eq!(cache.panes().len(), 1);
+        cache.finish_refresh(second, observed(), "/s".into(), Instant::now());
+        assert!(cache.pilot_snapshot().is_none());
+        cache.connected(2);
+        let ticket = cache.begin_refresh();
+        cache.apply_fenced(2, PaneEvent::Upsert(Box::new(pane("p1", 5, "blocked"))));
+        cache.finish_refresh(ticket, observed(), "/s".into(), Instant::now());
+        assert_eq!(cache.panes()[0].revision, 5);
+        assert!(cache.pilot_snapshot().is_none());
     }
 }
