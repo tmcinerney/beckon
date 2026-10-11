@@ -36,8 +36,7 @@ private enum DemoAppearance: String, CaseIterable, Hashable {
     var body: some Scene {
         WindowGroup("Creator Micro · Status Preview", id: "panel") {
             CreatorMicroPreviewWindow(model: model, demo: demo, notice: notice, writable: writable)
-            .onAppear {delegate.model = model; model.startObserving()}
-            .onDisappear {model.stopObserving()}
+            .onAppear {delegate.model = model}
         }.defaultSize(width: 1100, height: 840)
         MenuBarExtra("Creator Micro Preview", systemImage: "circle.grid.2x2") {
             OpenPanelButton()

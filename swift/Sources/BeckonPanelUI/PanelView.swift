@@ -7,6 +7,7 @@ import BeckonPanelModel
     let notice:String?
     let writable:Bool
     let supplement:AnyView?
+    @State private var observationOwner=UUID()
     @State private var socket=""
     @State private var editError=""
     @State private var demoLabel="Working / idle"
@@ -21,7 +22,10 @@ import BeckonPanelModel
                 HStack {
                     VStack(alignment:.leading) {
                         Text("Agent status").font(.largeTitle.bold())
-                        Text(model.health).foregroundStyle(.secondary)
+                        TimelineView(.periodic(from:.now,by:0.5)) {timeline in
+                            Text(model.observationHealth(now:timeline.date.timeIntervalSince1970))
+                                .foregroundStyle(.secondary)
+                        }
                     }
                     Spacer()
                     Button("Refresh") {Task {await model.refresh()}}.disabled(model.busy)
@@ -104,9 +108,11 @@ import BeckonPanelModel
             }.padding(24)
         }
         .onAppear {
+            model.startObserving(owner:observationOwner)
             socket=model.configuration.source.socket
             if let selected=model.configuration.boards.first {board=selected}
         }
+        .onDisappear {model.stopObserving(owner:observationOwner)}
     }
     private var assignmentGrid:some View {
 TimelineView(.periodic(from:.now,by:0.5)) { timeline in

@@ -23,8 +23,7 @@ import BeckonPanelUI
     var body: some Scene {
         WindowGroup("Beckon Status Panel", id: "panel") {
             PanelView(model: model, demo: demo, notice: configNotice, writable: writable)
-                .onAppear {delegate.model = model; model.startObserving()}
-                .onDisappear {model.stopObserving()}
+                .onAppear {delegate.model = model}
         }.defaultSize(width: 940, height: 760)
         MenuBarExtra("Beckon Status Panel", systemImage: "circle.grid.2x2") {
             OpenPanelButton()

@@ -16,6 +16,7 @@ import Combine
     private let directory:CoordinatorDirectory
     private var observation:Task<AgentSnapshot,Error>?
     private var polling:Task<Void,Never>?
+    private var observationOwners:Set<UUID>=[]
     private var metadataTask:Task<CoordinatorSnapshot,Error>?
     private var metadataGeneration:UInt64=0
     private var metadataPending:BoardSelection?
@@ -26,19 +27,41 @@ import Combine
                 directory:CoordinatorDirectory=CoordinatorDirectory()) {
         self.configuration=configuration;self.sourceReader=source;self.store=store;self.directory=directory
     }
-    public func startObserving() {
-        guard !closed,polling==nil else {return}
+    public func startObserving(owner:UUID) {
+        guard !closed else {return}
+        let first=observationOwners.isEmpty
+        guard observationOwners.insert(owner).inserted else {return}
+        if first {startPolling()}
+    }
+    public func stopObserving(owner:UUID) {
+        guard observationOwners.remove(owner) != nil,observationOwners.isEmpty else {return}
+        sourceGeneration &+= 1;preview=""
+        stopPolling()
+    }
+    private func startPolling() {
+        // AIDEV-NOTE: Reopened views wait for the cancelled loop to retire before starting another reader.
+        let retiring=polling
         polling=Task { [weak self] in
+            await retiring?.value
             while !Task.isCancelled {
-                guard let self else {return}
+                guard let self,!self.closed,!self.observationOwners.isEmpty else {return}
                 await self.refresh()
                 let delay=self.failures==0 ? 2.5 : min(10,pow(2,Double(min(self.failures-1,4))))
                 do {try await Task.sleep(nanoseconds:UInt64(delay*1e9))} catch {return}
             }
         }
     }
-    public func stopObserving() {
-        polling?.cancel();polling=nil;observation?.cancel()
+    private func stopPolling() {
+        // Keep the retirement handle so a rapid reopen cannot overlap a cancelled read.
+        polling?.cancel();observation?.cancel()
+    }
+    public func observationHealth(now:Double) -> String {
+        guard let snapshot else {return health}
+        guard snapshot.source==configuration.source,now.isFinite,snapshot.observedAt.isFinite,
+              snapshot.observedAt<=now,now-snapshot.observedAt<=10 else {
+            return "Unavailable: expired or invalid observation"
+        }
+        return health
     }
     private func observed(source:SourceKey) async throws -> AgentSnapshot {
         let reader=sourceReader
@@ -160,9 +183,10 @@ import Combine
         directorySnapshot=result;metadataHealth="Demo registered metadata"
     }
     public func shutdownAndWait() async throws {
-        let read=observation,metadata=metadataTask
+        let read=observation,metadata=metadataTask,poller=polling
         shutdown()
         _ = try? await read?.value
+        await poller?.value
         _ = try? await metadata?.value
         guard !(await directory.runner.hasUnconfirmedCleanup) else {
             health="Quit refused: cleanup unconfirmed. Reconcile metadata cleanup, then Quit again."
@@ -172,6 +196,7 @@ import Combine
     }
     public func shutdown() {
         closed=true;generation &+= 1;sourceGeneration &+= 1;metadataGeneration &+= 1
-        stopObserving();metadataTask?.cancel();metadataPending=nil;snapshot=nil;preview=""
+        observationOwners.removeAll();stopPolling();metadataTask?.cancel();metadataPending=nil;snapshot=nil;preview=""
+        health="Stopped · observation closed"
     }
 }

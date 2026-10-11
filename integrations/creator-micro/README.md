@@ -121,8 +121,14 @@ is absent outside demo. It never changes macOS appearance settings.
 For a reviewed demo build, check the example headings and long name at the normal
 and minimum permitted 920-point window width in both appearances. Open a second
 preview window and confirm changing one window's appearance leaves the other
-unchanged. Replay all
-eight states and verify identity retention, mismatch rejection and unavailable
+unchanged. When macOS combines them as native tabs, switch tabs repeatedly,
+close the inactive second tab, then repeat with the active second tab. The
+surviving view must keep refreshing beyond ten seconds without going stale.
+Close the final view, reopen from the menu, and confirm observation resumes.
+Views share one observer; duplicate appearance/release cannot add a polling loop
+or stop another owner. The top health header and cards both expire under the
+same freshness rule. Fixture tests cover cancellation and rapid reopen without
+live service failures. Replay all eight states and verify identity retention, mismatch rejection and unavailable
 hardware/focus/saving. Keyboard and VoiceOver checks remain separate; a Tab key
 that does not move AX focus does not establish its cause or justify a global
 keyboard-setting change.

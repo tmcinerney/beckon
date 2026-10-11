@@ -88,6 +88,14 @@ Failures discard state immediately and back off 1/2/4/8 seconds, capped at ten.
 Source changes/disconnects invalidate previews. Assigned samples expire in ten
 seconds; titles, pane order and foreground application never select the source.
 
+Each shared panel view owns a stable observation ID. Multiple windows or native
+tabs share one polling loop; repeated appearance and unknown/duplicate release
+are harmless. Closing one view leaves surviving owners observing. Closing the
+last visible view cancels the loop/read; reopening waits for that loop to retire
+before starting another. Quit closes the model permanently and waits for owned
+polling/read cleanup. The health header uses the same ten-second freshness rule
+as the cards, including while no new sample arrives.
+
 Working is blue pulse, idle white, done green, blocked amber, unknown/stale
 neutral and unassigned off. Done means Herdr-reported done/unread (server seen
 state), not task acceptance/universal unread. Blocked implies no structured
