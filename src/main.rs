@@ -147,6 +147,19 @@ these commands write ordinary keyboard input or control Herdr agents."
     },
     /// Log the ten Beckon-layer function-key events until interrupted.
     ListenKeys,
+    /// Drive the Creator Micro 2 indicator keys and ring.
+    CreatorMicro {
+        #[command(subcommand)]
+        command: CreatorMicroCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum CreatorMicroCommand {
+    /// Paint every agent state, then highlight a key when it is pressed.
+    Demo,
+    /// Turn every indicator and the ring off.
+    Off,
 }
 
 #[derive(Subcommand)]
@@ -313,6 +326,7 @@ fn main() -> Result<()> {
         CommandLine::Preview(args) => preview(args),
         CommandLine::Hid { command } => hid_command(command),
         CommandLine::ListenKeys => listen_keys(),
+        CommandLine::CreatorMicro { command } => creator_micro_command(command),
     }
 }
 
@@ -402,6 +416,82 @@ fn hid_command(command: HidCommand) -> Result<()> {
             hid::send_malformed()?;
             println!("Sent deliberate malformed Beckon status report.");
             Ok(())
+        }
+    }
+}
+
+/// Interactive Creator Micro check. Beckon stays the only writer: this paints
+/// a deterministic render plan and then highlights whichever AG key was
+/// pressed, so the transport, slot mapping and HID notifications are all
+/// exercised without needing a live Herdr or Rex source.
+fn creator_micro_command(command: CreatorMicroCommand) -> Result<()> {
+    use beckon::creator_micro::{self, Pad};
+    use beckon::render::{AgentState, KeyRender, Motion};
+
+    let config = config::load()?;
+    let pad_config = config.outputs.creator_micro.clone();
+    let mut pad = Pad::open()?;
+
+    match command {
+        CreatorMicroCommand::Off => {
+            creator_micro::clear(&mut pad, &pad_config)?;
+            println!("creator-micro: all indicators and ring off");
+            return Ok(());
+        }
+        CreatorMicroCommand::Demo => {}
+    }
+
+    let plan = beckon::render::demo_plan(&config.display)?;
+    creator_micro::write_plan(&mut pad, &plan, &pad_config)?;
+
+    println!("creator-micro demo: six slots painted");
+    for (index, slot) in pad_config.slots.iter().enumerate() {
+        let key = plan
+            .keys
+            .get(index)
+            .map_or("?", |render| render.key.as_str());
+        let state = plan
+            .keys
+            .get(index)
+            .and_then(|render| render.state)
+            .map_or("unbound".to_string(), |state| {
+                format!("{state:?}").to_lowercase()
+            });
+        println!("  {key} <- AG{slot:02}  {state}");
+    }
+    println!("Press and hold any of the six top keys. Ctrl-C to stop.");
+    println!("Then run `beckon creator-micro off` to clear the pad.");
+
+    let mut held: Option<usize> = None;
+    loop {
+        let Some(event) = pad.poll_event()? else {
+            continue;
+        };
+        let Some(index) = pad_config.slots.iter().position(|slot| *slot == event.slot) else {
+            continue;
+        };
+        let logical = plan.keys.get(index).map_or("?", |key| key.key.as_str());
+        if event.pressed {
+            println!("  HOLD    {logical} (AG{:02})", event.slot);
+            held = Some(index);
+            let mut pressed_plan = plan.clone();
+            if let Some(render) = pressed_plan.keys.get_mut(index) {
+                let done = plan.treatments.for_state(AgentState::Done);
+                *render = KeyRender {
+                    key: render.key.clone(),
+                    state: Some(AgentState::Done),
+                    color: done.color,
+                    brightness: 1.0,
+                    motion: Motion::Pulse,
+                };
+            }
+            creator_micro::write_plan(&mut pad, &pressed_plan, &pad_config)?;
+        } else {
+            println!("  RELEASE {logical} (AG{:02})", event.slot);
+            if held == Some(index) {
+                held = None;
+                creator_micro::write_plan(&mut pad, &plan, &pad_config)?;
+            }
         }
     }
 }

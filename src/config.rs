@@ -154,13 +154,109 @@ impl Default for SessionsConfig {
 #[serde(rename_all = "kebab-case")]
 pub enum OutputAdapter {
     Glove80Usb,
+    CreatorMicroUsb,
 }
 
 impl OutputAdapter {
     pub const fn name(self) -> &'static str {
         match self {
             Self::Glove80Usb => "glove80-usb",
+            Self::CreatorMicroUsb => "creator-micro-usb",
         }
+    }
+}
+
+/// Lighting for the Work Louder Creator Micro 2. Colours and the AG slot range
+/// are configuration rather than firmware constants so a settings UI can
+/// rewrite them without a rebuild.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct CreatorMicroConfig {
+    /// AG slot ids backing the six indicator keys, in display order. The
+    /// default deliberately starts at 6: ChatGPT/Codex owns ids 0-5 and is
+    /// layer-agnostic, so using the same ids makes it blank our keys.
+    #[serde(default = "default_creator_micro_slots")]
+    pub slots: Vec<u8>,
+    /// Colour of the non-indicator keys (the firmware's global `keys` zone).
+    #[serde(default = "default_creator_micro_base_color")]
+    pub base_color: Rgb,
+    #[serde(default = "default_creator_micro_base_brightness")]
+    pub base_brightness: f32,
+    /// Ring underglow when no slot needs attention.
+    #[serde(default = "default_creator_micro_ring_color")]
+    pub ring_color: Rgb,
+    #[serde(default = "default_creator_micro_ring_brightness")]
+    pub ring_brightness: f32,
+    #[serde(default = "default_creator_micro_ring_motion")]
+    pub ring_motion: Motion,
+}
+
+fn default_creator_micro_slots() -> Vec<u8> {
+    vec![6, 7, 8, 9, 10, 11]
+}
+
+fn default_creator_micro_base_color() -> Rgb {
+    Rgb {
+        red: 0xB3,
+        green: 0x66,
+        blue: 0xFF,
+    }
+}
+
+fn default_creator_micro_base_brightness() -> f32 {
+    0.45
+}
+
+fn default_creator_micro_ring_color() -> Rgb {
+    Rgb {
+        red: 0xFF,
+        green: 0x49,
+        blue: 0x75,
+    }
+}
+
+fn default_creator_micro_ring_brightness() -> f32 {
+    0.5
+}
+
+fn default_creator_micro_ring_motion() -> Motion {
+    Motion::Breathe
+}
+
+impl Default for CreatorMicroConfig {
+    fn default() -> Self {
+        Self {
+            slots: default_creator_micro_slots(),
+            base_color: default_creator_micro_base_color(),
+            base_brightness: default_creator_micro_base_brightness(),
+            ring_color: default_creator_micro_ring_color(),
+            ring_brightness: default_creator_micro_ring_brightness(),
+            ring_motion: default_creator_micro_ring_motion(),
+        }
+    }
+}
+
+impl CreatorMicroConfig {
+    pub fn validate(&self) -> Result<()> {
+        if self.slots.len() != 6 {
+            bail!("outputs.creator_micro.slots must list exactly six AG slot ids");
+        }
+        let mut seen = BTreeSet::new();
+        for slot in &self.slots {
+            if *slot > 31 {
+                bail!("outputs.creator_micro.slots contains AG id {slot} above 31");
+            }
+            if !seen.insert(*slot) {
+                bail!("outputs.creator_micro.slots contains duplicate AG id {slot}");
+            }
+        }
+        if !(0.0..=1.0).contains(&self.base_brightness) {
+            bail!("outputs.creator_micro.base_brightness must be between 0.0 and 1.0");
+        }
+        if !(0.0..=1.0).contains(&self.ring_brightness) {
+            bail!("outputs.creator_micro.ring_brightness must be between 0.0 and 1.0");
+        }
+        Ok(())
     }
 }
 
@@ -185,6 +281,8 @@ pub struct OutputConfig {
     pub adapters: Vec<OutputAdapter>,
     #[serde(default)]
     pub plugins: Vec<ProcessOutputPlugin>,
+    #[serde(default)]
+    pub creator_micro: CreatorMicroConfig,
 }
 
 impl Default for OutputConfig {
@@ -192,12 +290,14 @@ impl Default for OutputConfig {
         Self {
             adapters: default_output_adapters(),
             plugins: Vec::new(),
+            creator_micro: CreatorMicroConfig::default(),
         }
     }
 }
 
 impl OutputConfig {
     pub fn validate(&self) -> Result<()> {
+        self.creator_micro.validate()?;
         let mut seen = std::collections::BTreeSet::<&str>::new();
         for adapter in &self.adapters {
             if !seen.insert(adapter.name()) {
@@ -960,5 +1060,49 @@ socket = "/tmp/custom-herdr.sock"
             config.herdr.socket.as_deref(),
             Some(std::path::Path::new("/tmp/custom-herdr.sock"))
         );
+    }
+
+    #[test]
+    fn creator_micro_defaults_outside_chatgpt_slot_range() {
+        let config = parse("config_version = 2").unwrap();
+        assert_eq!(config.outputs.creator_micro.slots, vec![6, 7, 8, 9, 10, 11]);
+        config.outputs.creator_micro.validate().unwrap();
+    }
+
+    #[test]
+    fn creator_micro_rejects_bad_slot_lists() {
+        let too_few = parse(
+            r#"
+config_version = 2
+[outputs.creator_micro]
+slots = [6, 7]
+"#,
+        )
+        .unwrap();
+        assert!(too_few.outputs.validate().is_err());
+
+        let duplicate = parse(
+            r#"
+config_version = 2
+[outputs.creator_micro]
+slots = [6, 7, 8, 9, 10, 10]
+"#,
+        )
+        .unwrap();
+        assert!(duplicate.outputs.validate().is_err());
+    }
+
+    #[test]
+    fn creator_micro_adapter_is_a_valid_selection() {
+        let config = parse(
+            r#"
+config_version = 2
+[outputs]
+adapters = ["glove80-usb", "creator-micro-usb"]
+"#,
+        )
+        .unwrap();
+        assert_eq!(config.outputs.adapters.len(), 2);
+        assert_eq!(config.outputs.adapters[1].name(), "creator-micro-usb");
     }
 }

@@ -215,6 +215,16 @@ impl StateTreatments {
             self.unknown,
         ]
     }
+
+    pub fn for_state(&self, state: AgentState) -> StateTreatment {
+        match state {
+            AgentState::Idle => self.idle,
+            AgentState::Working => self.working,
+            AgentState::Blocked => self.blocked,
+            AgentState::Done => self.done,
+            AgentState::Unknown => self.unknown,
+        }
+    }
 }
 
 fn state_treatments(theme: StateTreatments) -> [(&'static str, StateTreatment); 5] {
@@ -240,6 +250,30 @@ pub struct KeyRender {
 pub struct RenderPlan {
     pub keys: Vec<KeyRender>,
     pub treatments: StateTreatments,
+}
+
+impl AgentState {
+    /// Higher means more attention is needed. Shared by every display sink so
+    /// a ring, a status bar and the keys can never disagree about urgency.
+    pub const fn attention_rank(self) -> u8 {
+        match self {
+            Self::Blocked => 5,
+            Self::Unknown => 4,
+            Self::Working => 3,
+            Self::Done => 2,
+            Self::Idle => 1,
+        }
+    }
+}
+
+impl RenderPlan {
+    /// Worst state across every rendered slot, or `None` when nothing is bound.
+    pub fn worst_state(&self) -> Option<AgentState> {
+        self.keys
+            .iter()
+            .filter_map(|key| key.state)
+            .max_by_key(|state| state.attention_rank())
+    }
 }
 
 pub fn render(display: &DisplayConfig, bindings: &[(Binding, Agent)]) -> Result<RenderPlan> {
@@ -287,6 +321,38 @@ pub fn all_state_examples(display: &DisplayConfig) -> Result<RenderPlan> {
             .collect(),
         treatments,
     })
+}
+
+/// A deterministic plan covering every state plus an unbound slot. Used by the
+/// Creator Micro demo so the six physical keys can be checked without a live
+/// agent source.
+pub fn demo_plan(display: &DisplayConfig) -> Result<RenderPlan> {
+    display.validate()?;
+    let treatments = display.selected_theme()?;
+    let states = [
+        Some(AgentState::Idle),
+        Some(AgentState::Working),
+        Some(AgentState::Blocked),
+        Some(AgentState::Done),
+        Some(AgentState::Unknown),
+        None,
+    ];
+    let keys = display
+        .keys
+        .iter()
+        .enumerate()
+        .map(|(index, key)| match states[index % states.len()] {
+            Some(state) => render_state(&key.id, state, display),
+            None => KeyRender {
+                key: key.id.clone(),
+                state: None,
+                color: key.color,
+                brightness: 0.0,
+                motion: Motion::Steady,
+            },
+        })
+        .collect();
+    Ok(RenderPlan { keys, treatments })
 }
 
 fn render_state(key: &str, state: AgentState, display: &DisplayConfig) -> KeyRender {

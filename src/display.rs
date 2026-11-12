@@ -102,6 +102,9 @@ impl DisplaySet {
                 OutputAdapter::Glove80Usb => {
                     Box::new(Glove80UsbDisplay::default()) as Box<dyn DisplaySink>
                 }
+                OutputAdapter::CreatorMicroUsb => Box::new(
+                    crate::creator_micro::CreatorMicroUsbDisplay::new(config.creator_micro.clone()),
+                ) as Box<dyn DisplaySink>,
             })
             .map(|sink| ManagedSink {
                 sink,
