@@ -160,6 +160,8 @@ enum CreatorMicroCommand {
     Demo,
     /// Turn every indicator and the ring off.
     Off,
+    /// Log every HID key notification, including non-AG macro keys.
+    Listen,
 }
 
 #[derive(Subcommand)]
@@ -438,6 +440,20 @@ fn creator_micro_command(command: CreatorMicroCommand) -> Result<()> {
             println!("creator-micro: all indicators and ring off");
             return Ok(());
         }
+        CreatorMicroCommand::Listen => {
+            println!("creator-micro listen: press any pad key, including the mic key.");
+            println!("Ctrl-C to stop. No lighting is written.");
+            loop {
+                if let Some(event) = pad.poll_event()? {
+                    let action = if event.pressed { "PRESS" } else { "RELEASE" };
+                    let agent = event
+                        .agent
+                        .map(|value| format!("ag={value}"))
+                        .unwrap_or_else(|| "ag=-".into());
+                    println!("  {action:<7} {:<16} {agent}", event.key);
+                }
+            }
+        }
         CreatorMicroCommand::Demo => {}
     }
 
@@ -470,13 +486,20 @@ fn creator_micro_command(command: CreatorMicroCommand) -> Result<()> {
     let refresh_every = Duration::from_secs(2);
     loop {
         if let Some(event) = pad.poll_event()? {
-            let Some(index) = pad_config.slots.iter().position(|slot| *slot == event.slot) else {
+            let Some(slot) = event.slot() else {
+                continue;
+            };
+            let Some(index) = pad_config
+                .slots
+                .iter()
+                .position(|candidate| *candidate == slot)
+            else {
                 continue;
             };
             let logical = plan.keys.get(index).map_or("?", |key| key.key.as_str());
             current_plan = plan.clone();
             if event.pressed {
-                println!("  HOLD    {logical} (AG{:02})", event.slot);
+                println!("  HOLD    {logical} ({})", event.key);
                 if let Some(render) = current_plan.keys.get_mut(index) {
                     let done = plan.treatments.for_state(AgentState::Done);
                     *render = KeyRender {
@@ -488,7 +511,7 @@ fn creator_micro_command(command: CreatorMicroCommand) -> Result<()> {
                     };
                 }
             } else {
-                println!("  RELEASE {logical} (AG{:02})", event.slot);
+                println!("  RELEASE {logical} ({})", event.key);
             }
             creator_micro::write_plan(&mut pad, &current_plan, &pad_config)?;
             last_write = Instant::now();

@@ -189,6 +189,15 @@ pub struct CreatorMicroConfig {
     pub ring_brightness: f32,
     #[serde(default = "default_creator_micro_ring_motion")]
     pub ring_motion: Motion,
+    /// When true the ring adopts the worst state's theme colour. Off by default
+    /// so the Rex layer keeps its hot pink identity and uses state only for
+    /// brightness and animation.
+    #[serde(default = "default_creator_micro_ring_follows_state_color")]
+    pub ring_follows_state_color: bool,
+}
+
+fn default_creator_micro_ring_follows_state_color() -> bool {
+    false
 }
 
 fn default_creator_micro_slots() -> Vec<u8> {
@@ -232,6 +241,7 @@ impl Default for CreatorMicroConfig {
             ring_color: default_creator_micro_ring_color(),
             ring_brightness: default_creator_micro_ring_brightness(),
             ring_motion: default_creator_micro_ring_motion(),
+            ring_follows_state_color: default_creator_micro_ring_follows_state_color(),
         }
     }
 }

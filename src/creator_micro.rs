@@ -48,11 +48,24 @@ fn effect(motion: Motion) -> u8 {
     }
 }
 
-/// One `v.oai.hid` notification, already decoded.
+/// One `v.oai.hid` notification, already decoded. `key` is the firmware's
+/// keycode string; AG keys parse to a slot id, ordinary macro keys do not.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HidEvent {
-    pub slot: u8,
+    pub key: String,
     pub pressed: bool,
+    /// Firmware's `ag` field: the AG slot index, when the key has one.
+    pub agent: Option<u8>,
+}
+
+impl HidEvent {
+    pub fn slot(&self) -> Option<u8> {
+        self.agent.or_else(|| {
+            self.key
+                .strip_prefix("AG")
+                .and_then(|suffix| suffix.parse::<u8>().ok())
+        })
+    }
 }
 
 pub struct Pad {
@@ -195,11 +208,19 @@ impl Pad {
                 .and_then(|p| p.get("k"))
                 .and_then(Value::as_str)
                 .unwrap_or("");
-            let Some(slot) = key.strip_prefix("AG").and_then(|s| s.parse::<u8>().ok()) else {
+            if key.is_empty() {
                 continue;
-            };
+            }
             let pressed = params.and_then(|p| p.get("act")).and_then(Value::as_i64) == Some(1);
-            found = Some(HidEvent { slot, pressed });
+            let agent = params
+                .and_then(|p| p.get("ag"))
+                .and_then(Value::as_u64)
+                .map(|value| value as u8);
+            found = Some(HidEvent {
+                key: key.to_string(),
+                pressed,
+                agent,
+            });
         }
         Ok(found)
     }
@@ -267,8 +288,16 @@ pub fn write_plan(pad: &mut Pad, plan: &RenderPlan, config: &CreatorMicroConfig)
     let (ring_color, ring_brightness, ring_motion) = match plan.worst_state() {
         Some(state) => {
             let treatment = plan.treatments.for_state(state);
+            // State normally drives urgency, not identity: the Rex layer keeps
+            // its hot pink ring. Opting in lets the ring adopt the worst
+            // state's theme colour instead.
+            let color = if config.ring_follows_state_color {
+                treatment.color
+            } else {
+                config.ring_color
+            };
             (
-                treatment.color,
+                color,
                 treatment.brightness.max(config.ring_brightness),
                 if state == crate::render::AgentState::Blocked {
                     Motion::Pulse
@@ -436,6 +465,29 @@ mod tests {
     fn report_text_ignores_non_rpc_frames() {
         assert!(report_text(&[0x06, 0x01, 3, b'a', b'b', b'c']).is_none());
         assert!(report_text(&[0x06, 0x02, 0]).is_none());
+    }
+
+    #[test]
+    fn hid_events_keep_non_ag_keycodes_for_the_mic_key() {
+        let ag = HidEvent {
+            key: "AG06".into(),
+            pressed: true,
+            agent: None,
+        };
+        assert_eq!(ag.slot(), Some(6));
+        let by_field = HidEvent {
+            key: "KV_OAI_ACT12".into(),
+            pressed: true,
+            agent: Some(12),
+        };
+        assert_eq!(by_field.slot(), Some(12));
+        let macro_key = HidEvent {
+            key: "KA_M1".into(),
+            pressed: true,
+            agent: None,
+        };
+        assert_eq!(macro_key.slot(), None);
+        assert_eq!(macro_key.key, "KA_M1");
     }
 
     #[test]
