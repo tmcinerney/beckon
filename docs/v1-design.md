@@ -170,55 +170,81 @@ config/     declared slot list, device fragments, source fragments, routes
 
 The minimum that works, with everything else deferred:
 
-1. A `slots` fragment declares `s1`..`s10` (the count is a config choice, not
-   a constant).
-2. `creator-micro.toml` maps six channels to `s1`..`s6`, plus `ring` and
-   `underlay` channels with no slot.
-3. `glove80.toml` maps its first six LEDs to `s1`..`s6` (ten if desired).
-4. `macbook.toml` maps `F1`..`F6` to `s1`..`s6`.
-5. One `rex` source fragment. Bindings are `slot -> Target`.
-6. **No layer support, no app-focus awareness, no per-device binding sets.**
+1. A `slots` fragment declares `s1`..`s10` (the count is a config choice).
+2. `creator-micro.toml` declares one layer projection (`rex`) that maps six
+   channels to the six Rex bindings, plus `ring` and `underlay` channels.
+3. `glove80.toml` and `macbook.toml` each declare one flat projection over the
+   whole ledger.
+4. One `rex` source fragment. Bindings are `slot -> Target`.
+5. No per-device binding sets, no app-focus detection in core.
 
-That is enough for "Glove80's first key and Creator Micro's first key bind to
-the same thing", which is explicitly acceptable for v1.
+That gives "Glove80's first key and Creator Micro's Rex-layer first key bind to
+the same thing", which is acceptable for v1.
 
-### Can bindings mix programs? Yes
+### One ledger, two projection shapes
 
-A binding stores `(slot, source, scope, id)`. `s1` can be a Rex session and
-`s2` a Herdr pane. Pressing either calls that source's declared focus command.
-Nothing forces all slots to be one program; if all six are Rex it is only
-because six Rex sessions were bound. Beckon does **not** need to know which app
-is focused, and the Glove80 does **not** need layers. The source recorded at
-bind time is the answer to "where does this key go".
+There is one global binding set: `slot -> Target { source, scope, id }`. A
+device does not own a second ledger; it declares a **projection** over that
+one.
 
-### Choosing which bindings appear on which device
+- **Layered device (Creator Micro):** each layer declares a `source` filter.
+  The Rex layer shows only bindings whose `source = "rex"`; the Herdr layer
+  shows only `source = "herdr"`. All six keys on the Rex layer go to Rex.
+  Same physical channels, different subset. This matches the native ChatGPT
+  integration, where a layer controls one app's agents.
+- **Flat devices (Glove80, MacBook):** no layers, so they project the whole
+  ledger. A mix of Rex and Herdr bindings can appear there. That difference is
+  a device capability, not a different binding model.
 
-This is the device fragment's channel-to-slot map, not a second binding
-namespace. `creator-micro.toml` can map `key-1 -> s3` and `key-2 -> s1` to show
-a different selection or order. The Glove80 maps its own channels to whichever
-slots it wants. Same binding set, different projections.
-
-### Layers are a device-local view, not a core concept
-
-Switching the pad to the Rex layer does not focus anything; it changes which
-physical keys exist. Focus happens on press. For v1 the Creator Micro has one
-flat channel map. The firmware already scopes AG overrides to the active layer,
-so on other layers those physical keys carry different keycodes and our
-overrides simply do not apply. Beckon needs no layer logic.
-
-If we later want the Herdr layer to show Herdr bindings, add per-layer maps to
-the device fragment:
+So "s1 can be Rex and s2 can be Herdr" is true of the ledger and of flat
+devices, but a layer declaring `source = "rex"` will never show `s2`.
+Validation rejects a projection that selects a slot whose binding source does
+not match the layer's declared source. A layer may also declare an explicit
+`slots` list instead of a filter; validation checks the same invariant.
 
 ```toml
 [layers.rex]
-"key-1" = "s1"
+source = "rex"
+channels = ["key-1", "key-2", "key-3", "key-4", "key-5", "key-6"]
+
 [layers.herdr]
-"key-1" = "s7"
+source = "herdr"
+channels = ["key-1", "key-2", "key-3", "key-4", "key-5", "key-6"]
 ```
 
-The adapter selects the map using `device.status.layer_index`. That is a
-**config addition to one fragment**, not a core change, and it never touches
-the Glove80 or MacBook. So starting flat does not paint us into a corner.
+### Press-to-focus still resolves correctly
+
+Switching a layer changes which physical keys exist; it does not focus
+anything. Focus happens on press. The adapter tracks the active layer via
+`device.status.layer_index` (poll or notification) and resolves a pressed AG
+key to the slot currently projected on that channel for that layer. Using a
+distinct AG id range per layer would remove the need for layer tracking; v1
+uses one range plus `layer_index` because it is simpler and only one layer is
+wired. Beckon still needs no app-focus awareness: the binding's stored source
+says where a press goes.
+
+### App-to-layer switching is a device concern, not Beckon's
+
+The pad's keymap already declares `linkedApps`:
+`linkedApps[0] = "Rex Beta-mac" / com.superlogical.rex`, and the Rex layer
+carries `linkedAppId = 0`. Input switches layers when that app is focused.
+Beckon does not detect apps; it reads the resulting `layer_index`. Only one
+linkedApp is currently defined, so Herdr / Ghostty auto-switching is a keymap
+change, not a Beckon change.
+
+### Concrete keymap constraint
+
+Only the Rex layer currently has OAI/AG keycodes on its top six keys
+(`KV_OAI_AG06`..`AG11` on the device, from our test write). The ChatGPT layer
+uses `AG00`..`AG05`, Home uses `SA_*`, Delta mixes macros, and the Herdr
+layer's top six are all `KC_NONE`. Therefore:
+
+- A Herdr-layer projection requires that layer's top six keys be changed to AG
+  keycodes first.
+- Beckon declares **no projection** for the ChatGPT layer. That layer is a
+  competing HID host owning slots 0-5 and must be left alone.
+- Each layer may use a different AG id range if desired, which removes the
+  need to track `layer_index` for press resolution.
 
 ## Fragment convention and dynamic construction
 
@@ -298,8 +324,9 @@ error, and it does not silently enable anything.
 
 ## Explicitly deferred (keep in mind, do not design corners around)
 
-These are recorded so the v1 shape does not preclude them. None is a v1
-requirement.
+These are recorded so the v1 shape does not preclude them. Most are not v1
+requirements; per-layer source projections on the pad and flexible slot counts
+are v1 requirements and are specified above.
 
 1. **Glove80 parity.** It has not been used for a while. Re-verify input
    registration and LED display after the refactor; do not assume the old path
@@ -331,8 +358,13 @@ requirement.
 8. **Input keymap persistence.** The `AG06`-`AG11` Rex layer is on the device
    but not committed to Input's saved copy; reopening Input may revert it.
    Power-cycle persistence is unproven.
-9. **Swift app** as UI/config client over IPC. It never drives hardware;
-   `beckond` stays the single writer.
+9. **Herdr / Ghostty layers on the pad.** The projection mechanism is v1, but
+   wiring more layers needs keymap work: the Herdr layer's top six keys are
+   currently `KC_NONE`, and only `linkedApps[0]` (Rex) is defined. Adding
+   `linkedAppId` entries and AG keycodes for those layers is a device/Input
+   change, not a Beckon change.
+10. **Swift app** as UI/config client over IPC. It never drives hardware;
+    `beckond` stays the single writer.
 
 ## Non-goals for v1
 
