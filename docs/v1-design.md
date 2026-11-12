@@ -142,6 +142,84 @@ with `dotfilesSrc = null` (report drift, never export).
 `bindings.json` and friends are already in `~/.local/state/beckon/` and are
 already untracked; that part is correct today and should stay that way.
 
+## Naming convention: device-neutral slots
+
+`f1` is Glove80/MacBook vocabulary. `AG06` is Creator Micro vocabulary. Neither
+belongs in core. The naming layers are:
+
+| Name | Example | Where it exists |
+|---|---|---|
+| **Slot id** | `s1`, `s2`, ... `s10` | declared once in a `kind = "slots"` fragment; the only name core knows |
+| **Channel id** | `key-1`, `ring`, `underlay`, `led-1` | local to one device fragment |
+| **Physical address** | `ag = 6`, `zone = "ambient"`, `shortcut = "F1"`, `index = 0` | only inside a device fragment, only interpreted by the adapter named there |
+| **Target ref** | `{ source, scope, id }` | opaque identity, no `pane_id` / `session` |
+
+A slot is an **opaque id in a declared ordered list**, not a function key. Core
+never sees `F1`, `F16`, `AG06`, or an LED index. This removes `KEY_IDS`,
+`valid_key`'s `f1`..`f10` check, and `DisplayConfig::validate`'s ten-key rule.
+
+Code organisation follows the same boundary:
+
+```
+core/       slots, targets, treatments, render frame   (no device vocabulary)
+adapters/   per-transport translation: slot id <-> physical address
+config/     declared slot list, device fragments, source fragments, routes
+```
+
+## Simplest v1 slice
+
+The minimum that works, with everything else deferred:
+
+1. A `slots` fragment declares `s1`..`s10` (the count is a config choice, not
+   a constant).
+2. `creator-micro.toml` maps six channels to `s1`..`s6`, plus `ring` and
+   `underlay` channels with no slot.
+3. `glove80.toml` maps its first six LEDs to `s1`..`s6` (ten if desired).
+4. `macbook.toml` maps `F1`..`F6` to `s1`..`s6`.
+5. One `rex` source fragment. Bindings are `slot -> Target`.
+6. **No layer support, no app-focus awareness, no per-device binding sets.**
+
+That is enough for "Glove80's first key and Creator Micro's first key bind to
+the same thing", which is explicitly acceptable for v1.
+
+### Can bindings mix programs? Yes
+
+A binding stores `(slot, source, scope, id)`. `s1` can be a Rex session and
+`s2` a Herdr pane. Pressing either calls that source's declared focus command.
+Nothing forces all slots to be one program; if all six are Rex it is only
+because six Rex sessions were bound. Beckon does **not** need to know which app
+is focused, and the Glove80 does **not** need layers. The source recorded at
+bind time is the answer to "where does this key go".
+
+### Choosing which bindings appear on which device
+
+This is the device fragment's channel-to-slot map, not a second binding
+namespace. `creator-micro.toml` can map `key-1 -> s3` and `key-2 -> s1` to show
+a different selection or order. The Glove80 maps its own channels to whichever
+slots it wants. Same binding set, different projections.
+
+### Layers are a device-local view, not a core concept
+
+Switching the pad to the Rex layer does not focus anything; it changes which
+physical keys exist. Focus happens on press. For v1 the Creator Micro has one
+flat channel map. The firmware already scopes AG overrides to the active layer,
+so on other layers those physical keys carry different keycodes and our
+overrides simply do not apply. Beckon needs no layer logic.
+
+If we later want the Herdr layer to show Herdr bindings, add per-layer maps to
+the device fragment:
+
+```toml
+[layers.rex]
+"key-1" = "s1"
+[layers.herdr]
+"key-1" = "s7"
+```
+
+The adapter selects the map using `device.status.layer_index`. That is a
+**config addition to one fragment**, not a core change, and it never touches
+the Glove80 or MacBook. So starting flat does not paint us into a corner.
+
 ## Fragment convention and dynamic construction
 
 Beckon scans `conf.d/*.toml` in **lexical filename order** and builds the

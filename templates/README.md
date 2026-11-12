@@ -35,6 +35,7 @@ needs Rust. That boundary is deliberate.
 
 | File | What it enables |
 |---|---|
+| `slots.toml` | The one global slot namespace (`s1`..`s10`), opaque ids | 
 | `devices/creator-micro.toml` | Creator Micro 2, six AG channels + ring + underlay |
 | `devices/macbook.toml` | MacBook function-key input, ten slots |
 | `devices/glove80.toml` | Glove80 input + ten LED channels |

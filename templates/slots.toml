@@ -1,0 +1,19 @@
+# Beckon v1 fragment proposal - NOT loaded by the current binary.
+#
+# The one global slot namespace. These are opaque ids, not function keys.
+# F1/F16/AG06/LED indices never appear in core; they live only inside device
+# fragments. Add or remove ids here to change how many slots exist.
+
+kind = "slots"
+ids = [
+  "s1",
+  "s2",
+  "s3",
+  "s4",
+  "s5",
+  "s6",
+  "s7",
+  "s8",
+  "s9",
+  "s10",
+]
