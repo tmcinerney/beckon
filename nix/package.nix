@@ -6,7 +6,7 @@
 
 rustPlatform.buildRustPackage {
   pname = "beckon";
-  version = "0.3.0";
+  version = "0.4.0";
   src = ../.;
   cargoLock.lockFile = ../Cargo.lock;
   nativeBuildInputs = [ makeWrapper ];
@@ -19,7 +19,7 @@ rustPlatform.buildRustPackage {
   '';
 
   meta = {
-    description = "Herdr pane navigation and pluggable status displays";
+    description = "Agent navigation and pluggable status displays";
     license = lib.licenses.mit;
     mainProgram = "beckon";
   };

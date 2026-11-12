@@ -1,5 +1,5 @@
 {
-  description = "Beckon - Herdr pane navigation and pluggable status displays";
+  description = "Beckon - Agent navigation and pluggable status displays";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
 
