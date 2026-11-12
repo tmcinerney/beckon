@@ -2,7 +2,7 @@
 //! directories.
 //!
 //! Herdr pane IDs are only unique within one session, so Beckon's core works
-//! with [`PaneRef`] values that name both. This module owns the routing policy
+//! with [`AgentRef`] values that name both. This module owns the routing policy
 //! — which session a pane belongs to, and how snapshots from several sessions
 //! combine — while the per-session directory implementations stay ignorant of
 //! each other. Nothing here understands Herdr sockets or macOS; the daemon
@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result};
 
-use crate::core::{Pane, PaneDirectory, PaneRef, PresentationTokenWrite};
+use crate::core::{Agent, AgentRef, AgentSource, PresentationTokenWrite};
 
 pub struct SessionRouter<D> {
     directories: BTreeMap<String, D>,
@@ -30,7 +30,7 @@ impl<D> SessionRouter<D> {
         self.directories.keys().map(String::as_str)
     }
 
-    fn route(&self, pane: &PaneRef) -> Result<&D> {
+    fn route(&self, pane: &AgentRef) -> Result<&D> {
         self.directories.get(&pane.session).with_context(|| {
             format!(
                 "pane {} belongs to session {} which is not managed{}",
@@ -51,8 +51,12 @@ impl<D> SessionRouter<D> {
     }
 }
 
-impl<D: PaneDirectory> PaneDirectory for SessionRouter<D> {
-    fn panes(&self) -> Result<Vec<Pane>> {
+impl<D: AgentSource> AgentSource for SessionRouter<D> {
+    fn id(&self) -> &str {
+        crate::core::DEFAULT_SOURCE
+    }
+
+    fn panes(&self) -> Result<Vec<Agent>> {
         let mut panes = Vec::new();
         for (session, directory) in &self.directories {
             for mut pane in directory
@@ -75,23 +79,23 @@ impl<D: PaneDirectory> PaneDirectory for SessionRouter<D> {
         Ok(self.directories.keys().cloned().collect())
     }
 
-    fn write_fkey(&self, pane: &PaneRef, key: Option<&str>) -> Result<()> {
+    fn write_fkey(&self, pane: &AgentRef, key: Option<&str>) -> Result<()> {
         self.route(pane)?.write_fkey(pane, key)
     }
 
     fn write_presentation_tokens(
         &self,
-        pane: &PaneRef,
+        pane: &AgentRef,
         binding: &str,
     ) -> Result<PresentationTokenWrite> {
         self.route(pane)?.write_presentation_tokens(pane, binding)
     }
 
-    fn focus_pane(&self, pane: &PaneRef) -> Result<()> {
+    fn focus_pane(&self, pane: &AgentRef) -> Result<()> {
         self.route(pane)?.focus_pane(pane)
     }
 
-    fn send_keys(&self, pane: &PaneRef, keys: &[&str]) -> Result<()> {
+    fn send_keys(&self, pane: &AgentRef, keys: &[&str]) -> Result<()> {
         self.route(pane)?.send_keys(pane, keys)
     }
 }
@@ -104,8 +108,8 @@ mod tests {
 
     struct RecordingDirectory {
         session: &'static str,
-        panes: Vec<Pane>,
-        focused: RefCell<Vec<PaneRef>>,
+        panes: Vec<Agent>,
+        focused: RefCell<Vec<AgentRef>>,
     }
 
     impl RecordingDirectory {
@@ -114,7 +118,8 @@ mod tests {
                 session,
                 panes: pane_ids
                     .iter()
-                    .map(|pane_id| Pane {
+                    .map(|pane_id| Agent {
+                        source: crate::core::DEFAULT_SOURCE.into(),
                         pane_id: (*pane_id).into(),
                         session: session.into(),
                         revision: 0,
@@ -133,8 +138,12 @@ mod tests {
         }
     }
 
-    impl PaneDirectory for RecordingDirectory {
-        fn panes(&self) -> Result<Vec<Pane>> {
+    impl AgentSource for RecordingDirectory {
+        fn id(&self) -> &str {
+            crate::core::DEFAULT_SOURCE
+        }
+
+        fn panes(&self) -> Result<Vec<Agent>> {
             Ok(self.panes.clone())
         }
 
@@ -142,25 +151,25 @@ mod tests {
             Ok(BTreeSet::from([self.session.to_string()]))
         }
 
-        fn write_fkey(&self, _pane: &PaneRef, _key: Option<&str>) -> Result<()> {
+        fn write_fkey(&self, _pane: &AgentRef, _key: Option<&str>) -> Result<()> {
             Ok(())
         }
 
         fn write_presentation_tokens(
             &self,
-            _pane: &PaneRef,
+            _pane: &AgentRef,
             _binding: &str,
         ) -> Result<PresentationTokenWrite> {
             Ok(PresentationTokenWrite::Written)
         }
 
-        fn focus_pane(&self, pane: &PaneRef) -> Result<()> {
+        fn focus_pane(&self, pane: &AgentRef) -> Result<()> {
             assert_eq!(pane.session, self.session, "routed to the wrong session");
             self.focused.borrow_mut().push(pane.clone());
             Ok(())
         }
 
-        fn send_keys(&self, _pane: &PaneRef, _keys: &[&str]) -> Result<()> {
+        fn send_keys(&self, _pane: &AgentRef, _keys: &[&str]) -> Result<()> {
             Ok(())
         }
     }
@@ -195,19 +204,19 @@ mod tests {
     fn routes_mutations_to_the_owning_session() {
         let router = router();
         router
-            .focus_pane(&PaneRef::new("agent-workspace", "w6:p1"))
+            .focus_pane(&AgentRef::new("agent-workspace", "w6:p1"))
             .unwrap();
-        router.focus_pane(&PaneRef::new(DEFAULT, "wB:p2")).unwrap();
+        router.focus_pane(&AgentRef::new(DEFAULT, "wB:p2")).unwrap();
 
         let agent = router.directories.get("agent-workspace").unwrap();
         assert_eq!(
             *agent.focused.borrow(),
-            vec![PaneRef::new("agent-workspace", "w6:p1")]
+            vec![AgentRef::new("agent-workspace", "w6:p1")]
         );
         let default = router.directories.get("default").unwrap();
         assert_eq!(
             *default.focused.borrow(),
-            vec![PaneRef::new("default", "wB:p2")]
+            vec![AgentRef::new("default", "wB:p2")]
         );
     }
 
@@ -222,7 +231,7 @@ mod tests {
         );
 
         let error = router
-            .focus_pane(&PaneRef::new("stopped-session", "w1:p1"))
+            .focus_pane(&AgentRef::new("stopped-session", "w1:p1"))
             .unwrap_err();
         let message = error.to_string();
         assert!(message.contains("stopped-session"), "{message}");

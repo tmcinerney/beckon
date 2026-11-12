@@ -4,7 +4,7 @@ use anyhow::{Context, Result, bail};
 use tracing::debug;
 
 use crate::config::FocusConfig;
-use crate::core::PaneRef;
+use crate::core::AgentRef;
 use crate::terminal::SurfaceHandle;
 
 /// Everything the user's focus command may need about the navigation target.
@@ -15,7 +15,7 @@ use crate::terminal::SurfaceHandle;
 /// raised, so it can compose with the terminal backend instead of guessing.
 pub struct FocusContext<'a> {
     pub key: &'a str,
-    pub pane: &'a PaneRef,
+    pub pane: &'a AgentRef,
     pub terminal_handle: Option<&'a SurfaceHandle>,
 }
 
@@ -72,7 +72,7 @@ impl FocusAdapter for CommandFocus<'_> {
 mod tests {
     use super::*;
 
-    fn context<'a>(pane: &'a PaneRef, handle: Option<&'a SurfaceHandle>) -> FocusContext<'a> {
+    fn context<'a>(pane: &'a AgentRef, handle: Option<&'a SurfaceHandle>) -> FocusContext<'a> {
         FocusContext {
             key: "f3",
             pane,
@@ -86,7 +86,7 @@ mod tests {
 
     #[test]
     fn exports_the_navigation_context_to_the_command() {
-        let pane = PaneRef::new("agent-workspace", "w6:p9");
+        let pane = AgentRef::new("agent-workspace", "w6:p9");
         let handle = SurfaceHandle::new("HANDLE-1");
         let config: FocusConfig = toml::from_str(
             r#"command = ["/bin/sh", "-c", "test \"$BECKON_KEY\" = f3 && test \"$BECKON_HERDR_SESSION\" = agent-workspace && test \"$BECKON_PANE_ID\" = w6:p9 && test \"$BECKON_TERMINAL_HANDLE\" = HANDLE-1"]
@@ -101,7 +101,7 @@ mod tests {
 
     #[test]
     fn omits_the_handle_environment_when_none_was_raised() {
-        let pane = PaneRef::new("default", "w1:p1");
+        let pane = AgentRef::new("default", "w1:p1");
         let config: FocusConfig = toml::from_str(
             r#"command = ["/bin/sh", "-c", "test -z \"${BECKON_TERMINAL_HANDLE+set}\""]
 "#,
@@ -115,7 +115,7 @@ mod tests {
 
     #[test]
     fn a_failing_command_is_a_navigation_failure() {
-        let pane = PaneRef::new("default", "w1:p1");
+        let pane = AgentRef::new("default", "w1:p1");
         let config: FocusConfig = toml::from_str(
             r#"command = ["/bin/sh", "-c", "exit 7"]
 "#,
@@ -130,7 +130,7 @@ mod tests {
 
     #[test]
     fn an_absent_command_is_a_quiet_no_op() {
-        let pane = PaneRef::new("default", "w1:p1");
+        let pane = AgentRef::new("default", "w1:p1");
         let config = no_focus_command();
         CommandFocus::new(&config)
             .focus_terminal(&context(&pane, None))

@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
 
-use crate::core::PaneRef;
+use crate::core::AgentRef;
 
 /// State for the explicitly enabled repeat-press confirmation action.
 ///
@@ -16,7 +16,7 @@ pub struct RepeatPressConfirm {
 #[derive(Debug)]
 struct PendingConfirm {
     key: String,
-    pane: PaneRef,
+    pane: AgentRef,
     expires_at: Instant,
 }
 
@@ -24,7 +24,7 @@ impl RepeatPressConfirm {
     pub fn take_if_ready(
         &mut self,
         key: &str,
-        pane: &PaneRef,
+        pane: &AgentRef,
         pane_is_focused: bool,
         now: Instant,
     ) -> bool {
@@ -40,7 +40,7 @@ impl RepeatPressConfirm {
         ready
     }
 
-    pub fn arm(&mut self, key: &str, pane: &PaneRef, window: Duration, now: Instant) {
+    pub fn arm(&mut self, key: &str, pane: &AgentRef, window: Duration, now: Instant) {
         self.pending = Some(PendingConfirm {
             key: key.to_owned(),
             pane: pane.clone(),
@@ -53,8 +53,8 @@ impl RepeatPressConfirm {
 mod tests {
     use super::*;
 
-    fn reference(session: &str, pane_id: &str) -> PaneRef {
-        PaneRef::new(session, pane_id)
+    fn reference(session: &str, pane_id: &str) -> AgentRef {
+        AgentRef::new(session, pane_id)
     }
 
     #[test]

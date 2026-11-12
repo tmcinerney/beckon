@@ -3,7 +3,7 @@ use std::{collections::BTreeMap, fmt, str::FromStr};
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 
-use crate::core::{Binding, KEY_IDS, Pane};
+use crate::core::{Agent, Binding, KEY_IDS};
 
 /// A host-independent LED instruction. Firmware transports this later; it is
 /// deliberately not coupled to HID reports or keyboard-specific coordinates.
@@ -242,7 +242,7 @@ pub struct RenderPlan {
     pub treatments: StateTreatments,
 }
 
-pub fn render(display: &DisplayConfig, bindings: &[(Binding, Pane)]) -> Result<RenderPlan> {
+pub fn render(display: &DisplayConfig, bindings: &[(Binding, Agent)]) -> Result<RenderPlan> {
     display.validate()?;
     let treatments = display.selected_theme()?;
     let panes_by_key = bindings
@@ -372,8 +372,9 @@ fn catppuccin_mocha_theme() -> StateTreatments {
 mod tests {
     use super::*;
 
-    fn pane(status: &str) -> Pane {
-        Pane {
+    fn pane(status: &str) -> Agent {
+        Agent {
+            source: crate::core::DEFAULT_SOURCE.into(),
             pane_id: "p1".into(),
             session: crate::core::DEFAULT_SESSION.into(),
             revision: 0,
@@ -394,6 +395,7 @@ mod tests {
             &DisplayConfig::default(),
             &[(
                 Binding {
+                    source: crate::core::DEFAULT_SOURCE.into(),
                     key: "f1".into(),
                     session: crate::core::DEFAULT_SESSION.into(),
                     pane_id: "p1".into(),
@@ -412,6 +414,7 @@ mod tests {
             &DisplayConfig::default(),
             &[(
                 Binding {
+                    source: crate::core::DEFAULT_SOURCE.into(),
                     key: "f1".into(),
                     session: crate::core::DEFAULT_SESSION.into(),
                     pane_id: "p1".into(),

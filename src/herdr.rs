@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 use tracing::debug;
 
 use crate::{
-    core::{DEFAULT_SESSION, Pane, PaneDirectory, PaneRef, PresentationTokenWrite},
+    core::{Agent, AgentRef, AgentSource, DEFAULT_SESSION, PresentationTokenWrite},
     pane_cache::PaneEvent,
 };
 
@@ -152,8 +152,12 @@ impl LivePaneDirectory {
     }
 }
 
-impl PaneDirectory for LivePaneDirectory {
-    fn panes(&self) -> Result<Vec<Pane>> {
+impl AgentSource for LivePaneDirectory {
+    fn id(&self) -> &str {
+        crate::core::DEFAULT_SOURCE
+    }
+
+    fn panes(&self) -> Result<Vec<Agent>> {
         Ok(self.cache.panes())
     }
 
@@ -161,23 +165,23 @@ impl PaneDirectory for LivePaneDirectory {
         Ok(BTreeSet::from([self.session.name.clone()]))
     }
 
-    fn write_fkey(&self, pane: &PaneRef, key: Option<&str>) -> Result<()> {
+    fn write_fkey(&self, pane: &AgentRef, key: Option<&str>) -> Result<()> {
         self.commands.write_fkey(pane, key)
     }
 
     fn write_presentation_tokens(
         &self,
-        pane: &PaneRef,
+        pane: &AgentRef,
         binding: &str,
     ) -> Result<PresentationTokenWrite> {
         self.commands.write_presentation_tokens(pane, binding)
     }
 
-    fn focus_pane(&self, pane: &PaneRef) -> Result<()> {
+    fn focus_pane(&self, pane: &AgentRef) -> Result<()> {
         self.commands.focus_pane(pane)
     }
 
-    fn send_keys(&self, pane: &PaneRef, keys: &[&str]) -> Result<()> {
+    fn send_keys(&self, pane: &AgentRef, keys: &[&str]) -> Result<()> {
         self.commands.send_keys(pane, keys)
     }
 }
@@ -194,7 +198,7 @@ impl HerdrSocket {
         Self { path }
     }
 
-    pub fn panes(&self) -> Result<Vec<Pane>> {
+    pub fn panes(&self) -> Result<Vec<Agent>> {
         let response = self.request(json!({
             "id": "beckond:pane-list",
             "method": "pane.list",
@@ -333,7 +337,7 @@ impl HerdrCli {
         HerdrSocket::new(self.socket_path.clone())
     }
 
-    fn ensure_same_session(&self, pane: &PaneRef) -> Result<()> {
+    fn ensure_same_session(&self, pane: &AgentRef) -> Result<()> {
         if pane.session != self.session {
             bail!(
                 "pane {} belongs to session {}, not {}",
@@ -355,8 +359,12 @@ fn session_arguments(session: &str) -> Vec<String> {
     }
 }
 
-impl PaneDirectory for HerdrCli {
-    fn panes(&self) -> Result<Vec<Pane>> {
+impl AgentSource for HerdrCli {
+    fn id(&self) -> &str {
+        crate::core::DEFAULT_SOURCE
+    }
+
+    fn panes(&self) -> Result<Vec<Agent>> {
         let output = self
             .command()
             .args(["pane", "list"])
@@ -381,7 +389,7 @@ impl PaneDirectory for HerdrCli {
         Ok(BTreeSet::from([self.session.clone()]))
     }
 
-    fn write_fkey(&self, pane: &PaneRef, key: Option<&str>) -> Result<()> {
+    fn write_fkey(&self, pane: &AgentRef, key: Option<&str>) -> Result<()> {
         self.ensure_same_session(pane)?;
         let mut command = self.command();
         command.args(["pane", "report-metadata", &pane.pane_id, "--source", SOURCE]);
@@ -401,7 +409,7 @@ impl PaneDirectory for HerdrCli {
 
     fn write_presentation_tokens(
         &self,
-        pane: &PaneRef,
+        pane: &AgentRef,
         binding: &str,
     ) -> Result<PresentationTokenWrite> {
         self.ensure_same_session(pane)?;
@@ -424,12 +432,12 @@ impl PaneDirectory for HerdrCli {
         bail!("presentation token update failed: {}", stderr.trim());
     }
 
-    fn focus_pane(&self, pane: &PaneRef) -> Result<()> {
+    fn focus_pane(&self, pane: &AgentRef) -> Result<()> {
         self.ensure_same_session(pane)?;
         self.socket().focus_pane(&pane.pane_id)
     }
 
-    fn send_keys(&self, pane: &PaneRef, keys: &[&str]) -> Result<()> {
+    fn send_keys(&self, pane: &AgentRef, keys: &[&str]) -> Result<()> {
         self.ensure_same_session(pane)?;
         self.socket().send_keys(&pane.pane_id, keys)
     }
@@ -455,7 +463,7 @@ struct PaneListResponse {
 
 #[derive(Debug, Deserialize)]
 struct PaneListResult {
-    panes: Vec<Pane>,
+    panes: Vec<Agent>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -463,7 +471,7 @@ struct HerdrEvent {
     #[serde(rename = "type")]
     event_type: String,
     #[serde(default)]
-    pane: Option<Pane>,
+    pane: Option<Agent>,
     #[serde(default)]
     pane_id: Option<String>,
 }

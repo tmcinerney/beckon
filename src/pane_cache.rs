@@ -14,18 +14,18 @@ use std::{
 
 use anyhow::Result;
 
-use crate::{core::Pane, herdr::HerdrSocket};
+use crate::{core::Agent, herdr::HerdrSocket};
 
 const RECONCILE_INTERVAL: Duration = Duration::from_secs(5);
 
 #[derive(Clone)]
 pub struct PaneCache {
     session: String,
-    panes: Arc<RwLock<Vec<Pane>>>,
+    panes: Arc<RwLock<Vec<Agent>>>,
 }
 
 impl PaneCache {
-    pub fn new(session: impl Into<String>, initial: Vec<Pane>) -> Self {
+    pub fn new(session: impl Into<String>, initial: Vec<Agent>) -> Self {
         let session = session.into();
         let panes = initial
             .into_iter()
@@ -77,11 +77,11 @@ impl PaneCache {
         &self.session
     }
 
-    pub fn panes(&self) -> Vec<Pane> {
+    pub fn panes(&self) -> Vec<Agent> {
         self.panes.read().expect("pane cache lock poisoned").clone()
     }
 
-    pub fn replace(&self, panes: Vec<Pane>) {
+    pub fn replace(&self, panes: Vec<Agent>) {
         let panes = panes
             .into_iter()
             .map(|pane| stamp_session(pane, &self.session))
@@ -111,13 +111,13 @@ impl PaneCache {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PaneEvent {
-    Upsert(Box<Pane>),
+    Upsert(Box<Agent>),
     Remove(String),
 }
 
 /// Herdr's wire payloads carry only the session-local pane ID. A pane stored in
 /// this cache always belongs to the cache's session.
-fn stamp_session(mut pane: Pane, session: &str) -> Pane {
+fn stamp_session(mut pane: Agent, session: &str) -> Agent {
     pane.session = session.to_string();
     pane
 }
@@ -128,8 +128,9 @@ mod tests {
 
     use super::*;
 
-    fn pane(id: &str, revision: u64, status: &str) -> Pane {
-        Pane {
+    fn pane(id: &str, revision: u64, status: &str) -> Agent {
+        Agent {
+            source: crate::core::DEFAULT_SOURCE.into(),
             pane_id: id.into(),
             session: crate::core::DEFAULT_SESSION.into(),
             revision,

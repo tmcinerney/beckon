@@ -8,42 +8,69 @@ use serde::{Deserialize, Serialize};
 pub const KEY_IDS: [&str; 10] = ["f1", "f2", "f3", "f4", "f5", "f6", "f7", "f8", "f9", "f10"];
 pub const STATE_VERSION: u32 = 1;
 
+/// The source a binding came from before Beckon supported more than one. State
+/// files written by older versions omit `source` and are read as Herdr.
+pub const DEFAULT_SOURCE: &str = "herdr";
+
 /// Herdr's name for the unnamed session whose socket lives directly under the
 /// Herdr configuration directory. This mirrors Herdr's own convention rather
 /// than a Beckon invention.
 pub const DEFAULT_SESSION: &str = "default";
 
+fn default_source() -> String {
+    DEFAULT_SOURCE.to_string()
+}
+
 fn default_session() -> String {
     DEFAULT_SESSION.to_string()
 }
 
-/// Session-qualified pane identity.
+/// Source-qualified agent identity.
 ///
-/// Herdr pane IDs are only unique within one session, so every operation that
-/// targets a pane carries the session that owns it. The same pane ID may
-/// legitimately exist in two sessions; it then refers to two distinct panes.
+/// `source` names the integration that owns the agent (`herdr`, `rex`, ...).
+/// `session` is a source-defined scope and `pane_id` a source-defined id within
+/// that scope. Herdr pane IDs are only unique within one session; Rex block IDs
+/// live inside a Rex session. Both therefore use the same shape, and no source
+/// can collide with another even if their ids happen to match.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct PaneRef {
+pub struct AgentRef {
+    /// Older state files omit this and are read as Herdr.
+    #[serde(default = "default_source")]
+    pub source: String,
     #[serde(default = "default_session")]
     pub session: String,
     pub pane_id: String,
 }
 
-impl PaneRef {
+impl AgentRef {
+    /// Herdr identity, kept as the ergonomic default for existing call sites.
     pub fn new(session: impl Into<String>, pane_id: impl Into<String>) -> Self {
+        Self::for_source(DEFAULT_SOURCE, session, pane_id)
+    }
+
+    pub fn for_source(
+        source: impl Into<String>,
+        session: impl Into<String>,
+        pane_id: impl Into<String>,
+    ) -> Self {
         Self {
+            source: source.into(),
             session: session.into(),
             pane_id: pane_id.into(),
         }
     }
 }
 
-/// Log and diagnostic identity; not a wire format. Pane IDs contain colons of
+/// Log and diagnostic identity; not a wire format. Agent IDs contain colons of
 /// their own, so this is display-only.
-impl fmt::Display for PaneRef {
+impl fmt::Display for AgentRef {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "{}:{}", self.session, self.pane_id)
+        write!(
+            formatter,
+            "{}:{}:{}",
+            self.source, self.session, self.pane_id
+        )
     }
 }
 
@@ -51,16 +78,38 @@ impl fmt::Display for PaneRef {
 #[serde(deny_unknown_fields)]
 pub struct Binding {
     pub key: String,
-    /// Owning Herdr session. Pre-multi-session state files omit this field and
-    /// are read as the default session.
+    /// Which integration owns this agent. Older state files omit it.
+    #[serde(default = "default_source")]
+    pub source: String,
+    /// Owning scope. Pre-multi-session state files omit this field and are read
+    /// as the default session.
     #[serde(default = "default_session")]
     pub session: String,
     pub pane_id: String,
 }
 
 impl Binding {
-    pub fn reference(&self) -> PaneRef {
-        PaneRef::new(self.session.clone(), self.pane_id.clone())
+    pub fn reference(&self) -> AgentRef {
+        AgentRef::for_source(
+            self.source.clone(),
+            self.session.clone(),
+            self.pane_id.clone(),
+        )
+    }
+
+    /// Identity comparison used everywhere the ledger is matched against a
+    /// live agent. Including `source` is what keeps two integrations with the
+    /// same opaque id from sharing a binding.
+    pub fn matches(&self, agent: &AgentRef) -> bool {
+        self.source == agent.source
+            && self.session == agent.session
+            && self.pane_id == agent.pane_id
+    }
+
+    pub fn matches_agent(&self, agent: &Agent) -> bool {
+        self.source == agent.source
+            && self.session == agent.session
+            && self.pane_id == agent.pane_id
     }
 }
 
@@ -73,9 +122,13 @@ pub struct BindingState {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
-pub struct Pane {
+pub struct Agent {
+    /// Integration that produced this agent. Herdr's wire JSON has no source
+    /// field; the adapter stamps it after fetching.
+    #[serde(default = "default_source")]
+    pub source: String,
     pub pane_id: String,
-    /// Owning session. Herdr's wire JSON has no session field; the per-session
+    /// Owning scope. Herdr's wire JSON has no session field; the per-session
     /// adapter stamps it after fetching.
     #[serde(default = "default_session")]
     pub session: String,
@@ -98,13 +151,23 @@ pub struct Pane {
     pub tokens: BTreeMap<String, String>,
 }
 
-impl Pane {
+impl Agent {
     pub fn fkey(&self) -> Option<&str> {
         self.tokens.get("fkey").map(String::as_str)
     }
 
-    pub fn reference(&self) -> PaneRef {
-        PaneRef::new(self.session.clone(), self.pane_id.clone())
+    pub fn reference(&self) -> AgentRef {
+        AgentRef::for_source(
+            self.source.clone(),
+            self.session.clone(),
+            self.pane_id.clone(),
+        )
+    }
+
+    pub fn matches(&self, agent: &AgentRef) -> bool {
+        self.source == agent.source
+            && self.session == agent.session
+            && self.pane_id == agent.pane_id
     }
 
     /// Resolve a useful title without modifying the pane. Agent TUIs normally
@@ -135,7 +198,8 @@ impl Pane {
 /// This deliberately contains resolved values so clients never need to infer a
 /// missing `fkey` token as an unbound state.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub struct PanePresentation {
+pub struct AgentPresentation {
+    pub source: String,
     pub session: String,
     pub pane_id: String,
     pub title: String,
@@ -162,46 +226,63 @@ pub enum PresentationTokenWrite {
     PaneGone,
 }
 
-/// The minimal Herdr surface Beckon's binding policy needs. Implementations
-/// are per-session; callers that manage several sessions route through
-/// [`crate::session::SessionRouter`].
-pub trait PaneDirectory {
-    fn panes(&self) -> Result<Vec<Pane>>;
-    /// Sessions whose pane snapshot is currently authoritative.
+/// The minimal surface Beckon's binding policy needs from an agent
+/// integration. Herdr is the first implementation; Rex will be the second.
+/// Implementations are per-source and per-scope; callers managing several
+/// Herdr sessions route through [`crate::session::SessionRouter`].
+///
+/// Required: `id`, `panes`, `observed_sessions` and `focus_pane`. The metadata
+/// and key-sending operations are Herdr-specific; a source without them takes
+/// the default, so adding an integration never requires faking capabilities
+/// it does not have.
+pub trait AgentSource {
+    fn id(&self) -> &str;
+    fn panes(&self) -> Result<Vec<Agent>>;
+    /// Scopes whose agent snapshot is currently authoritative.
     ///
     /// This is declared, not derived from [`Self::panes`]: an empty snapshot
-    /// from a session Beckon can see means its panes are gone, while a session
+    /// from a scope Beckon can see means its agents are gone, while a scope
     /// that is not listed here is simply not observed (for example a stopped
     /// Herdr server) and its bindings are kept dormant rather than released.
     fn observed_sessions(&self) -> Result<std::collections::BTreeSet<String>>;
-    fn write_fkey(&self, pane: &PaneRef, key: Option<&str>) -> Result<()>;
-    /// Publish Beckon-owned display tokens without changing a pane's title or
-    /// other metadata owned by a user or agent integration.
+    fn focus_pane(&self, pane: &AgentRef) -> Result<()>;
+
+    /// Record the Beckon key on the agent, when the source has writable
+    /// metadata. Sources without it keep the ledger authoritative and no-op.
+    fn write_fkey(&self, _pane: &AgentRef, _key: Option<&str>) -> Result<()> {
+        Ok(())
+    }
+
+    /// Publish Beckon-owned display tokens without changing an agent's title
+    /// or other metadata owned by a user or agent integration. Sources without
+    /// presentation metadata report `PaneGone`, which the daemon treats as a
+    /// settled result rather than retrying on every tick.
     fn write_presentation_tokens(
         &self,
-        pane: &PaneRef,
-        binding: &str,
-    ) -> Result<PresentationTokenWrite>;
-    fn focus_pane(&self, pane: &PaneRef) -> Result<()>;
-    fn send_keys(&self, pane: &PaneRef, keys: &[&str]) -> Result<()>;
+        _pane: &AgentRef,
+        _binding: &str,
+    ) -> Result<PresentationTokenWrite> {
+        Ok(PresentationTokenWrite::PaneGone)
+    }
+
+    fn send_keys(&self, _pane: &AgentRef, _keys: &[&str]) -> Result<()> {
+        bail!("{} cannot send keys to its agents", self.id())
+    }
 }
 
 pub struct BindingService<'a> {
     store: &'a dyn BindingStore,
-    panes: &'a dyn PaneDirectory,
+    panes: &'a dyn AgentSource,
 }
 
 impl<'a> BindingService<'a> {
-    pub fn new(store: &'a dyn BindingStore, panes: &'a dyn PaneDirectory) -> Self {
+    pub fn new(store: &'a dyn BindingStore, panes: &'a dyn AgentSource) -> Self {
         Self { store, panes }
     }
 
-    pub fn bind(&self, pane: &PaneRef, requested_key: Option<&str>) -> Result<BindResult> {
+    pub fn bind(&self, pane: &AgentRef, requested_key: Option<&str>) -> Result<BindResult> {
         let panes = self.panes.panes()?;
-        if !panes
-            .iter()
-            .any(|candidate| candidate.session == pane.session && candidate.pane_id == pane.pane_id)
-        {
+        if !panes.iter().any(|candidate| candidate.matches(pane)) {
             bail!("{}", pane_missing_message(pane));
         }
         let mut state = self.reconcile_panes(&panes)?;
@@ -209,10 +290,7 @@ impl<'a> BindingService<'a> {
         // from the same pane keeps its current key; only an explicit --key can
         // intentionally move it.
         if requested_key.is_none()
-            && let Some(existing) = state
-                .bindings
-                .iter()
-                .find(|binding| binding.session == pane.session && binding.pane_id == pane.pane_id)
+            && let Some(existing) = state.bindings.iter().find(|binding| binding.matches(pane))
         {
             return Ok(BindResult {
                 key: existing.key.clone(),
@@ -229,13 +307,15 @@ impl<'a> BindingService<'a> {
         };
 
         if let Some(owner) = state.bindings.iter().find(|binding| binding.key == key)
-            && !(owner.session == pane.session && owner.pane_id == pane.pane_id)
+            && !owner.matches(pane)
         {
             bail!("{key} is already bound to {}", owner.reference());
         }
-        if state.bindings.iter().any(|binding| {
-            binding.session == pane.session && binding.pane_id == pane.pane_id && binding.key == key
-        }) {
+        if state
+            .bindings
+            .iter()
+            .any(|binding| binding.matches(pane) && binding.key == key)
+        {
             return Ok(BindResult {
                 key,
                 session: pane.session.clone(),
@@ -244,11 +324,10 @@ impl<'a> BindingService<'a> {
             });
         }
 
-        state.bindings.retain(|binding| {
-            !(binding.session == pane.session && binding.pane_id == pane.pane_id)
-        });
+        state.bindings.retain(|binding| !binding.matches(pane));
         state.bindings.push(Binding {
             key: key.clone(),
+            source: pane.source.clone(),
             session: pane.session.clone(),
             pane_id: pane.pane_id.clone(),
         });
@@ -262,19 +341,14 @@ impl<'a> BindingService<'a> {
         })
     }
 
-    pub fn release(&self, pane: &PaneRef) -> Result<bool> {
+    pub fn release(&self, pane: &AgentRef) -> Result<bool> {
         let panes = self.panes.panes()?;
-        if !panes
-            .iter()
-            .any(|candidate| candidate.session == pane.session && candidate.pane_id == pane.pane_id)
-        {
+        if !panes.iter().any(|candidate| candidate.matches(pane)) {
             bail!("{}", pane_missing_message(pane));
         }
         let mut state = self.reconcile_panes(&panes)?;
         let before = state.bindings.len();
-        state.bindings.retain(|binding| {
-            !(binding.session == pane.session && binding.pane_id == pane.pane_id)
-        });
+        state.bindings.retain(|binding| !binding.matches(pane));
         if state.bindings.len() == before {
             return Ok(false);
         }
@@ -327,7 +401,7 @@ impl<'a> BindingService<'a> {
         Ok(released)
     }
 
-    pub fn status(&self) -> Result<Vec<(Binding, Pane)>> {
+    pub fn status(&self) -> Result<Vec<(Binding, Agent)>> {
         let panes = self.panes.panes()?;
         let state = self.reconcile_panes(&panes)?;
         let mut bindings = state
@@ -336,7 +410,7 @@ impl<'a> BindingService<'a> {
             .filter_map(|binding| {
                 panes
                     .iter()
-                    .find(|pane| pane.session == binding.session && pane.pane_id == binding.pane_id)
+                    .find(|pane| binding.matches_agent(pane))
                     .cloned()
                     .map(|pane| (binding, pane))
             })
@@ -345,7 +419,7 @@ impl<'a> BindingService<'a> {
         Ok(bindings)
     }
 
-    pub fn panes(&self) -> Result<Vec<PanePresentation>> {
+    pub fn panes(&self) -> Result<Vec<AgentPresentation>> {
         let panes = self.panes.panes()?;
         let state = self.reconcile_panes(&panes)?;
         let mut presentation = panes
@@ -354,13 +428,12 @@ impl<'a> BindingService<'a> {
                 let binding = state
                     .bindings
                     .iter()
-                    .find(|binding| {
-                        binding.session == pane.session && binding.pane_id == pane.pane_id
-                    })
+                    .find(|binding| binding.matches_agent(&pane))
                     .map(|binding| binding.key.to_ascii_uppercase())
                     .unwrap_or_else(|| "unbound".into());
                 let title = pane.display_title();
-                PanePresentation {
+                AgentPresentation {
+                    source: pane.source,
                     session: pane.session,
                     pane_id: pane.pane_id,
                     title,
@@ -378,7 +451,7 @@ impl<'a> BindingService<'a> {
         Ok(presentation)
     }
 
-    pub fn pane_for_key(&self, key: &str) -> Result<PaneRef> {
+    pub fn pane_for_key(&self, key: &str) -> Result<AgentRef> {
         let key = valid_key(key)?;
         let panes = self.panes.panes()?;
         let state = self.reconcile_panes(&panes)?;
@@ -390,7 +463,7 @@ impl<'a> BindingService<'a> {
             .with_context(|| format!("{key} is not bound"))
     }
 
-    fn reconcile_panes(&self, panes: &[Pane]) -> Result<BindingState> {
+    fn reconcile_panes(&self, panes: &[Agent]) -> Result<BindingState> {
         let existing = self.store.load()?;
         let imported_tokens = existing.is_none();
         let mut state = existing.unwrap_or_else(|| BindingState {
@@ -400,6 +473,7 @@ impl<'a> BindingService<'a> {
                 .filter_map(|pane| {
                     pane.fkey().map(|key| Binding {
                         key: key.to_string(),
+                        source: pane.source.clone(),
                         session: pane.session.clone(),
                         pane_id: pane.pane_id.clone(),
                     })
@@ -412,10 +486,12 @@ impl<'a> BindingService<'a> {
         // not yet running) Herdr session does not silently lose its keys.
         let observed = self.panes.observed_sessions()?;
         state.bindings.retain(|binding| {
-            !observed.contains(&binding.session)
-                || panes
-                    .iter()
-                    .any(|pane| pane.session == binding.session && pane.pane_id == binding.pane_id)
+            // A source can only prove its own agents are gone. A binding owned
+            // by another integration stays dormant rather than being released
+            // by an unrelated source's snapshot.
+            binding.source != self.panes.id()
+                || !observed.contains(&binding.session)
+                || panes.iter().any(|pane| binding.matches_agent(pane))
         });
         self.store.save(&state)?;
 
@@ -423,7 +499,7 @@ impl<'a> BindingService<'a> {
             match state
                 .bindings
                 .iter()
-                .find(|binding| binding.session == pane.session && binding.pane_id == pane.pane_id)
+                .find(|binding| binding.matches_agent(pane))
             {
                 Some(expected) if pane.fkey() != Some(expected.key.as_str()) => {
                     self.panes
@@ -441,7 +517,7 @@ impl<'a> BindingService<'a> {
 
 /// Preserve the original single-session error text for the default session, and
 /// name the session otherwise so multi-session mistakes stay diagnosable.
-fn pane_missing_message(pane: &PaneRef) -> String {
+fn pane_missing_message(pane: &AgentRef) -> String {
     if pane.session == DEFAULT_SESSION {
         "pane no longer exists".into()
     } else {
@@ -512,11 +588,11 @@ mod tests {
 
     struct FakePanes {
         sessions: Vec<String>,
-        panes: RefCell<Vec<Pane>>,
+        panes: RefCell<Vec<Agent>>,
     }
 
     impl FakePanes {
-        fn new(panes: Vec<Pane>) -> Self {
+        fn new(panes: Vec<Agent>) -> Self {
             let sessions = panes
                 .iter()
                 .map(|pane| pane.session.clone())
@@ -530,8 +606,12 @@ mod tests {
         }
     }
 
-    impl PaneDirectory for FakePanes {
-        fn panes(&self) -> Result<Vec<Pane>> {
+    impl AgentSource for FakePanes {
+        fn id(&self) -> &str {
+            crate::core::DEFAULT_SOURCE
+        }
+
+        fn panes(&self) -> Result<Vec<Agent>> {
             Ok(self.panes.borrow().clone())
         }
 
@@ -539,13 +619,11 @@ mod tests {
             Ok(self.sessions.iter().cloned().collect())
         }
 
-        fn write_fkey(&self, pane: &PaneRef, key: Option<&str>) -> Result<()> {
+        fn write_fkey(&self, pane: &AgentRef, key: Option<&str>) -> Result<()> {
             let mut panes = self.panes.borrow_mut();
             let entry = panes
                 .iter_mut()
-                .find(|candidate| {
-                    candidate.session == pane.session && candidate.pane_id == pane.pane_id
-                })
+                .find(|candidate| candidate.matches(pane))
                 .context("unknown pane")?;
             match key {
                 Some(key) => entry.tokens.insert("fkey".into(), key.into()),
@@ -556,22 +634,23 @@ mod tests {
 
         fn write_presentation_tokens(
             &self,
-            _pane: &PaneRef,
+            _pane: &AgentRef,
             _binding: &str,
         ) -> Result<PresentationTokenWrite> {
             Ok(PresentationTokenWrite::Written)
         }
-        fn focus_pane(&self, _pane: &PaneRef) -> Result<()> {
+        fn focus_pane(&self, _pane: &AgentRef) -> Result<()> {
             Ok(())
         }
 
-        fn send_keys(&self, _pane: &PaneRef, _keys: &[&str]) -> Result<()> {
+        fn send_keys(&self, _pane: &AgentRef, _keys: &[&str]) -> Result<()> {
             Ok(())
         }
     }
 
-    fn pane_in(session: &str, id: &str) -> Pane {
-        Pane {
+    fn pane_in(session: &str, id: &str) -> Agent {
+        Agent {
+            source: crate::core::DEFAULT_SOURCE.into(),
             pane_id: id.into(),
             session: session.into(),
             revision: 0,
@@ -586,12 +665,12 @@ mod tests {
         }
     }
 
-    fn pane(id: &str) -> Pane {
+    fn pane(id: &str) -> Agent {
         pane_in(DEFAULT_SESSION, id)
     }
 
-    fn reference(id: &str) -> PaneRef {
-        PaneRef::new(DEFAULT_SESSION, id)
+    fn reference(id: &str) -> AgentRef {
+        AgentRef::new(DEFAULT_SESSION, id)
     }
 
     #[test]
@@ -626,11 +705,11 @@ mod tests {
         let service = BindingService::new(&store, &panes);
 
         let first = service
-            .bind(&PaneRef::new(DEFAULT_SESSION, "w1:p1"), Some("f1"))
+            .bind(&AgentRef::new(DEFAULT_SESSION, "w1:p1"), Some("f1"))
             .unwrap();
         assert_eq!(first.session, DEFAULT_SESSION);
         let second = service
-            .bind(&PaneRef::new("agent-workspace", "w1:p1"), Some("f2"))
+            .bind(&AgentRef::new("agent-workspace", "w1:p1"), Some("f2"))
             .unwrap();
         assert_eq!(second.session, "agent-workspace");
 
@@ -645,6 +724,46 @@ mod tests {
     }
 
     #[test]
+    fn legacy_binding_state_defaults_to_the_herdr_source() {
+        let state: BindingState = serde_json::from_str(
+            r#"{"state_version":1,"bindings":[{"key":"f3","pane_id":"w1:p1"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(state.bindings[0].source, DEFAULT_SOURCE);
+        assert_eq!(state.bindings[0].session, DEFAULT_SESSION);
+        assert_eq!(state.bindings[0].reference().source, DEFAULT_SOURCE);
+    }
+
+    #[test]
+    fn the_same_opaque_id_in_two_sources_does_not_share_a_binding() {
+        let store = MemoryStore::default();
+        let mut rex_pane = pane("w1:p1");
+        rex_pane.source = "rex".into();
+        let panes = FakePanes::new(vec![pane("w1:p1"), rex_pane]);
+        let service = BindingService::new(&store, &panes);
+
+        let herdr = service
+            .bind(&AgentRef::new(DEFAULT_SESSION, "w1:p1"), None)
+            .unwrap();
+        assert_eq!(herdr.key, "f1");
+        // Without source in the identity this would look like an implicit
+        // re-bind of the Herdr agent and return f1 unchanged.
+        let rex = service
+            .bind(
+                &AgentRef::for_source("rex", DEFAULT_SESSION, "w1:p1"),
+                Some("f2"),
+            )
+            .unwrap();
+        assert_eq!(rex.key, "f2");
+        assert!(rex.changed);
+
+        let state = store.load().unwrap().unwrap();
+        assert_eq!(state.bindings.len(), 2);
+        assert_eq!(state.bindings[0].source, "herdr");
+        assert_eq!(state.bindings[1].source, "rex");
+    }
+
+    #[test]
     fn a_missing_pane_names_its_session_outside_the_default() {
         let store = MemoryStore::default();
         let panes = FakePanes::new(vec![pane("p1")]);
@@ -653,7 +772,7 @@ mod tests {
         let default_error = service.bind(&reference("gone"), None).unwrap_err();
         assert_eq!(default_error.to_string(), "pane no longer exists");
         let named_error = service
-            .bind(&PaneRef::new("agent-workspace", "gone"), None)
+            .bind(&AgentRef::new("agent-workspace", "gone"), None)
             .unwrap_err();
         assert_eq!(
             named_error.to_string(),
@@ -671,6 +790,7 @@ mod tests {
             let mut state = store.0.borrow_mut();
             let state = state.as_mut().unwrap();
             state.bindings.push(Binding {
+                source: crate::core::DEFAULT_SOURCE.into(),
                 key: "f2".into(),
                 session: "agent-workspace".into(),
                 pane_id: "w2:p1".into(),
@@ -697,7 +817,8 @@ mod tests {
         assert_eq!(
             service.panes().unwrap(),
             vec![
-                PanePresentation {
+                AgentPresentation {
+                    source: crate::core::DEFAULT_SOURCE.into(),
                     session: DEFAULT_SESSION.into(),
                     pane_id: "p1".into(),
                     title: "Inspect task".into(),
@@ -705,7 +826,8 @@ mod tests {
                     agent_status: "idle".into(),
                     focused: false,
                 },
-                PanePresentation {
+                AgentPresentation {
+                    source: crate::core::DEFAULT_SOURCE.into(),
                     session: DEFAULT_SESSION.into(),
                     pane_id: "p2".into(),
                     title: "feature-pane-presentation".into(),
@@ -721,11 +843,13 @@ mod tests {
     fn rejects_duplicate_binding_keys() {
         let bindings = vec![
             Binding {
+                source: crate::core::DEFAULT_SOURCE.into(),
                 key: "f1".into(),
                 session: DEFAULT_SESSION.into(),
                 pane_id: "p1".into(),
             },
             Binding {
+                source: crate::core::DEFAULT_SOURCE.into(),
                 key: "f1".into(),
                 session: DEFAULT_SESSION.into(),
                 pane_id: "p2".into(),
@@ -738,11 +862,13 @@ mod tests {
     fn rejects_duplicate_pane_references_but_allows_distinct_sessions() {
         let duplicate = vec![
             Binding {
+                source: crate::core::DEFAULT_SOURCE.into(),
                 key: "f1".into(),
                 session: DEFAULT_SESSION.into(),
                 pane_id: "w1:p1".into(),
             },
             Binding {
+                source: crate::core::DEFAULT_SOURCE.into(),
                 key: "f2".into(),
                 session: DEFAULT_SESSION.into(),
                 pane_id: "w1:p1".into(),
@@ -752,11 +878,13 @@ mod tests {
 
         let distinct_sessions = vec![
             Binding {
+                source: crate::core::DEFAULT_SOURCE.into(),
                 key: "f1".into(),
                 session: DEFAULT_SESSION.into(),
                 pane_id: "w1:p1".into(),
             },
             Binding {
+                source: crate::core::DEFAULT_SOURCE.into(),
                 key: "f2".into(),
                 session: "agent-workspace".into(),
                 pane_id: "w1:p1".into(),

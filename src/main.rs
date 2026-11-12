@@ -13,7 +13,7 @@ use beckon::{
     action::RepeatPressConfirm,
     config::{self, InputProfile},
     core::{
-        BindingService, BindingState, BindingStore, PaneDirectory, PanePresentation, PaneRef,
+        AgentPresentation, AgentRef, AgentSource, BindingService, BindingState, BindingStore,
         PresentationTokenWrite, STATE_VERSION,
     },
     display::DisplaySet,
@@ -837,7 +837,7 @@ fn daemon() -> Result<()> {
 }
 
 /// Publishes Beckon-owned sidebar tokens only when a pane appears or its
-/// binding changes. Pane references are immutable, so including them in the
+/// binding changes. Agent references are immutable, so including them in the
 /// one update keeps the sidebar independent of missing-token fallbacks.
 #[derive(Default)]
 struct PresentationPublisher {
@@ -845,16 +845,16 @@ struct PresentationPublisher {
 }
 
 impl PresentationPublisher {
-    fn sync<D: PaneDirectory>(&mut self, panes: &D) -> Result<bool> {
+    fn sync<D: AgentSource>(&mut self, panes: &D) -> Result<bool> {
         let store = JsonBindingStore::from_environment();
         let presentation = BindingService::new(&store, panes).panes()?;
         self.publish(panes, presentation)
     }
 
-    fn publish<D: PaneDirectory>(
+    fn publish<D: AgentSource>(
         &mut self,
         panes: &D,
-        presentation: Vec<PanePresentation>,
+        presentation: Vec<AgentPresentation>,
     ) -> Result<bool> {
         let mut changed = false;
         let live = presentation
@@ -886,8 +886,8 @@ impl PresentationPublisher {
     }
 }
 
-fn pane_reference(pane: &PanePresentation) -> PaneRef {
-    PaneRef::new(pane.session.clone(), pane.pane_id.clone())
+fn pane_reference(pane: &AgentPresentation) -> AgentRef {
+    AgentRef::new(pane.session.clone(), pane.pane_id.clone())
 }
 
 /// Read the durable binding ledger without mutating it, combine it with the
@@ -900,7 +900,7 @@ fn publish_display<D>(
     displays: &mut DisplaySet,
 ) -> Result<Vec<beckon::display::DisplayFailure>>
 where
-    D: PaneDirectory,
+    D: AgentSource,
 {
     let store = JsonBindingStore::from_environment();
     let state = store.load()?.unwrap_or(BindingState {
@@ -923,7 +923,7 @@ where
     Ok(displays.publish(&plan))
 }
 
-fn handle_connection<D: PaneDirectory>(mut stream: UnixStream, panes: &D) -> Result<()> {
+fn handle_connection<D: AgentSource>(mut stream: UnixStream, panes: &D) -> Result<()> {
     configure_client_stream(&stream)?;
     let mut line = String::new();
     BufReader::new(stream.try_clone()?).read_line(&mut line)?;
@@ -980,7 +980,7 @@ fn client(request: Request) -> Result<()> {
     }
 }
 
-fn dispatch<D: PaneDirectory>(request: Request, panes: &D) -> Result<Value> {
+fn dispatch<D: AgentSource>(request: Request, panes: &D) -> Result<Value> {
     let store = JsonBindingStore::from_environment();
     let bindings = BindingService::new(&store, panes);
     match request {
@@ -1027,13 +1027,13 @@ fn dispatch<D: PaneDirectory>(request: Request, panes: &D) -> Result<Value> {
 /// Resolve a client-supplied pane reference. Without an explicit `--session`,
 /// the pane ID must exist in exactly one managed session; ambiguity asks for
 /// `--session` instead of guessing.
-fn resolve_pane<D: PaneDirectory>(
+fn resolve_pane<D: AgentSource>(
     panes: &D,
     session: Option<String>,
     pane_id: &str,
-) -> Result<PaneRef> {
+) -> Result<AgentRef> {
     if let Some(session) = session {
-        return Ok(PaneRef::new(session, pane_id));
+        return Ok(AgentRef::new(session, pane_id));
     }
     let matches = panes
         .panes()?
@@ -1099,7 +1099,7 @@ fn cli_directories(config: &config::Config) -> Result<SessionRouter<HerdrCli>> {
     Ok(SessionRouter::new(directories))
 }
 
-fn focus_key<D: PaneDirectory>(
+fn focus_key<D: AgentSource>(
     key: &str,
     config: &config::Config,
     panes: &D,
@@ -1136,12 +1136,12 @@ fn focus_key<D: PaneDirectory>(
     Ok(())
 }
 
-fn pane_for_key<D: PaneDirectory>(key: &str, panes: &D) -> Result<PaneRef> {
+fn pane_for_key<D: AgentSource>(key: &str, panes: &D) -> Result<AgentRef> {
     let store = JsonBindingStore::from_environment();
     BindingService::new(&store, panes).pane_for_key(key)
 }
 
-fn pane_is_focused<D: PaneDirectory>(panes: &D, pane: &PaneRef) -> bool {
+fn pane_is_focused<D: AgentSource>(panes: &D, pane: &AgentRef) -> bool {
     panes
         .panes()
         .map(|panes| {
@@ -1203,11 +1203,15 @@ mod tests {
     struct RecordingDirectory {
         writes: RefCell<Vec<(String, String)>>,
         pane_gone: bool,
-        panes: Vec<beckon::core::Pane>,
+        panes: Vec<beckon::core::Agent>,
     }
 
-    impl PaneDirectory for RecordingDirectory {
-        fn panes(&self) -> Result<Vec<beckon::core::Pane>> {
+    impl AgentSource for RecordingDirectory {
+        fn id(&self) -> &str {
+            beckon::core::DEFAULT_SOURCE
+        }
+
+        fn panes(&self) -> Result<Vec<beckon::core::Agent>> {
             Ok(self.panes.clone())
         }
 
@@ -1215,13 +1219,13 @@ mod tests {
             Ok(self.panes.iter().map(|pane| pane.session.clone()).collect())
         }
 
-        fn write_fkey(&self, _pane: &PaneRef, _key: Option<&str>) -> Result<()> {
+        fn write_fkey(&self, _pane: &AgentRef, _key: Option<&str>) -> Result<()> {
             Ok(())
         }
 
         fn write_presentation_tokens(
             &self,
-            pane: &PaneRef,
+            pane: &AgentRef,
             binding: &str,
         ) -> Result<PresentationTokenWrite> {
             self.writes
@@ -1234,17 +1238,18 @@ mod tests {
             })
         }
 
-        fn focus_pane(&self, _pane: &PaneRef) -> Result<()> {
+        fn focus_pane(&self, _pane: &AgentRef) -> Result<()> {
             Ok(())
         }
 
-        fn send_keys(&self, _pane: &PaneRef, _keys: &[&str]) -> Result<()> {
+        fn send_keys(&self, _pane: &AgentRef, _keys: &[&str]) -> Result<()> {
             Ok(())
         }
     }
 
-    fn pane(session: &str, id: &str, focused: bool) -> beckon::core::Pane {
-        beckon::core::Pane {
+    fn pane(session: &str, id: &str, focused: bool) -> beckon::core::Agent {
+        beckon::core::Agent {
+            source: beckon::core::DEFAULT_SOURCE.into(),
             pane_id: id.into(),
             session: session.into(),
             revision: 0,
@@ -1267,7 +1272,7 @@ mod tests {
         };
         assert_eq!(
             resolve_pane(&directory, None, "w6:p1").unwrap(),
-            PaneRef::new("agent-workspace", "w6:p1")
+            AgentRef::new("agent-workspace", "w6:p1")
         );
     }
 
@@ -1298,7 +1303,7 @@ mod tests {
         // An explicit session bypasses the search entirely.
         assert_eq!(
             resolve_pane(&directory, Some("agent-workspace".into()), "w1:p1").unwrap(),
-            PaneRef::new("agent-workspace", "w1:p1")
+            AgentRef::new("agent-workspace", "w1:p1")
         );
     }
 
@@ -1306,7 +1311,8 @@ mod tests {
     fn presentation_tokens_publish_once_and_on_binding_change() {
         let directory = RecordingDirectory::default();
         let mut publisher = PresentationPublisher::default();
-        let pane = |binding: &str| PanePresentation {
+        let pane = |binding: &str| AgentPresentation {
+            source: beckon::core::DEFAULT_SOURCE.into(),
             session: "default".into(),
             pane_id: "w:p1".into(),
             title: "task".into(),
@@ -1329,8 +1335,8 @@ mod tests {
         assert_eq!(
             *directory.writes.borrow(),
             vec![
-                ("default:w:p1".into(), "unbound".into()),
-                ("default:w:p1".into(), "F4".into()),
+                ("herdr:default:w:p1".into(), "unbound".into()),
+                ("herdr:default:w:p1".into(), "F4".into()),
             ]
         );
     }
@@ -1342,7 +1348,8 @@ mod tests {
             ..Default::default()
         };
         let mut publisher = PresentationPublisher::default();
-        let pane = PanePresentation {
+        let pane = AgentPresentation {
+            source: beckon::core::DEFAULT_SOURCE.into(),
             session: "default".into(),
             pane_id: "w:p1".into(),
             title: "closing task".into(),
@@ -1355,7 +1362,7 @@ mod tests {
         assert!(!publisher.publish(&directory, vec![pane]).unwrap());
         assert_eq!(
             *directory.writes.borrow(),
-            vec![("default:w:p1".into(), "F2".into())]
+            vec![("herdr:default:w:p1".into(), "F2".into())]
         );
     }
 
