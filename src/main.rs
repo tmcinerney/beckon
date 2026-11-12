@@ -40,15 +40,17 @@ use tracing_subscriber::EnvFilter;
 #[command(
     name = "beckon",
     version,
-    about = "Bind selected Herdr panes to Beckon navigation keys",
-    long_about = "Beckon is a local, display-and-navigation-first companion for Herdr.\n\
-It can bind an explicitly selected pane to an F key, show bindings, and focus a\n\
-bound pane. It never sends agent input, approves tools, or answers prompts unless\n\
-the optional repeat-press confirmation action is explicitly enabled.",
+    about = "Bind agents to navigation keys and render their state to device lights",
+    long_about = "Beckon is a local, display-and-navigation-first companion for agent\n\
+terminals. Sources are pluggable and declared in configuration (Rex blocks and\n\
+Herdr panes today). It binds an explicitly selected agent to a logical F key,\n\
+shows bindings, focuses a bound agent, and renders state to device lights. It\n\
+never sends agent input, approves tools, or answers prompts unless the optional\n\
+repeat-press confirmation action is explicitly enabled.",
     after_help = "AGENT WORKFLOW:\n\
   1. Run `beckon status` to inspect currently occupied keys.\n\
-  2. In the intended Herdr pane, run `beckon bind --key f3`; omit --key only\n\
-     when first-free assignment is intended.\n\
+  2. In the intended Rex terminal or Herdr pane, run `beckon bind --key f3`;\n\
+     omit --key only when first-free assignment is intended.\n\
   3. From any context, run `beckon release --key f3` to clear that key.\n\
 \n\
 The `beckond` command is an installed PATH wrapper for `beckon daemon`. Normally\n\
@@ -83,18 +85,21 @@ Normally Home Manager runs this as `beckond`; do not start a second copy unless\
 you are deliberately recovering or developing the service."
     )]
     Daemon,
-    /// Explicitly bind a selected pane to a Beckon key. Defaults to $HERDR_PANE_ID.
+    /// Explicitly bind the current agent to a Beckon key. Run it in that terminal.
     #[command(
-        long_about = "Explicitly register one Herdr pane with one physical Beckon key.\n\
+        long_about = "Explicitly register one agent with one logical Beckon key.\n\
 \n\
-Run this in the pane being registered, or provide `--pane <pane-id>`. Specify\n\
-`--key f1` through `--key f10` to choose a key. Omitting --key deliberately uses\n\
-the first available key, except that an already-bound pane keeps its existing\n\
-key. Beckon never auto-registers panes or agents.\n\
+Run this inside the terminal being registered. `beckon` resolves the identity\n\
+from the source's configured environment: REX_SESSION + REX_BLOCK for Rex,\n\
+HERDR_PANE_ID for Herdr. From anywhere else, provide `--pane <id>`.\n\
 \n\
-Beckon manages every live Herdr session it discovers. A pane that exists in\n\
-more than one session requires `--session <name>`; a unique pane ID resolves\n\
-on its own."
+Specify `--key f1` through `--key f10` to choose a key. Omitting --key uses the\n\
+first available key, except that an already-bound agent keeps its existing key.\n\
+Beckon never auto-registers agents. A requested key that is already occupied\n\
+is not replaced: release it first with `beckon release --key f1`.\n\
+\n\
+Note that logical keys f7-f10 have no physical Creator Micro indicator; only\n\
+the AG ids declared in outputs.creator_micro.slots are lit."
     )]
     Bind(BindArgs),
     /// Clear a pane's Beckon binding. Defaults to $HERDR_PANE_ID; --key works from any pane.
@@ -938,6 +943,19 @@ fn daemon() -> Result<()> {
     }
     let output_ids = config.outputs.ids();
     let mut displays = DisplaySet::from_config(&config.outputs)?;
+    // AIDEV-NOTE: resolve physical AG ids to logical keys from explicit config
+    // only. `slots` and `display.keys` are paired positionally by write_plan,
+    // so a press focuses exactly the key whose LED it sits under. An AG id
+    // outside this list (ChatGPT's 0-5, the seven other keys, the mic key) has
+    // no mapping and is ignored. Nothing here is derived or defaulted.
+    let pad_key_map: Vec<(u8, String)> = config
+        .outputs
+        .creator_micro
+        .slots
+        .iter()
+        .copied()
+        .zip(config.display.keys.iter().map(|key| key.id.clone()))
+        .collect();
     let mut last_render_error = None;
     let mut presentation = PresentationPublisher::default();
     let mut last_presentation_error = None;
@@ -992,82 +1010,41 @@ fn daemon() -> Result<()> {
         while let Ok(event) = receiver.try_recv() {
             debug!(hotkey_id = event.id, state = ?event.state, "received global hotkey event");
             if let Some(binding) = input.pressed(&event) {
-                let key = binding.key;
-                info!(
-                    key,
-                    physical = binding.description,
-                    "routed input to logical key"
+                route_key(
+                    binding.key,
+                    binding.description,
+                    &config,
+                    &sources,
+                    terminal.as_ref(),
+                    &mut confirm,
                 );
-                if let Err(error) =
-                    append_key_event(&key_event_line(key, binding.description, "daemon"))
-                {
-                    eprintln!("record {key}: {error:#}");
-                }
-                let now = Instant::now();
-                let target = pane_for_key(key, &sources);
-                let confirmed = config.actions.confirm.enabled
-                    && target.as_ref().is_ok_and(|pane| {
-                        confirm.take_if_ready(key, pane, pane_is_focused(&sources, pane), now)
-                    });
-                if confirmed {
-                    info!(key, "repeat press confirmed configured action");
-                    let keys = config
-                        .actions
-                        .confirm
-                        .keys
-                        .iter()
-                        .map(String::as_str)
-                        .collect::<Vec<_>>();
-                    let result = target.and_then(|pane| sources.send_keys(&pane, &keys));
-                    match result {
-                        Ok(()) => {
-                            info!(key, "configured action completed");
-                            if let Err(error) =
-                                append_key_event(&focus_result_line(key, "confirm-ok"))
-                            {
-                                eprintln!("record confirmation {key}: {error:#}");
-                            }
-                        }
-                        Err(error) => {
-                            warn!(key, error = %format!("{error:#}"), "configured action failed");
-                            if let Err(record_error) =
-                                append_key_event(&focus_result_line(key, "confirm-error"))
-                            {
-                                eprintln!("record confirmation {key}: {record_error:#}");
-                            }
-                            eprintln!("confirm {key}: {error:#}");
-                        }
-                    }
-                } else {
-                    match focus_key(key, &config, &sources, terminal.as_ref()) {
-                        Ok(()) => {
-                            info!(key, "navigation completed");
-                            if config.actions.confirm.enabled
-                                && let Ok(pane) = target
-                            {
-                                confirm.arm(
-                                    key,
-                                    &pane,
-                                    Duration::from_millis(config.actions.confirm.repeat_press_ms),
-                                    now,
-                                );
-                            }
-                            if let Err(error) = append_key_event(&focus_result_line(key, "ok")) {
-                                eprintln!("record focus {key}: {error:#}");
-                            }
-                        }
-                        Err(error) => {
-                            warn!(key, error = %format!("{error:#}"), "navigation failed");
-                            if let Err(record_error) =
-                                append_key_event(&focus_result_line(key, "error"))
-                            {
-                                eprintln!("record focus {key}: {record_error:#}");
-                            }
-                            eprintln!("focus {key}: {error:#}");
-                        }
-                    }
-                }
             }
+        }
+        let (pad_events, pad_failures) = displays.poll_input();
+        for failure in pad_failures {
+            eprintln!("poll {} input: {}", failure.adapter, failure.message);
+        }
+        for event in pad_events {
+            // Only a press focuses. Releases, macro keys and the mic key carry
+            // no AG slot, and AG ids outside the declared slots are ignored.
+            if !event.pressed {
+                continue;
+            }
+            let Some(slot) = event.slot() else {
+                continue;
+            };
+            let Some(key) = pad_key_for_slot(&pad_key_map, slot) else {
+                debug!(slot, key = %event.key, "pad press outside declared indicator slots");
+                continue;
+            };
+            route_key(
+                key,
+                &event.key,
+                &config,
+                &sources,
+                terminal.as_ref(),
+                &mut confirm,
+            );
         }
         let _keep_manager_registered = &manager;
     })
@@ -1394,6 +1371,92 @@ fn cli_directories(config: &config::Config) -> Result<SessionRouter<HerdrCli>> {
     Ok(SessionRouter::new(directories))
 }
 
+/// Resolve a physical AG id to the logical key declared for that slot. Returns
+/// `None` for ids the configuration does not claim (ChatGPT's 0-5, the seven
+/// other physical keys, the mic key), so those presses never focus anything.
+fn pad_key_for_slot(map: &[(u8, String)], slot: u8) -> Option<&str> {
+    map.iter()
+        .find(|(id, _)| *id == slot)
+        .map(|(_, key)| key.as_str())
+}
+
+/// Route one logical key activation from any physical input (a global hotkey
+/// or a Creator Micro AG press) through the same navigation/confirmation path.
+/// Physical adapters only resolve a key; they never decide what the key does.
+fn route_key<D: AgentSource>(
+    key: &str,
+    physical: &str,
+    config: &config::Config,
+    sources: &D,
+    terminal: Option<&TerminalLink>,
+    confirm: &mut RepeatPressConfirm,
+) {
+    info!(key, physical, "routed input to logical key");
+    if let Err(error) = append_key_event(&key_event_line(key, physical, "daemon")) {
+        eprintln!("record {key}: {error:#}");
+    }
+    let now = Instant::now();
+    let target = pane_for_key(key, sources);
+    let confirmed = config.actions.confirm.enabled
+        && target.as_ref().is_ok_and(|pane| {
+            confirm.take_if_ready(key, pane, pane_is_focused(sources, pane), now)
+        });
+    if confirmed {
+        info!(key, "repeat press confirmed configured action");
+        let keys = config
+            .actions
+            .confirm
+            .keys
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        let result = target.and_then(|pane| sources.send_keys(&pane, &keys));
+        match result {
+            Ok(()) => {
+                info!(key, "configured action completed");
+                if let Err(error) = append_key_event(&focus_result_line(key, "confirm-ok")) {
+                    eprintln!("record confirmation {key}: {error:#}");
+                }
+            }
+            Err(error) => {
+                warn!(key, error = %format!("{error:#}"), "configured action failed");
+                if let Err(record_error) =
+                    append_key_event(&focus_result_line(key, "confirm-error"))
+                {
+                    eprintln!("record confirmation {key}: {record_error:#}");
+                }
+                eprintln!("confirm {key}: {error:#}");
+            }
+        }
+    } else {
+        match focus_key(key, config, sources, terminal) {
+            Ok(()) => {
+                info!(key, "navigation completed");
+                if config.actions.confirm.enabled
+                    && let Ok(pane) = target
+                {
+                    confirm.arm(
+                        key,
+                        &pane,
+                        Duration::from_millis(config.actions.confirm.repeat_press_ms),
+                        now,
+                    );
+                }
+                if let Err(error) = append_key_event(&focus_result_line(key, "ok")) {
+                    eprintln!("record focus {key}: {error:#}");
+                }
+            }
+            Err(error) => {
+                warn!(key, error = %format!("{error:#}"), "navigation failed");
+                if let Err(record_error) = append_key_event(&focus_result_line(key, "error")) {
+                    eprintln!("record focus {key}: {record_error:#}");
+                }
+                eprintln!("focus {key}: {error:#}");
+            }
+        }
+    }
+}
+
 fn focus_key<D: AgentSource>(
     key: &str,
     config: &config::Config,
@@ -1475,20 +1538,42 @@ mod tests {
     fn root_help_explains_agent_workflow_and_safety_boundary() {
         let help = help_for(&[]);
         assert!(help.contains("AGENT WORKFLOW:"));
-        assert!(help.contains("optional repeat-press confirmation action is explicitly enabled"));
+        assert!(help.contains("repeat-press confirmation action"));
+        assert!(help.contains("Sources are pluggable"));
         assert!(help.contains("beckond"));
     }
 
     #[test]
     fn binding_and_release_help_explain_explicit_registration() {
         let bind_help = help_for(&["bind"]);
-        assert!(bind_help.contains("Beckon never auto-registers panes or agents"));
+        assert!(bind_help.contains("Beckon never auto-registers agents"));
+        assert!(bind_help.contains("REX_SESSION + REX_BLOCK"));
         assert!(bind_help.contains("--key f1"));
-        assert!(bind_help.contains("--session <name>"));
+        assert!(bind_help.contains("release it first"));
 
         let release_help = help_for(&["release"]);
         assert!(release_help.contains("does not close a pane or control an agent"));
         assert!(release_help.contains("--session"));
+    }
+
+    #[test]
+    fn pad_key_for_slot_resolves_only_declared_ag_ids() {
+        let map = vec![
+            (6, "f1".to_string()),
+            (7, "f2".to_string()),
+            (8, "f3".to_string()),
+            (9, "f4".to_string()),
+            (10, "f5".to_string()),
+            (11, "f6".to_string()),
+        ];
+        assert_eq!(pad_key_for_slot(&map, 6), Some("f1"));
+        assert_eq!(pad_key_for_slot(&map, 9), Some("f4"));
+        assert_eq!(pad_key_for_slot(&map, 11), Some("f6"));
+        // ChatGPT's 0-5, the seven other keys and the mic key are unclaimed.
+        for slot in [0, 5, 12, 13, 18, 255] {
+            assert_eq!(pad_key_for_slot(&map, slot), None, "slot {slot}");
+        }
+        assert_eq!(pad_key_for_slot(&[], 6), None);
     }
 
     #[test]

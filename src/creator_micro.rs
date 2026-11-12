@@ -198,10 +198,18 @@ impl Pad {
 
     /// Block briefly for a key notification. Returns `None` on timeout.
     pub fn poll_event(&mut self) -> Result<Option<HidEvent>> {
+        self.poll_event_timeout(200)
+    }
+
+    /// Non-blocking variant for a shared event loop. With `timeout_ms = 0`
+    /// this returns immediately when no HID report is queued, so the daemon
+    /// can read pad presses on the same handle it uses to write lighting
+    /// without stalling its 50ms tick.
+    pub fn poll_event_timeout(&mut self, timeout_ms: i32) -> Result<Option<HidEvent>> {
         let mut buf = vec![0u8; REPORT_SIZE];
         let n = self
             .dev
-            .read_timeout(&mut buf, 200)
+            .read_timeout(&mut buf, timeout_ms)
             .context("IOHIDDeviceGetReport failed")?;
         if n == 0 {
             return Ok(None);
@@ -418,6 +426,32 @@ impl CreatorMicroUsbDisplay {
 impl DisplaySink for CreatorMicroUsbDisplay {
     fn id(&self) -> &str {
         "creator-micro-usb"
+    }
+
+    fn poll_input(&mut self) -> Result<Vec<HidEvent>> {
+        // AIDEV-NOTE: Beckon is the single HID writer AND reader. Reuse the
+        // lighting handle instead of opening a second non-exclusive device,
+        // and reopen it here if a failed lighting write dropped it. Presses
+        // on AG ids outside the declared slots are filtered by the daemon.
+        if self.pad.is_none() {
+            match Pad::open() {
+                Ok(pad) => self.pad = Some(pad),
+                Err(_) => return Ok(Vec::new()),
+            }
+        }
+        let outcome = self
+            .pad
+            .as_mut()
+            .expect("pad opened above")
+            .poll_event_timeout(0);
+        match outcome {
+            Ok(Some(event)) => Ok(vec![event]),
+            Ok(None) => Ok(Vec::new()),
+            Err(error) => {
+                self.pad = None;
+                Err(error)
+            }
+        }
     }
 
     fn publish(&mut self, plan: &RenderPlan) -> Result<PublishOutcome> {

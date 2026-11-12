@@ -64,11 +64,34 @@ App-to-layer switching is **Input's** `linkedApps` / `linkedAppId` feature;
 Beckon does not detect apps or manage layers. Per-key AG overrides only appear
 on the active layer.
 
+### Logical keys are not physical keys
+
+`f1`–`f10` are **logical slots**, a namespace inherited from the Glove80 F-row
+and the MacBook function row. The Creator Micro has no F-keys. Its six
+indicator keys are addressed by **AG slot ids**, declared in
+`outputs.creator_micro.slots` (currently `6..=11`). `write_plan` and pad-press
+routing both pair that list positionally with `display.keys`, so `slots[2] = 8`
+means `f3` is the third physical AG key. Concretely:
+
+| Logical | AG id | Physical |
+|---|---|---|
+| `f1`–`f6` | `6`–`11` | six lit indicator keys on the Rex layer |
+| `f7`–`f10` | none | no Creator Micro indicator; Glove80/MacBook only |
+
+This is why a plain `beckon bind` can be surprising: with `f1`–`f6` occupied it
+picks `f7`, which has no LED on this device. The hardcoded ten-slot `KEY_IDS`
+and positional pairing are known v1 design debt; see
+[docs/v1-design.md](docs/v1-design.md) for the opaque-slot and explicit
+channel-mapping proposal.
+
 ### Known limits
 
-- Pad key presses (`v.oai.hid`) are observed by `creator-micro listen` but are
-  not yet routed into the daemon's focus path. `beckon focus --key` is the
-  working substitute.
+- Pad key presses (`v.oai.hid`) are routed into the daemon's focus path on the
+  same HID handle used for lighting. `outputs.creator_micro.slots` paired
+  positionally with `display.keys` is the explicit AG-id → logical-key map; an
+  id outside that map (ChatGPT's 0-5, the seven other keys, the mic key) never
+  focuses anything, and releases are ignored. `beckon focus --key` is the CLI
+  equivalent.
 - `conf.d` fragments, the slot registry and per-layer projections in
   [docs/v1-design.md](docs/v1-design.md) are a **design record**, not loaded by
   the running binary. `templates/` holds example fragments.

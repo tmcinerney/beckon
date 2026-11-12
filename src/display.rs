@@ -27,6 +27,11 @@ pub enum PublishOutcome {
 pub trait DisplaySink {
     fn id(&self) -> &str;
     fn publish(&mut self, plan: &RenderPlan) -> Result<PublishOutcome>;
+    /// Physical key events observed by a sink that owns a device. Write-only
+    /// sinks return an empty list; the daemon maps AG ids onto logical keys.
+    fn poll_input(&mut self) -> Result<Vec<crate::creator_micro::HidEvent>> {
+        Ok(Vec::new())
+    }
 }
 
 /// The Glove80's optional wired USB status display.
@@ -81,6 +86,7 @@ pub struct DisplayFailure {
 struct ManagedSink {
     sink: Box<dyn DisplaySink>,
     last_error: Option<String>,
+    last_input_error: Option<String>,
 }
 
 /// Fans one render plan out to zero or more independent display integrations.
@@ -109,12 +115,14 @@ impl DisplaySet {
             .map(|sink| ManagedSink {
                 sink,
                 last_error: None,
+                last_input_error: None,
             })
             .collect::<Vec<_>>();
         for plugin in &config.plugins {
             sinks.push(ManagedSink {
                 sink: Box::new(ProcessDisplay::new(plugin.clone())?),
                 last_error: None,
+                last_input_error: None,
             });
         }
         Ok(Self { sinks })
@@ -128,6 +136,7 @@ impl DisplaySet {
                 .map(|sink| ManagedSink {
                     sink,
                     last_error: None,
+                    last_input_error: None,
                 })
                 .collect(),
         }
@@ -152,6 +161,33 @@ impl DisplaySet {
             }
         }
         failures
+    }
+
+    /// Collect physical key events from every sink that can produce them.
+    /// Errors are de-duplicated per adapter, matching `publish`, so a
+    /// disconnected pad does not flood the daemon log on every tick.
+    pub fn poll_input(&mut self) -> (Vec<crate::creator_micro::HidEvent>, Vec<DisplayFailure>) {
+        let mut events = Vec::new();
+        let mut failures = Vec::new();
+        for managed in &mut self.sinks {
+            match managed.sink.poll_input() {
+                Ok(mut found) => {
+                    managed.last_input_error = None;
+                    events.append(&mut found);
+                }
+                Err(error) => {
+                    let message = format!("{error:#}");
+                    if managed.last_input_error.as_deref() != Some(message.as_str()) {
+                        failures.push(DisplayFailure {
+                            adapter: managed.sink.id().to_string(),
+                            message: message.clone(),
+                        });
+                        managed.last_input_error = Some(message);
+                    }
+                }
+            }
+        }
+        (events, failures)
     }
 }
 
