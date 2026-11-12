@@ -1,99 +1,108 @@
 # Beckon v1 fragment proposal - NOT loaded by the current binary.
 # Copy into ~/.config/beckon/conf.d/ to enable, delete to disable.
 #
-# A device owns its own channel declarations. Six channels below is a layout
-# choice, not a limit: add more channels to bind every physical key.
-#
-# Channels do NOT carry slot ids. Layers declare which bindings they show.
+# Physical OAI addresses are DERIVED from the device keymap (/fs/keymap.json),
+# not declared here. This file declares semantics only. See docs/v1-design.md.
 
 kind = "device"
 id = "creator-micro"
 
 [transport]
-input = "creator-micro-oai-hid"   # v.oai.hid press/release notifications
+input = "creator-micro-oai-hid"   # v.oai.hid press/release
 display = "creator-micro-usb"     # v.oai.rgbcfg + v.oai.thstatus
+address_source = "device"         # or "declared" for devices with no readable keymap
 
-# An output channel is any addressable target.
-[[display.channel]]
+# Stable control ids. The adapter maps (layer, control) -> transport address
+# by reading layout.keymap, layout.encoders, layout.joystick.sectors and the
+# ambient/keys lighting zones. Positions are row-major over the [2,4,4,3]
+# matrix, but the OAI id for each is layer-specific and never hardcoded here.
+[[controls]]
 id = "key-1"
-address = { ag = 6 }
+kind = "key"
+position = 0
 
-[[display.channel]]
+[[controls]]
 id = "key-2"
-address = { ag = 7 }
+kind = "key"
+position = 1
 
-[[display.channel]]
+[[controls]]
 id = "key-3"
-address = { ag = 8 }
+kind = "key"
+position = 2
 
-[[display.channel]]
+[[controls]]
 id = "key-4"
-address = { ag = 9 }
+kind = "key"
+position = 3
 
-[[display.channel]]
+[[controls]]
 id = "key-5"
-address = { ag = 10 }
+kind = "key"
+position = 4
 
-[[display.channel]]
+[[controls]]
 id = "key-6"
-address = { ag = 11 }
+kind = "key"
+position = 5
 
-# AG06-AG11 deliberately avoids ChatGPT/Codex slots 0-5, which are
-# layer-agnostic and would otherwise blank our overrides.
-[[display.channel]]
+# A layer may declare more, fewer, or different controls. These are examples;
+# unlisted controls are simply unassigned.
+# [[controls]]
+# id = "dial"
+# kind = "dial"          # ids 13-14, input only, never lights
+# [[controls]]
+# id = "joystick"
+# kind = "joystick"      # ids 15-18 + v.oai.rad, input only, never lights
+[[controls]]
 id = "ring"
-address = { zone = "ambient" }
+kind = "display"
+zone = "ambient"
 
-[[display.channel]]
+[[controls]]
 id = "underlay"
-address = { zone = "keys" }
+kind = "display"
+zone = "keys"
 
 [display.presentation]
-# Colours and motion live in settings.toml (app-owned, mutable). These are
-# fallback values only when the corresponding setting is absent.
+# Colours and motion live in settings.toml (app-owned, mutable).
 ring_color = "#FF4975"
 ring_motion = "breathe"
 base_color = "#B366FF"
 
-# A layer is a source filter over the ONE global binding ledger. On the Rex
-# layer every key is a Rex binding; on the Herdr layer every key is a Herdr
-# binding. Same physical channels, different subset. Validation rejects a
-# projection that selects a slot whose binding source does not match.
-[layers.rex]
+# Each layer is a sparse projection over the ONE global binding ledger.
+# `source` filters which bindings may appear; validation rejects a mismatch.
+# `projection` is an explicit list, not a range: absent controls are
+# unassigned and Beckon writes nothing for them.
+[[layers]]
+index = 5
+name = "rex"
 source = "rex"
-channels = ["key-1", "key-2", "key-3", "key-4", "key-5", "key-6"]
+projection = [
+  { control = "key-1", slot = "s1" },
+  { control = "key-2", slot = "s2" },
+  { control = "key-3", slot = "s3" },
+  { control = "key-4", slot = "s4" },
+  { control = "key-5", slot = "s5" },
+  { control = "key-6", slot = "s6" },
+]
 
-# [layers.herdr]
+# Example of a different layer using a different set of channels. Requires
+# that layer's keys to be given OAI keycodes in the keymap first.
+# [[layers]]
+# index = 3
+# name = "herdr"
 # source = "herdr"
-# channels = ["key-1", "key-2", "key-3", "key-4", "key-5", "key-6"]
-# Requires the Herdr layer's top six keys to be changed from KC_NONE to AG
-# keycodes first. See docs/v1-design.md.
+# projection = [
+#   { control = "key-1", slot = "s7" },
+#   { control = "key-2", slot = "s8" },
+# ]
 
 # No projection is declared for the ChatGPT layer. That layer is a competing
-# HID host owning AG00-AG05 and must be left alone.
+# HID host; its AG00-AG05 / ACT06-ACT12 ids are its own convention, not a
+# firmware reservation. Beckon avoids writing there.
 
-# A physical AG key press resolves to the slot currently projected on that
-# channel for the active layer (tracked via device.status.layer_index).
-[[input.binding]]
-key = "AG06"
-channel = "key-1"
-
-[[input.binding]]
-key = "AG07"
-channel = "key-2"
-
-[[input.binding]]
-key = "AG08"
-channel = "key-3"
-
-[[input.binding]]
-key = "AG09"
-channel = "key-4"
-
-[[input.binding]]
-key = "AG10"
-channel = "key-5"
-
-[[input.binding]]
-key = "AG11"
-channel = "key-6"
+# Input presses resolve through the active layer: v.oai.hid gives a short code
+# (e.g. "AG06"), which the adapter maps via (layer, control) -> the slot
+# currently projected on that control. No input binding table is needed when
+# address_source = "device".

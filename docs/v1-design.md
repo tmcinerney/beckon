@@ -234,17 +234,126 @@ change, not a Beckon change.
 
 ### Concrete keymap constraint
 
-Only the Rex layer currently has OAI/AG keycodes on its top six keys
-(`KV_OAI_AG06`..`AG11` on the device, from our test write). The ChatGPT layer
-uses `AG00`..`AG05`, Home uses `SA_*`, Delta mixes macros, and the Herdr
-layer's top six are all `KC_NONE`. Therefore:
+Input's saved keymap shows only the ChatGPT layer carrying OAI keycodes, and
+it uses the **whole 0-12 range**, not just 0-5:
 
-- A Herdr-layer projection requires that layer's top six keys be changed to AG
+```
+ChatGPT  AG00 AG01 / AG02 AG03 AG04 AG05 / ACT06 ACT07 ACT08 ACT09 / ACT10 ACT11 ACT12
+```
+
+So all 13 physical keys have an OAI id there; the first six are "agent keys"
+(`AG`), the other seven "action keys" (`ACT`). The other layers (Home, Herdr,
+Delta, Rex) have plain keycodes in the saved copy. The Rex layer's `AG06`..`AG11`
+exists only on the device, written during our test.
+
+Per the vendor `OAIProtocol.swift`, the id space is:
+
+| Ids | Control | Lights? |
+|---|---|---|
+| 0-12 | 13 physical keys (`AG` or `ACT` keycodes) | yes |
+| 13-14 | dial detents (clockwise / counter-clockwise) | **no** ("nothing is under them") |
+| 15-18 | joystick cardinal sectors | **no** |
+| `v.oai.rad` | joystick angle + distance (continuous) | n/a |
+
+`AG` vs `ACT` is a keycode-family distinction, not a different id space. An
+`ACT06` key presumably reports as `v.oai.hid` and maps to thstatus id 6, but
+that is **unverified**; only `AG06`..`AG11` have been proven. Verify before
+relying on `ACT` ids.
+
+Therefore:
+
+- A Herdr-layer projection requires that layer's keys to be given OAI
   keycodes first.
-- Beckon declares **no projection** for the ChatGPT layer. That layer is a
-  competing HID host owning slots 0-5 and must be left alone.
-- Each layer may use a different AG id range if desired, which removes the
-  need to track `layer_index` for press resolution.
+- Beckon declares **no projection** for the ChatGPT layer, which is a
+  competing HID host.
+- The exact `layer_index` to keymap-array offset needs a one-time check;
+  `device.status` reported `5` with the Rex layer active.
+
+## Per-layer address spaces: derive, do not duplicate
+
+**Yes, the current design duplicates Input's keymap.** Declaring `ag = 6` in
+`creator-micro.toml` repeats information already authoritative in
+`/fs/keymap.json`. That is a real flaw: the two can drift, and nothing checks
+they agree. The fix is to derive physical addresses and declare only semantics.
+
+At startup (and on layer change) the adapter reads the device keymap and builds:
+
+```
+(layer_index, control) -> transport address
+```
+
+from `layout.keymap`, `layout.encoders`, `layout.joystick.sectors`, and the
+`ambient` / `keys` lighting zones. It normalises `KV_OAI_AG06` to the short
+`AG06` form seen in `v.oai.hid`. Beckon config then declares only:
+
+- stable **control ids** with a capability type (key, dial, joystick, ring,
+  backlight)
+- per-layer declarations: index, name, source filter, and a sparse projection
+
+```toml
+kind = "device"
+id = "creator-micro"
+
+[transport]
+input = "creator-micro-oai-hid"
+display = "creator-micro-usb"
+address_source = "device"        # read /fs/keymap.json; never duplicate ids
+
+[[layers]]
+index = 5
+name = "rex"
+source = "rex"
+projection = [
+  { control = "key-1", slot = "s1" },
+  { control = "key-2", slot = "s2" },
+  # key-3 deliberately unassigned
+]
+
+[[layers]]
+index = 1
+name = "chatgpt"
+# No projection: owned by a competing HID host.
+```
+
+`address_source = "declared"` remains an option for devices with no readable
+keymap. Either way, an id is never hardcoded in core and no layer count or
+range is assumed.
+
+### Channels are per-layer, not device-global
+
+The same physical key has a different OAI id (or none) on each layer, so a
+channel is a `(layer, control)` pair. One layer may use six channels, another
+thirteen, another a completely different set including the dial or joystick.
+Nothing in core counts them.
+
+### Four states, explicitly distinguished
+
+| State | Meaning |
+|---|---|
+| **addressable** | the keymap gives that control an OAI id / zone on this layer |
+| **projected** | Beckon's layer projection assigns it a slot |
+| **bound** | that slot has an entry in `bindings.json` |
+| **reserved** | owned by another host; Beckon declares no projection for that layer |
+
+A projection is a **sparse explicit list**, not a range. Controls absent from
+it are unassigned and Beckon writes nothing for them. So "this layer has 13
+addressable keys but we only use six" is expressed directly, with no
+presupposition that every bindable key is bound.
+
+### No hardcoded reservations
+
+`AG00`..`AG05` is not a firmware reservation. It is a convention of ChatGPT's
+host (six agent threads) plus that layer's keymap. Remove the ChatGPT layer or
+reassign its keycodes and those ids are free. The only practical rule is to
+avoid ids that a running host writes, because it will blank them; that is a
+coexistence decision in config, not a core invariant. Six is arbitrary in both
+integrations.
+
+### App switching stays out of core
+
+Confirmed: `linkedApps` / `linkedAppId` in Input's keymap perform app-to-layer
+switching. Beckon reads the resulting `layer_index` and does not detect apps,
+manage layers, or own the keymap. That remains a device/Input concern.
 
 ## Fragment convention and dynamic construction
 
