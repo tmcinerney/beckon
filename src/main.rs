@@ -459,39 +459,43 @@ fn creator_micro_command(command: CreatorMicroCommand) -> Result<()> {
             });
         println!("  {key} <- AG{slot:02}  {state}");
     }
-    println!("Press and hold any of the six top keys. Ctrl-C to stop.");
-    println!("Then run `beckon creator-micro off` to clear the pad.");
+    println!("Press and hold any of the six top keys. Leave this running.");
+    println!("Ctrl-C stops the writer; the pad then goes dark by design.");
 
-    let mut held: Option<usize> = None;
+    // AIDEV-NOTE: the firmware drops AG slot overrides when the writing HID
+    // host closes its handle, and ChatGPT rewrites the global keys zone. Keep
+    // re-asserting the frame so the lights survive while this command runs.
+    let mut current_plan = plan.clone();
+    let mut last_write = Instant::now();
+    let refresh_every = Duration::from_secs(2);
     loop {
-        let Some(event) = pad.poll_event()? else {
-            continue;
-        };
-        let Some(index) = pad_config.slots.iter().position(|slot| *slot == event.slot) else {
-            continue;
-        };
-        let logical = plan.keys.get(index).map_or("?", |key| key.key.as_str());
-        if event.pressed {
-            println!("  HOLD    {logical} (AG{:02})", event.slot);
-            held = Some(index);
-            let mut pressed_plan = plan.clone();
-            if let Some(render) = pressed_plan.keys.get_mut(index) {
-                let done = plan.treatments.for_state(AgentState::Done);
-                *render = KeyRender {
-                    key: render.key.clone(),
-                    state: Some(AgentState::Done),
-                    color: done.color,
-                    brightness: 1.0,
-                    motion: Motion::Pulse,
-                };
+        if let Some(event) = pad.poll_event()? {
+            let Some(index) = pad_config.slots.iter().position(|slot| *slot == event.slot) else {
+                continue;
+            };
+            let logical = plan.keys.get(index).map_or("?", |key| key.key.as_str());
+            current_plan = plan.clone();
+            if event.pressed {
+                println!("  HOLD    {logical} (AG{:02})", event.slot);
+                if let Some(render) = current_plan.keys.get_mut(index) {
+                    let done = plan.treatments.for_state(AgentState::Done);
+                    *render = KeyRender {
+                        key: render.key.clone(),
+                        state: Some(AgentState::Done),
+                        color: done.color,
+                        brightness: 1.0,
+                        motion: Motion::Pulse,
+                    };
+                }
+            } else {
+                println!("  RELEASE {logical} (AG{:02})", event.slot);
             }
-            creator_micro::write_plan(&mut pad, &pressed_plan, &pad_config)?;
-        } else {
-            println!("  RELEASE {logical} (AG{:02})", event.slot);
-            if held == Some(index) {
-                held = None;
-                creator_micro::write_plan(&mut pad, &plan, &pad_config)?;
-            }
+            creator_micro::write_plan(&mut pad, &current_plan, &pad_config)?;
+            last_write = Instant::now();
+        }
+        if last_write.elapsed() >= refresh_every {
+            creator_micro::write_plan(&mut pad, &current_plan, &pad_config)?;
+            last_write = Instant::now();
         }
     }
 }

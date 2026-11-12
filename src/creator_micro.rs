@@ -107,7 +107,10 @@ impl Pad {
     fn call(&mut self, method: &str, params: Value) -> Result<Value> {
         let id = self.next_id;
         self.send(method, params)?;
-        let deadline = Instant::now() + Duration::from_secs(5);
+        // AIDEV-NOTE: open() probes several vendor interfaces and most never
+        // answer RPC. A 5s deadline per candidate made attaching take ~10s.
+        // The RPC-capable interface answers in milliseconds.
+        let deadline = Instant::now() + Duration::from_millis(700);
         loop {
             if Instant::now() >= deadline {
                 bail!("timed out waiting for {method}");
@@ -342,6 +345,8 @@ pub struct CreatorMicroUsbDisplay {
     config: CreatorMicroConfig,
     pad: Option<Pad>,
     last_plan: Option<RenderPlan>,
+    last_write: Option<Instant>,
+    refresh_every: Duration,
 }
 
 impl CreatorMicroUsbDisplay {
@@ -350,7 +355,20 @@ impl CreatorMicroUsbDisplay {
             config,
             pad: None,
             last_plan: None,
+            last_write: None,
+            refresh_every: Duration::from_secs(2),
         }
+    }
+
+    /// The firmware drops AG slot overrides when the writing HID host closes
+    /// its handle, and ChatGPT periodically rewrites the global `keys` zone.
+    /// Re-assert a full frame on a slow tick even when the plan is unchanged.
+    fn needs_write(&self, plan: &RenderPlan, now: Instant) -> bool {
+        if self.last_plan.as_ref() != Some(plan) {
+            return true;
+        }
+        self.last_write
+            .is_none_or(|last| now.duration_since(last) >= self.refresh_every)
     }
 }
 
@@ -360,7 +378,7 @@ impl DisplaySink for CreatorMicroUsbDisplay {
     }
 
     fn publish(&mut self, plan: &RenderPlan) -> Result<PublishOutcome> {
-        if self.last_plan.as_ref() == Some(plan) {
+        if !self.needs_write(plan, Instant::now()) {
             return Ok(PublishOutcome::Unchanged);
         }
         if self.pad.is_none() {
@@ -379,6 +397,7 @@ impl DisplaySink for CreatorMicroUsbDisplay {
         match result {
             Ok(()) => {
                 self.last_plan = Some(plan.clone());
+                self.last_write = Some(Instant::now());
                 Ok(PublishOutcome::Updated)
             }
             Err(error) => {
