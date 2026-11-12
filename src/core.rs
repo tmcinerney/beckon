@@ -245,6 +245,17 @@ pub trait AgentSource {
     /// that is not listed here is simply not observed (for example a stopped
     /// Herdr server) and its bindings are kept dormant rather than released.
     fn observed_sessions(&self) -> Result<std::collections::BTreeSet<String>>;
+    /// Whether `scope` in `source` is authoritative right now. Registries
+    /// override this to route by source instead of comparing their own `id`.
+    fn observes(&self, source: &str, scope: &str) -> Result<bool> {
+        Ok(self.id() == source && self.observed_sessions()?.contains(scope))
+    }
+    /// Identity of the agent `beckon bind` is running inside, when the source
+    /// can determine it from its environment. Herdr uses `HERDR_PANE_ID`
+    /// through the CLI's own resolution and leaves this as `None`.
+    fn current_identity(&self) -> Option<AgentRef> {
+        None
+    }
     fn focus_pane(&self, pane: &AgentRef) -> Result<()>;
 
     /// Record the Beckon key on the agent, when the source has writable
@@ -484,13 +495,14 @@ impl<'a> BindingService<'a> {
         // Only sessions with an authoritative snapshot can prove that a pane is
         // gone. Bindings in unobserved sessions stay dormant so a stopped (or
         // not yet running) Herdr session does not silently lose its keys.
-        let observed = self.panes.observed_sessions()?;
         state.bindings.retain(|binding| {
-            // A source can only prove its own agents are gone. A binding owned
-            // by another integration stays dormant rather than being released
-            // by an unrelated source's snapshot.
-            binding.source != self.panes.id()
-                || !observed.contains(&binding.session)
+            // Only the source that owns a binding can prove its agent is gone.
+            // A registry routes this by source, so an unrelated source's
+            // snapshot never releases another integration's bindings.
+            !self
+                .panes
+                .observes(&binding.source, &binding.session)
+                .unwrap_or(false)
                 || panes.iter().any(|pane| binding.matches_agent(pane))
         });
         self.store.save(&state)?;

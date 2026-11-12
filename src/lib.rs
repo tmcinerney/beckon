@@ -1,4 +1,5 @@
 pub mod action;
+pub mod command_source;
 pub mod config;
 pub mod core;
 pub mod creator_micro;
@@ -11,5 +12,6 @@ pub mod input;
 pub mod pane_cache;
 pub mod render;
 pub mod session;
+pub mod source_set;
 pub mod state;
 pub mod terminal;

@@ -271,11 +271,16 @@ enum Request {
         #[serde(default)]
         session: Option<String>,
         key: Option<String>,
+        /// Integration that owns the agent. Omitted by older CLI clients.
+        #[serde(default)]
+        source: Option<String>,
     },
     ReleasePane {
         pane_id: String,
         #[serde(default)]
         session: Option<String>,
+        #[serde(default)]
+        source: Option<String>,
     },
     ReleaseKey {
         key: String,
@@ -303,11 +308,23 @@ fn main() -> Result<()> {
             Ok(())
         }
         CommandLine::Daemon => daemon(),
-        CommandLine::Bind(args) => client(Request::Bind {
-            pane_id: current_pane(args.pane.pane)?,
-            session: args.pane.session,
-            key: args.key,
-        }),
+        CommandLine::Bind(args) => {
+            let config = config::load()?;
+            let (source, session, pane_id) = match bind_identity(&config) {
+                Some(identity) => (
+                    Some(identity.source),
+                    Some(identity.session),
+                    identity.pane_id,
+                ),
+                None => (None, args.pane.session, current_pane(args.pane.pane)?),
+            };
+            client(Request::Bind {
+                pane_id,
+                session,
+                key: args.key,
+                source,
+            })
+        }
         CommandLine::Release(args) if args.all => client(Request::ReleaseAll),
         CommandLine::Release(args) => match args.key {
             Some(key) => {
@@ -316,10 +333,22 @@ fn main() -> Result<()> {
                 }
                 client(Request::ReleaseKey { key })
             }
-            None => client(Request::ReleasePane {
-                pane_id: current_pane(args.pane.pane)?,
-                session: args.pane.session,
-            }),
+            None => {
+                let config = config::load()?;
+                let (source, session, pane_id) = match bind_identity(&config) {
+                    Some(identity) => (
+                        Some(identity.source),
+                        Some(identity.session),
+                        identity.pane_id,
+                    ),
+                    None => (None, args.pane.session, current_pane(args.pane.pane)?),
+                };
+                client(Request::ReleasePane {
+                    pane_id,
+                    session,
+                    source,
+                })
+            }
         },
         CommandLine::Status => client(Request::Status),
         CommandLine::Terminals(args) => terminals_command(args),
@@ -529,8 +558,8 @@ fn preview(args: PreviewArgs) -> Result<()> {
         beckon::render::all_state_examples(&config.display)?
     } else {
         let store = JsonBindingStore::from_environment();
-        let herdr = cli_directories(&config)?;
-        let bindings = BindingService::new(&store, &herdr);
+        let sources = cli_sources(&config)?;
+        let bindings = BindingService::new(&store, &sources);
         beckon::render::render(&config.display, &bindings.status()?)?
     };
     if args.json {
@@ -763,6 +792,17 @@ fn current_pane(explicit: Option<String>) -> Result<String> {
         .context("no pane supplied; use --pane <PANE_ID> or run inside a Herdr pane")
 }
 
+/// Resolve `beckon bind` from a configured source's identity environment
+/// variables before falling back to Herdr's `HERDR_PANE_ID`. Rex terminals
+/// export `REX_SESSION` / `REX_BLOCK`, which are declared in `[sources]`.
+fn bind_identity(config: &config::Config) -> Option<AgentRef> {
+    config
+        .sources
+        .iter()
+        .map(|source| beckon::command_source::CommandSource::new(source.clone()))
+        .find_map(|source| AgentSource::current_identity(&source))
+}
+
 fn socket_path() -> PathBuf {
     env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
@@ -804,10 +844,10 @@ fn daemon() -> Result<()> {
 
     // AIDEV-NOTE: macOS requires global-hotkey and Tao's event loop on the main
     // thread. Socket polling keeps binding mutation serialized in this daemon.
-    let herdr = live_directories(&config)?;
+    let sources = build_sources(&config)?;
     info!(
-        sessions = %herdr.sessions().collect::<Vec<_>>().join(", "),
-        "daemon discovered Herdr sessions"
+        sources = %config.sources.iter().map(|s| s.id.as_str()).collect::<Vec<_>>().join(", "),
+        "daemon configured agent sources"
     );
     let terminal = terminal::from_config(&config.terminal)?;
     if let Some(link) = &terminal {
@@ -837,11 +877,11 @@ fn daemon() -> Result<()> {
         *control_flow =
             ControlFlow::WaitUntil(std::time::Instant::now() + Duration::from_millis(50));
         while let Ok((stream, _)) = listener.accept() {
-            if let Err(error) = handle_connection(stream, &herdr) {
+            if let Err(error) = handle_connection(stream, &sources) {
                 eprintln!("request failed: {error:#}");
             }
         }
-        match publish_display(&config, &herdr, &mut displays) {
+        match publish_display(&config, &sources, &mut displays) {
             Ok(failures) => {
                 last_render_error = None;
                 for failure in failures {
@@ -859,7 +899,7 @@ fn daemon() -> Result<()> {
                 }
             }
         }
-        match presentation.sync(&herdr) {
+        match presentation.sync(&sources) {
             Ok(_) => last_presentation_error = None,
             Err(error) => {
                 let error = format!("{error:#}");
@@ -884,10 +924,10 @@ fn daemon() -> Result<()> {
                     eprintln!("record {key}: {error:#}");
                 }
                 let now = Instant::now();
-                let target = pane_for_key(key, &herdr);
+                let target = pane_for_key(key, &sources);
                 let confirmed = config.actions.confirm.enabled
                     && target.as_ref().is_ok_and(|pane| {
-                        confirm.take_if_ready(key, pane, pane_is_focused(&herdr, pane), now)
+                        confirm.take_if_ready(key, pane, pane_is_focused(&sources, pane), now)
                     });
                 if confirmed {
                     info!(key, "repeat press confirmed configured action");
@@ -898,7 +938,7 @@ fn daemon() -> Result<()> {
                         .iter()
                         .map(String::as_str)
                         .collect::<Vec<_>>();
-                    let result = target.and_then(|pane| herdr.send_keys(&pane, &keys));
+                    let result = target.and_then(|pane| sources.send_keys(&pane, &keys));
                     match result {
                         Ok(()) => {
                             info!(key, "configured action completed");
@@ -919,7 +959,7 @@ fn daemon() -> Result<()> {
                         }
                     }
                 } else {
-                    match focus_key(key, &config, &herdr, terminal.as_ref()) {
+                    match focus_key(key, &config, &sources, terminal.as_ref()) {
                         Ok(()) => {
                             info!(key, "navigation completed");
                             if config.actions.confirm.enabled
@@ -1004,7 +1044,11 @@ impl PresentationPublisher {
 }
 
 fn pane_reference(pane: &AgentPresentation) -> AgentRef {
-    AgentRef::new(pane.session.clone(), pane.pane_id.clone())
+    AgentRef::for_source(
+        pane.source.clone(),
+        pane.session.clone(),
+        pane.pane_id.clone(),
+    )
 }
 
 /// Read the durable binding ledger without mutating it, combine it with the
@@ -1031,7 +1075,7 @@ where
         .filter_map(|binding| {
             panes_by_id
                 .iter()
-                .find(|pane| pane.session == binding.session && pane.pane_id == binding.pane_id)
+                .find(|pane| binding.matches_agent(pane))
                 .cloned()
                 .map(|pane| (binding, pane))
         })
@@ -1105,12 +1149,17 @@ fn dispatch<D: AgentSource>(request: Request, panes: &D) -> Result<Value> {
             pane_id,
             session,
             key,
+            source,
         } => {
-            let pane = resolve_pane(panes, session, &pane_id)?;
+            let pane = resolve_pane(panes, session, &pane_id, source.as_deref())?;
             Ok(serde_json::to_value(bindings.bind(&pane, key.as_deref())?)?)
         }
-        Request::ReleasePane { pane_id, session } => {
-            let pane = resolve_pane(panes, session, &pane_id)?;
+        Request::ReleasePane {
+            pane_id,
+            session,
+            source,
+        } => {
+            let pane = resolve_pane(panes, session, &pane_id, source.as_deref())?;
             Ok(json!({
                 "session": pane.session,
                 "pane_id": pane.pane_id,
@@ -1148,14 +1197,16 @@ fn resolve_pane<D: AgentSource>(
     panes: &D,
     session: Option<String>,
     pane_id: &str,
+    source: Option<&str>,
 ) -> Result<AgentRef> {
+    let source = source.unwrap_or(beckon::core::DEFAULT_SOURCE);
     if let Some(session) = session {
-        return Ok(AgentRef::new(session, pane_id));
+        return Ok(AgentRef::for_source(source, session, pane_id));
     }
     let matches = panes
         .panes()?
         .into_iter()
-        .filter(|pane| pane.pane_id == pane_id)
+        .filter(|pane| pane.source == source && pane.pane_id == pane_id)
         .collect::<Vec<_>>();
     match matches.as_slice() {
         [] => bail!("pane {pane_id} no longer exists in any managed session"),
@@ -1169,6 +1220,42 @@ fn resolve_pane<D: AgentSource>(
             bail!("pane {pane_id} exists in multiple sessions ({sessions}); retry with --session")
         }
     }
+}
+
+/// Build every configured agent integration as one routing source set.
+/// Herdr is optional once at least one `[sources]` entry exists, so a Rex-only
+/// setup can still drive the pad when Herdr is not running.
+fn build_sources(config: &config::Config) -> Result<beckon::source_set::SourceSet> {
+    let mut sources: Vec<Box<dyn AgentSource>> = Vec::new();
+    match live_directories(config) {
+        Ok(herdr) => sources.push(Box::new(herdr)),
+        Err(error) if config.sources.is_empty() => return Err(error),
+        Err(error) => {
+            eprintln!("beckond: Herdr unavailable, continuing with configured sources: {error:#}")
+        }
+    }
+    for source in &config.sources {
+        sources.push(Box::new(beckon::command_source::CommandSource::new(
+            source.clone(),
+        )));
+    }
+    Ok(beckon::source_set::SourceSet::new(sources))
+}
+
+/// One-shot equivalent for read-only CLI commands such as `beckon preview`.
+fn cli_sources(config: &config::Config) -> Result<beckon::source_set::SourceSet> {
+    let mut sources: Vec<Box<dyn AgentSource>> = Vec::new();
+    match cli_directories(config) {
+        Ok(herdr) => sources.push(Box::new(herdr)),
+        Err(error) if config.sources.is_empty() => return Err(error),
+        Err(error) => eprintln!("beckon: Herdr unavailable: {error:#}"),
+    }
+    for source in &config.sources {
+        sources.push(Box::new(beckon::command_source::CommandSource::new(
+            source.clone(),
+        )));
+    }
+    Ok(beckon::source_set::SourceSet::new(sources))
 }
 
 /// Build the live session router used by the daemon.
@@ -1388,7 +1475,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            resolve_pane(&directory, None, "w6:p1").unwrap(),
+            resolve_pane(&directory, None, "w6:p1", None).unwrap(),
             AgentRef::new("agent-workspace", "w6:p1")
         );
     }
@@ -1403,13 +1490,13 @@ mod tests {
             ..Default::default()
         };
 
-        let ambiguous = resolve_pane(&directory, None, "w1:p1")
+        let ambiguous = resolve_pane(&directory, None, "w1:p1", None)
             .unwrap_err()
             .to_string();
         assert!(ambiguous.contains("multiple sessions"), "{ambiguous}");
         assert!(ambiguous.contains("--session"), "{ambiguous}");
 
-        let missing = resolve_pane(&directory, None, "gone")
+        let missing = resolve_pane(&directory, None, "gone", None)
             .unwrap_err()
             .to_string();
         assert!(
@@ -1419,7 +1506,7 @@ mod tests {
 
         // An explicit session bypasses the search entirely.
         assert_eq!(
-            resolve_pane(&directory, Some("agent-workspace".into()), "w1:p1").unwrap(),
+            resolve_pane(&directory, Some("agent-workspace".into()), "w1:p1", None).unwrap(),
             AgentRef::new("agent-workspace", "w1:p1")
         );
     }

@@ -3,6 +3,7 @@ use std::{collections::BTreeSet, env, fs, path::PathBuf};
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
+use crate::core::DEFAULT_SOURCE;
 use crate::render::{DisplayConfig, Motion, Rgb, StateTreatment};
 
 const CONFIG_VERSION: u32 = 2;
@@ -25,6 +26,69 @@ pub struct Config {
     pub herdr: HerdrConfig,
     #[serde(default)]
     pub terminal: TerminalConfig,
+    /// Additional agent integrations. Herdr remains the built-in default;
+    /// each entry is fully described by commands, so no integration-specific
+    /// identity or vocabulary lives in Beckon's core.
+    #[serde(default)]
+    pub sources: Vec<AgentSourceConfig>,
+}
+
+/// A config-driven agent integration. `list` emits a JSON array of agents;
+/// `focus` and `activate` are argv templates. Beckon never uses a shell: it
+/// substitutes `$BECKON_*` tokens in arguments and exports the same values as
+/// environment variables.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AgentSourceConfig {
+    /// Stable id recorded on every binding from this source.
+    pub id: String,
+    /// Command emitting `[{"scope","id","state","title","focused","token"}]`.
+    pub list: Vec<String>,
+    /// Command run when a bound key is pressed.
+    #[serde(default)]
+    pub focus: Vec<String>,
+    /// Optional command run before focus to raise the host application.
+    #[serde(default)]
+    pub activate: Vec<String>,
+    /// Environment variables that identify the agent `beckon bind` runs in.
+    #[serde(default)]
+    pub identity: Option<SourceIdentity>,
+    /// Minimum milliseconds between `list` refreshes.
+    #[serde(default = "default_source_refresh_ms")]
+    pub refresh_ms: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SourceIdentity {
+    /// Environment variable holding the agent's scope.
+    pub scope_env: String,
+    /// Environment variable holding the agent's opaque id.
+    pub id_env: String,
+}
+
+fn default_source_refresh_ms() -> u64 {
+    1000
+}
+
+impl AgentSourceConfig {
+    pub fn validate(&self) -> Result<()> {
+        if !valid_plugin_id(&self.id) {
+            bail!("sources id {:?} must use lowercase kebab-case", self.id);
+        }
+        if self.list.is_empty() {
+            bail!("sources.{}.list must not be empty", self.id);
+        }
+        if self.refresh_ms == 0 {
+            bail!("sources.{}.refresh_ms must be greater than zero", self.id);
+        }
+        if let Some(identity) = &self.identity
+            && (identity.scope_env.is_empty() || identity.id_env.is_empty())
+        {
+            bail!("sources.{}.identity env names must not be empty", self.id);
+        }
+        Ok(())
+    }
 }
 
 /// Terminal surface control. The backend is a stable registry name; adopted
@@ -560,6 +624,7 @@ impl ConfigV1 {
             actions: ActionsConfig::default(),
             herdr: HerdrConfig::default(),
             terminal: TerminalConfig::default(),
+            sources: Vec::new(),
         }
     }
 }
@@ -638,6 +703,19 @@ pub fn load() -> Result<Config> {
     config.outputs.validate()?;
     config.display.validate()?;
     config.herdr.validate()?;
+    let mut ids = std::collections::BTreeSet::new();
+    for source in &config.sources {
+        source.validate()?;
+        if !ids.insert(source.id.as_str()) {
+            bail!("sources contains duplicate id {:?}", source.id);
+        }
+        if source.id == DEFAULT_SOURCE {
+            bail!(
+                "sources id {:?} is reserved for the built-in Herdr source",
+                source.id
+            );
+        }
+    }
     Ok(config)
 }
 
