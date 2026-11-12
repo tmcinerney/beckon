@@ -428,23 +428,64 @@ projection may only assign a slot to a control whose role allows that binding
 kind; validation enforces it. The `AG`/`ACT` family may be used as a hint to
 populate roles, but config wins and no family name appears in core.
 
-### ChatGPT's coupling to ids 0-5
+### Other hosts are per-layer, optional, and removable
 
-ChatGPT's host is hardcoded to six slots with ids 0-5
-(`slots: Array.from({length:6})`) and contains **zero** references to layers.
-It derives the slot from the `agent` field of a `v.oai.hid` event, i.e. from the
-AG number in the keycode. So:
+**No official integration is assumed to exist.** ChatGPT, Premiere, and any
+other Work Louder / Input integration are just other HID hosts, each with its
+own layer and its own keycode convention. Beckon core knows none of their
+names. A layer declares an optional host claim, and that claim exists only
+when the user has that layer enabled and that host running:
 
-- Moving the ChatGPT layer to a different layer position does **not** change
-  the ids. They come from the keycodes assigned on that layer, not from the
-  layer index or physical position.
-- Reassigning those keys to `AG06`..`AG11` would change the ids, but ChatGPT
-  still writes 0-5, so it would stop lighting them. That is a constraint of a
-  third-party app we cannot reconfigure.
-- While ChatGPT runs, ids 0-5 are effectively occupied. Declare that in config
-  as `reserved_ids = [0,1,2,3,4,5]` with a comment naming the reason. It is
-  explicit, removable, and never a core invariant. Six is arbitrary in both
-  integrations.
+```toml
+[[layers]]
+index = 1
+name = "chatgpt"
+# Only present if the official ChatGPT host is enabled and writing here.
+other_host = { name = "codex-micro", ids = [0, 1, 2, 3, 4, 5] }
+# no projection: Beckon owns nothing on this layer
+```
+
+Validation only checks collisions on layers that declare `other_host`. Delete
+the declaration and the ids are free. There is no device-level reservation, no
+global `reserved_ids`, and no assumption about how many ids a host uses. Six is
+arbitrary in every integration.
+
+ChatGPT's host is hardcoded to ids 0-5 (`slots: Array.from({length:6})`) and
+contains **zero** references to layers. It derives the slot from the `agent`
+field of `v.oai.hid`, i.e. the AG number in the keycode. Slot overrides only
+appear when that AG keycode is on the **active** layer. So a layer using a
+different id range is simply unaffected by ChatGPT's writes, even while the app
+is running. That is the clean way to opt out: pick different ids, not a disable
+switch (there is no in-app toggle for `codexMicro`; only Input Monitoring gates
+it).
+
+### A custom ChatGPT layer
+
+Verified from the keymap: `linkedApps` contains only
+`{ id: 0, name: "Rex Beta-mac", process: "com.superlogical.rex" }`, the Rex
+layer has `linkedAppId = 0`, and the ChatGPT layer has `linkedAppId = None`.
+Delta has `linkedAppId = 1`, which is dangling. That explains the missing
+auto-switch: **Input switches layers via `linkedApps` / `linkedAppId`, and no
+entry exists for ChatGPT** (`com.openai.codex`).
+
+A custom ChatGPT layer is therefore ordinary device/Input config, not Beckon
+work:
+
+1. Add `{ id: 1, name: "ChatGPT", process: "com.openai.codex" }` to
+   `linkedApps` and set `linkedAppId = 1` on the new layer.
+2. Choose its own OAI ids. Using anything other than 0-5 makes the official
+   host's writes inert on that layer.
+3. Declare a `[[layers]]` fragment in `creator-micro.toml` with the desired
+   `source` and sparse projection.
+4. Optionally declare `other_host` for the old official layer if it remains
+   enabled.
+
+If the official ChatGPT layer is removed entirely, both its `other_host`
+declaration and its ids disappear from Beckon's config. Nothing in core
+changes. A Beckon-controlled ChatGPT *source* (driving ChatGPT agent state)
+would additionally need a state API; the ChatGPT HID host is the only thing
+that currently knows its threads, and no such API has been verified. Treat
+that as an open question, not a v1 assumption.
 
 ## Fragment convention and dynamic construction
 

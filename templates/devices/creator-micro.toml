@@ -116,14 +116,18 @@ projection = [
 #   { control = "key-2", slot = "s8" },
 # ]
 
-# While ChatGPT runs it writes ids 0-5 regardless of layer. This is a
-# third-party host convention, not a firmware reservation. Declared here so
-# validation can flag a collision; remove it if ChatGPT is not running.
-reserved_ids = [0, 1, 2, 3, 4, 5]
-
-# No projection is declared for the ChatGPT layer. That layer is a competing
-# HID host; its AG00-AG05 / ACT06-ACT12 ids are its own convention, not a
-# firmware reservation. Beckon avoids writing there.
+# No device-level reservation. Other hosts are claimed PER LAYER and only when
+# that layer is enabled and that host is running. Delete the declaration and
+# the ids are free. No official integration is assumed to exist.
+#
+# [[layers]]
+# index = 1
+# name = "chatgpt"
+# other_host = { name = "codex-micro", ids = [0, 1, 2, 3, 4, 5] }
+#
+# A custom ChatGPT layer would instead use its own id range plus a linkedApps
+# entry for com.openai.codex, and declare its own source/projection. See
+# docs/v1-design.md.
 
 # Input presses resolve through the active layer: v.oai.hid gives a short code
 # (e.g. "AG06"), which the adapter maps via (layer, control) -> the slot

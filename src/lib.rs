@@ -6,6 +6,7 @@ pub mod creator_micro;
 pub mod display;
 pub mod display_protocol;
 pub mod focus;
+pub mod fragments;
 pub mod herdr;
 pub mod hid;
 pub mod input;
