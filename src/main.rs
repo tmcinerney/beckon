@@ -147,11 +147,20 @@ these commands write ordinary keyboard input or control Herdr agents."
     },
     /// Log the ten Beckon-layer function-key events until interrupted.
     ListenKeys,
+    /// Focus the agent bound to a logical key, as a pad press would.
+    Focus(FocusArgs),
     /// Drive the Creator Micro 2 indicator keys and ring.
     CreatorMicro {
         #[command(subcommand)]
         command: CreatorMicroCommand,
     },
+}
+
+#[derive(Args)]
+struct FocusArgs {
+    /// Logical Beckon slot, for example f4.
+    #[arg(long)]
+    key: String,
 }
 
 #[derive(Subcommand)]
@@ -287,6 +296,9 @@ enum Request {
     },
     ReleaseAll,
     Status,
+    FocusKey {
+        key: String,
+    },
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -358,6 +370,7 @@ fn main() -> Result<()> {
         CommandLine::Hid { command } => hid_command(command),
         CommandLine::ListenKeys => listen_keys(),
         CommandLine::CreatorMicro { command } => creator_micro_command(command),
+        CommandLine::Focus(args) => client(Request::FocusKey { key: args.key }),
     }
 }
 
@@ -1179,9 +1192,20 @@ fn dispatch<D: AgentSource>(request: Request, panes: &D) -> Result<Value> {
             let released = bindings.release_all()?;
             Ok(json!({"released": released.len(), "bindings": released}))
         }
+        Request::FocusKey { key } => {
+            let pane = bindings.pane_for_key(&key)?;
+            panes.focus_pane(&pane)?;
+            Ok(json!({
+                "key": key,
+                "source": pane.source,
+                "scope": pane.session,
+                "id": pane.pane_id,
+            }))
+        }
         Request::Status => Ok(json!({
             "bindings": bindings.status()?.into_iter().map(|(binding, pane)| json!({
                 "key": binding.key,
+                "source": binding.source,
                 "session": binding.session,
                 "pane": pane,
             })).collect::<Vec<_>>(),
@@ -1316,8 +1340,13 @@ fn focus_key<D: AgentSource>(
     // Raising the adopted surface is best effort: a missing record, a changed
     // backend, or a stale handle warns and degrades to command + pane focus.
     // Beckon never guesses a replacement surface.
+    // AIDEV-NOTE: the legacy [focus] command and adopted terminal surface are
+    // Herdr's window-manager integration. Other sources bring their own host
+    // forward through their configured `activate` command inside focus_pane,
+    // so running the Herdr path here would raise the wrong application.
+    let herdr = pane.source == beckon::core::DEFAULT_SOURCE;
     let mut raised = None;
-    if let Some(link) = terminal {
+    if herdr && let Some(link) = terminal {
         match link.raise_for_session(&pane.session) {
             Ok(outcome) => raised = outcome,
             Err(error) => {
@@ -1327,16 +1356,18 @@ fn focus_key<D: AgentSource>(
             }
         }
     }
-    let context = FocusContext {
-        key,
-        pane: &pane,
-        terminal_handle: raised.as_ref(),
-    };
-    CommandFocus::new(&config.focus).focus_terminal(&context)?;
-    info!("terminal focus integration completed");
-    debug!(pane = %pane, "requesting Herdr pane focus");
+    if herdr {
+        let context = FocusContext {
+            key,
+            pane: &pane,
+            terminal_handle: raised.as_ref(),
+        };
+        CommandFocus::new(&config.focus).focus_terminal(&context)?;
+        info!("terminal focus integration completed");
+    }
+    debug!(pane = %pane, source = %pane.source, "requesting agent focus");
     panes.focus_pane(&pane)?;
-    info!(pane = %pane, "Herdr pane focus completed");
+    info!(pane = %pane, "agent focus completed");
     Ok(())
 }
 
@@ -1349,11 +1380,9 @@ fn pane_is_focused<D: AgentSource>(panes: &D, pane: &AgentRef) -> bool {
     panes
         .panes()
         .map(|panes| {
-            panes.into_iter().any(|candidate| {
-                candidate.session == pane.session
-                    && candidate.pane_id == pane.pane_id
-                    && candidate.focused
-            })
+            panes
+                .into_iter()
+                .any(|candidate| candidate.matches(pane) && candidate.focused)
         })
         .unwrap_or(false)
 }

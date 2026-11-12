@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use hidapi::{HidApi, HidDevice};
 use serde_json::{Value, json};
+use tracing::{debug, info};
 
 use crate::{
     config::CreatorMicroConfig,
@@ -376,6 +377,7 @@ pub struct CreatorMicroUsbDisplay {
     last_plan: Option<RenderPlan>,
     last_write: Option<Instant>,
     refresh_every: Duration,
+    attached_once: bool,
 }
 
 impl CreatorMicroUsbDisplay {
@@ -386,6 +388,7 @@ impl CreatorMicroUsbDisplay {
             last_plan: None,
             last_write: None,
             refresh_every: Duration::from_secs(2),
+            attached_once: false,
         }
     }
 
@@ -427,6 +430,15 @@ impl DisplaySink for CreatorMicroUsbDisplay {
             Ok(()) => {
                 self.last_plan = Some(plan.clone());
                 self.last_write = Some(Instant::now());
+                if !self.attached_once {
+                    self.attached_once = true;
+                    info!(
+                        slots = ?self.config.slots,
+                        "creator-micro: attached and published first lighting frame"
+                    );
+                } else {
+                    debug!("creator-micro: re-asserted lighting frame");
+                }
                 Ok(PublishOutcome::Updated)
             }
             Err(error) => {

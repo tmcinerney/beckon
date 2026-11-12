@@ -23,11 +23,17 @@ impl SourceSet {
     }
 
     fn route(&self, source: &str) -> Result<&dyn AgentSource> {
+        self.route_opt(source)
+            .ok_or_else(|| anyhow!("no agent source named {source:?}"))
+    }
+
+    /// A source may simply not be running. Dormant bindings from an absent
+    /// source must not break release/publish paths.
+    fn route_opt(&self, source: &str) -> Option<&dyn AgentSource> {
         self.sources
             .iter()
             .find(|candidate| candidate.id() == source)
             .map(|candidate| candidate.as_ref())
-            .ok_or_else(|| anyhow!("no agent source named {source:?}"))
     }
 
     /// Identities reported by sources that declare `bind` environment vars.
@@ -63,7 +69,10 @@ impl AgentSource for SourceSet {
     }
 
     fn observes(&self, source: &str, scope: &str) -> Result<bool> {
-        Ok(self.route(source)?.observed_sessions()?.contains(scope))
+        match self.route_opt(source) {
+            Some(child) => Ok(child.observed_sessions()?.contains(scope)),
+            None => Ok(false),
+        }
     }
 
     fn focus_pane(&self, pane: &AgentRef) -> Result<()> {
@@ -71,7 +80,10 @@ impl AgentSource for SourceSet {
     }
 
     fn write_fkey(&self, pane: &AgentRef, key: Option<&str>) -> Result<()> {
-        self.route(&pane.source)?.write_fkey(pane, key)
+        match self.route_opt(&pane.source) {
+            Some(child) => child.write_fkey(pane, key),
+            None => Ok(()),
+        }
     }
 
     fn write_presentation_tokens(
@@ -79,8 +91,10 @@ impl AgentSource for SourceSet {
         pane: &AgentRef,
         binding: &str,
     ) -> Result<PresentationTokenWrite> {
-        self.route(&pane.source)?
-            .write_presentation_tokens(pane, binding)
+        match self.route_opt(&pane.source) {
+            Some(child) => child.write_presentation_tokens(pane, binding),
+            None => Ok(PresentationTokenWrite::PaneGone),
+        }
     }
 
     fn send_keys(&self, pane: &AgentRef, keys: &[&str]) -> Result<()> {
