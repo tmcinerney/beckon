@@ -1,0 +1,31 @@
+# Beckon v1 fragment proposal - NOT loaded by the current binary.
+# Copy into ~/.config/beckon/conf.d/ to enable Rex, delete to disable.
+#
+# A source is described entirely by commands. No Rex identity, session id or
+# command name is compiled into Beckon core. The list adapter emits:
+#   [{"scope","id","state","title","focused","kind"}]
+
+kind = "source"
+id = "rex"
+
+list = [
+  "/Users/tmcinerney/.config/beckon/rex-agents",
+]
+
+# `state` values are Beckon's canonical vocabulary: idle, working, blocked,
+# done, error. The adapter translates Rex's own states before emitting.
+refresh_ms = 1000
+
+activate = ["/usr/bin/open", "-a", "Rex Beta"]
+
+focus = [
+  "/Users/tmcinerney/Library/Application Support/com.superlogical.rex/RexServer/Versions/Current/Rex Server.app/Contents/MacOS/rex",
+  "window", "focus", "-s", "$BECKON_AGENT_ID",
+]
+
+# `beckon bind` inside a Rex terminal resolves its identity from these vars.
+# A clean base environment is exported to focus/activate: never inherit the
+# daemon's own REX_BLOCK, or `rex window focus -s` resolves to the wrong block.
+[identity]
+scope_env = "REX_SESSION"
+id_env = "REX_SESSION"

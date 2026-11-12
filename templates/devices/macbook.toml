@@ -1,0 +1,55 @@
+# Beckon v1 fragment proposal - NOT loaded by the current binary.
+# Copy into ~/.config/beckon/conf.d/ to enable MacBook function-key input.
+#
+# This is the whole point of the fragment convention: adding Mac keyboard
+# support is one file and a restart, not a core change. It declares input
+# only; there is no display port because the MacBook has no addressable LEDs.
+
+kind = "device"
+id = "macbook"
+
+[transport]
+input = "macos-function-keys"
+
+# F1-F10 are delivered when the Function/Globe modifier is held, or when
+# macOS is set to standard function keys. Each physical shortcut activates a
+# logical slot; several devices may map to the same slots.
+[[input.binding]]
+shortcut = "F1"
+slot = "s1"
+
+[[input.binding]]
+shortcut = "F2"
+slot = "s2"
+
+[[input.binding]]
+shortcut = "F3"
+slot = "s3"
+
+[[input.binding]]
+shortcut = "F4"
+slot = "s4"
+
+[[input.binding]]
+shortcut = "F5"
+slot = "s5"
+
+[[input.binding]]
+shortcut = "F6"
+slot = "s6"
+
+[[input.binding]]
+shortcut = "F7"
+slot = "s7"
+
+[[input.binding]]
+shortcut = "F8"
+slot = "s8"
+
+[[input.binding]]
+shortcut = "F9"
+slot = "s9"
+
+[[input.binding]]
+shortcut = "F10"
+slot = "s10"

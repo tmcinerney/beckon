@@ -1,0 +1,33 @@
+# Beckon v1 fragment proposal - NOT loaded by the current binary.
+#
+# Herdr becomes an ordinary source fragment in v1, exactly like Rex. This is a
+# sketch: the `list` adapter does not exist yet. It would emit the same generic
+# agent array as the Rex adapter, using Herdr's own pane ids and status words.
+# Focus/activate would move out of the current global `[focus] command` and the
+# Ghostty/OmniWM helper into this source, where they belong.
+#
+# Revisit alongside the dedicated Herdr app and HC (Herdr Core). The desktop
+# app may offer a native focus path that replaces the shell script entirely.
+
+kind = "source"
+id = "herdr"
+
+list = [
+  "/Users/tmcinerney/.config/beckon/herdr-agents",
+]
+
+refresh_ms = 1000
+
+activate = [
+  "/Users/tmcinerney/.config/beckon/focus-ghostty",
+]
+
+focus = [
+  "/nix/store/herdr/bin/herdr",
+  "agent", "focus",
+  "--pane", "$BECKON_AGENT_ID",
+]
+
+[identity]
+scope_env = "HERDR_SESSION"
+id_env = "HERDR_PANE_ID"

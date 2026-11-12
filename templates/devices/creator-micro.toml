@@ -1,0 +1,87 @@
+# Beckon v1 fragment proposal - NOT loaded by the current binary.
+# Copy into ~/.config/beckon/conf.d/ to enable, delete to disable.
+#
+# A device owns its own channel and slot declarations. Six channels below is a
+# layout choice, not a limit: add more channels to bind every physical key.
+
+kind = "device"
+id = "creator-micro"
+
+[transport]
+input = "creator-micro-oai-hid"   # v.oai.hid press/release notifications
+display = "creator-micro-usb"     # v.oai.rgbcfg + v.oai.thstatus
+
+# An output channel is any addressable target. `slot` is the logical Beckon
+# slot this channel serves; a channel without a slot is ambient/global.
+[[display.channel]]
+id = "key-1"
+slot = "s1"
+address = { ag = 6 }
+
+[[display.channel]]
+id = "key-2"
+slot = "s2"
+address = { ag = 7 }
+
+[[display.channel]]
+id = "key-3"
+slot = "s3"
+address = { ag = 8 }
+
+[[display.channel]]
+id = "key-4"
+slot = "s4"
+address = { ag = 9 }
+
+[[display.channel]]
+id = "key-5"
+slot = "s5"
+address = { ag = 10 }
+
+[[display.channel]]
+id = "key-6"
+slot = "s6"
+address = { ag = 11 }
+
+# AG06-AG11 deliberately avoids ChatGPT/Codex slots 0-5, which are
+# layer-agnostic and would otherwise blank our overrides.
+[[display.channel]]
+id = "ring"
+address = { zone = "ambient" }
+
+[[display.channel]]
+id = "underlay"
+address = { zone = "keys" }
+
+[display.presentation]
+# Colours and motion live in settings.toml (app-owned, mutable). These are
+# fallback values only when the corresponding setting is absent.
+ring_color = "#FF4975"
+ring_motion = "breathe"
+base_color = "#B366FF"
+
+# Physical AG key -> the logical slot it activates. AG keys emit v.oai.hid;
+# ordinary keys (Enter, mic) do not and need a different mechanism.
+[[input.binding]]
+key = "AG06"
+slot = "s1"
+
+[[input.binding]]
+key = "AG07"
+slot = "s2"
+
+[[input.binding]]
+key = "AG08"
+slot = "s3"
+
+[[input.binding]]
+key = "AG09"
+slot = "s4"
+
+[[input.binding]]
+key = "AG10"
+slot = "s5"
+
+[[input.binding]]
+key = "AG11"
+slot = "s6"

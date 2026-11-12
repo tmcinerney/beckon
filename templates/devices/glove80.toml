@@ -1,0 +1,104 @@
+# Beckon v1 fragment proposal - NOT loaded by the current binary.
+# Copy into ~/.config/beckon/conf.d/ to enable the Glove80.
+#
+# Kept as a reference template so the Glove80 path can be re-verified after
+# the v1 refactor without re-deriving its mappings.
+
+kind = "device"
+id = "glove80"
+
+[transport]
+input = "glove80-hid-hotkeys"
+display = "glove80-usb"
+
+# F16-F20 and Shift+F16-Shift+F20 from the Beckon layer.
+[[input.binding]]
+shortcut = "F16"
+slot = "s1"
+
+[[input.binding]]
+shortcut = "F17"
+slot = "s2"
+
+[[input.binding]]
+shortcut = "F18"
+slot = "s3"
+
+[[input.binding]]
+shortcut = "F19"
+slot = "s4"
+
+[[input.binding]]
+shortcut = "F20"
+slot = "s5"
+
+[[input.binding]]
+shortcut = "Shift+F16"
+slot = "s6"
+
+[[input.binding]]
+shortcut = "Shift+F17"
+slot = "s7"
+
+[[input.binding]]
+shortcut = "Shift+F18"
+slot = "s8"
+
+[[input.binding]]
+shortcut = "Shift+F19"
+slot = "s9"
+
+[[input.binding]]
+shortcut = "Shift+F20"
+slot = "s10"
+
+# Ten addressable LED slots, each serving the matching logical slot.
+[[display.channel]]
+id = "led-1"
+slot = "s1"
+address = { index = 0 }
+
+[[display.channel]]
+id = "led-2"
+slot = "s2"
+address = { index = 1 }
+
+[[display.channel]]
+id = "led-3"
+slot = "s3"
+address = { index = 2 }
+
+[[display.channel]]
+id = "led-4"
+slot = "s4"
+address = { index = 3 }
+
+[[display.channel]]
+id = "led-5"
+slot = "s5"
+address = { index = 4 }
+
+[[display.channel]]
+id = "led-6"
+slot = "s6"
+address = { index = 5 }
+
+[[display.channel]]
+id = "led-7"
+slot = "s7"
+address = { index = 6 }
+
+[[display.channel]]
+id = "led-8"
+slot = "s8"
+address = { index = 7 }
+
+[[display.channel]]
+id = "led-9"
+slot = "s9"
+address = { index = 8 }
+
+[[display.channel]]
+id = "led-10"
+slot = "s10"
+address = { index = 9 }

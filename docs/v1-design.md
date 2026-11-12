@@ -99,28 +99,88 @@ display agrees on urgency, but the channel it drives is declared in config.
 ## Configuration split
 
 ```
-~/.config/beckon/
-  config.toml     Nix-generated, READ-ONLY, structural only, fully explicit
-  settings.toml   app-owned, mutable, NOT in dotfiles (themes, colours, toggles)
-~/.local/state/beckon/
-  bindings.json   temporal runtime state, NEVER in dotfiles
-  surfaces.json   temporal
-  beckon.sock     ephemeral
-  key-events.log  ephemeral
+beckon repo (versioned):
+  templates/
+    devices/creator-micro.toml     # reference definitions, heavily commented
+    devices/glove80.toml
+    devices/macbook.toml
+    sources/rex.toml
+    sources/herdr.toml
+    themes/rex.toml
+
+machine (local, NOT in dotfiles):
+  ~/.config/beckon/
+    conf.d/
+      10-creator-micro.toml       # enabled fragments; symlink/copy of a template
+      20-rex.toml
+      30-macbook.toml
+    settings.toml                 # app-owned, mutable (themes, colours, toggles)
+  ~/.local/state/beckon/
+    bindings.json                 # temporal, NEVER in dotfiles
+    surfaces.json                 # temporal
+    beckon.sock                   # ephemeral
+    key-events.log                # ephemeral
 ```
 
-`config.toml` is generated from structured Nix options (per the dotfiles style
-rule), so absolute paths are interpolated rather than hand-written. It declares
-devices, ports, adapters, channels, slot-to-channel routes, sources and their
-commands, and identity env vars. Missing any required field is an error.
+There is **no single Nix-generated `config.toml`**. The enabled set of
+integrations is exactly the set of files in `conf.d/`. Adding support means
+dropping in a fragment and restarting; removing support means deleting it.
+Nothing about Glove80, Creator Micro, MacBook, Rex or Herdr is compiled into
+core as an object.
 
-`settings.toml` is merged over only the presentation fields. It is what the
+The repo templates are the durable, reviewable definitions. A deployed fragment
+is a machine-local, user-editable copy or symlink. Nix/dotfiles may install a
+chosen subset of templates into `conf.d/`; the rest are the user's to add. That
+keeps reproducibility (templates are versioned) without putting runtime
+config in git.
+
+`settings.toml` is merged over only the presentation fields and is what the
 Swift app writes. It is not drift-checked against dotfiles, because it is not
 policy. If theme reproducibility is wanted later, add a `mutableConfig` entry
 with `dotfilesSrc = null` (report drift, never export).
 
 `bindings.json` and friends are already in `~/.local/state/beckon/` and are
 already untracked; that part is correct today and should stay that way.
+
+## Fragment convention and dynamic construction
+
+Beckon scans `conf.d/*.toml` in **lexical filename order** and builds the
+device/source/channel topology from the validated result. There is no
+hardcoded list of devices, no fixed slot count, and no implicit objects.
+
+- Each file declares **exactly one object**, with a `kind` discriminator and a
+  stable `id`: `kind = "device" | "source" | "theme" | "route"`. One object per
+  file keeps a fragment self-contained and safely removable.
+- Each kind parses with `deny_unknown_fields`. A typo is a startup error naming
+  the file and field, not a silently ignored key.
+- Duplicate `(kind, id)` across files is a hard error. No cross-file merging;
+  an object is defined in one place or it is not defined at all.
+- After parsing all fragments, a **cross-reference validation pass** runs:
+  every adapter name is registered, every route references an existing slot and
+  an existing device channel, every theme reference resolves, and no two
+  devices claim the same input shortcut. Failure refuses to start with a
+  precise message. A partially valid directory never yields partial, invisible
+  behaviour.
+- Restart is the activation mechanism for v1 (no hot reload / directory watch).
+
+**Boundary to be explicit about:** adapters, i.e. transport implementations
+that speak USB HID, macOS global hotkeys, or a process plugin, are Rust code
+registered by name. Devices, sources, channels, slots and routes are data.
+Adding a *device instance* is config-only; adding a *new transport* still needs
+code. That is the intended seam for "keep as much as possible outside core".
+
+### Slot and channel ownership
+
+Each device fragment owns its own channel and slot declarations, so slot counts
+are never a core constant. `creator-micro.toml` declares six channels (one per
+AG key) plus `ring` and `underlay`; a different layout declares thirteen. The
+daemon creates that channel cluster dynamically from the validated file.
+
+Logical slots stay global, and each device declares how its channels map to
+them. That keeps the earlier "one binding lights both devices" behaviour
+without hardcoding either device's width. If device-local slot namespaces are
+wanted instead, that changes whether a binding can span devices and must be
+decided before the render model is built.
 
 ## What the clean break deletes
 
@@ -129,11 +189,17 @@ already untracked; that part is correct today and should stay that way.
 - `DEFAULT_SOURCE = "herdr"`, `default_herdr_cli`, `default_output_adapters`,
   `default_keys`, `default_theme_name`, `default_*_brightness`, and friends
 - serde aliases for legacy `session` / `pane_id` field names
-- the implicit Herdr source in `build_sources()`. Herdr becomes an explicit
-  `[[sources]]` entry with its own `list`, `focus`, `activate` and `identity`
+- the implicit Herdr source in `build_sources()`. Herdr becomes an ordinary
+  `conf.d/` source fragment with its own `list`, `focus`, `activate` and
+  `identity`
+- the single monolithic `config.toml`, replaced by validated `conf.d/`
+  fragments
 - the global Herdr-flavoured `[focus] command`; activation becomes per-source
 - `focus_key`'s `source == DEFAULT_SOURCE` special case, replaced by a
   source-declared activation step
+
+An empty `conf.d/` is a valid config that simply does nothing. It is not an
+error, and it does not silently enable anything.
 
 ## Consequences that need fixing alongside
 
@@ -173,7 +239,8 @@ requirement.
    OAI/ACT keycodes or an external state source.
 4. **Flexible slot counts.** Six is the current layout, not a limit. Other
    people may bind every key (13 on the Creator Micro 2). Channels and routes
-   are lists in config; nothing in core counts them.
+   are lists in the device fragment; nothing in core counts them. This is a v1
+   requirement now, not a deferred one.
 5. **Plain terminals / logs.** Possibly bindable as `Target` with
    `agent: None`, but v1 focuses on the agent side. Keep `Target` as the base
    so this is additive.
