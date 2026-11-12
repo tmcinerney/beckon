@@ -119,12 +119,23 @@ impl Pad {
     }
 
     fn call(&mut self, method: &str, params: Value) -> Result<Value> {
+        self.call_json(method, params)
+    }
+
+    /// Public RPC access for the filesystem transport in
+    /// [`crate::creator_micro_fs`]. Kept on `Pad` so one HID handle is shared.
+    pub fn call_json(&mut self, method: &str, params: Value) -> Result<Value> {
         let id = self.next_id;
         self.send(method, params)?;
         // AIDEV-NOTE: open() probes several vendor interfaces and most never
-        // answer RPC. A 5s deadline per candidate made attaching take ~10s.
-        // The RPC-capable interface answers in milliseconds.
-        let deadline = Instant::now() + Duration::from_millis(700);
+        // answer RPC, so the probe uses a short deadline. Filesystem writes
+        // move 3KB chunks and need more room; use a separate per-method budget.
+        let budget = if method.starts_with("fs.") {
+            Duration::from_secs(5)
+        } else {
+            Duration::from_millis(700)
+        };
+        let deadline = Instant::now() + budget;
         loop {
             if Instant::now() >= deadline {
                 bail!("timed out waiting for {method}");

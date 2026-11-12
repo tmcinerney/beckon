@@ -3,6 +3,7 @@ pub mod command_source;
 pub mod config;
 pub mod core;
 pub mod creator_micro;
+pub mod creator_micro_fs;
 pub mod display;
 pub mod display_protocol;
 pub mod focus;

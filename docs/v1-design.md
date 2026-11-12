@@ -266,8 +266,9 @@ Therefore:
   keycodes first.
 - Beckon declares **no projection** for the ChatGPT layer, which is a
   competing HID host.
-- The exact `layer_index` to keymap-array offset needs a one-time check;
-  `device.status` reported `5` with the Rex layer active.
+- `layer_index` is 1-based against the layer array. After the 2026-11-12
+  reorder the device reported `3` with Rex active, matching Rex's new position.
+  The active layer followed the reorder without any explicit set-layer call.
 
 ## Per-layer address spaces: derive, do not duplicate
 
@@ -300,7 +301,7 @@ display = "creator-micro-usb"
 address_source = "device"        # read /fs/keymap.json; never duplicate ids
 
 [[layers]]
-index = 5
+index = 3
 name = "rex"
 source = "rex"
 projection = [
@@ -310,7 +311,7 @@ projection = [
 ]
 
 [[layers]]
-index = 1
+index = 2
 name = "chatgpt"
 # No projection: owned by a competing HID host.
 ```
@@ -370,7 +371,7 @@ Several other claims in this document are **assumptions, not verified facts**:
 | `KV_OAI_AG06` -> `AG06` in `v.oai.hid` | observed for `AG` codes only |
 | `AG` and `ACT` share one thstatus id space | **unverified** |
 | ids 13-14 = dial, 15-18 = joystick | from a comment in `micro-manager/OAIProtocol.swift`; the real keymap uses `KV_OAI_ENC_CC/CW/CLK` and joystick `sectors` with their own codes. Possibly wrong |
-| `layer_index` -> keymap array offset | **verified**: `micro-manager/KeymapManager.swift` states `layer_index` from `device.status` is 1-based against the layer list. `5` = Rex |
+| `layer_index` -> keymap array offset | **verified**: `micro-manager/KeymapManager.swift` states `layer_index` from `device.status` is 1-based against the layer list. After the 2026-11-12 reorder the device reported `3` = Rex |
 | matrix shape `[2,4,4,3]` = 13 keys | consistent across all five layers in both copies, but a hardware fact |
 | ChatGPT writes ids 0-5 | verified in its host bundle, but that is a third-party app version |
 | `keys` zone lights all keycaps | vendor README: "lighting under the keycaps" |
@@ -438,7 +439,7 @@ when the user has that layer enabled and that host running:
 
 ```toml
 [[layers]]
-index = 1
+index = 2
 name = "chatgpt"
 # Only present if the official ChatGPT host is enabled and writing here.
 other_host = { name = "codex-micro", ids = [0, 1, 2, 3, 4, 5] }

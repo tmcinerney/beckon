@@ -171,6 +171,20 @@ enum CreatorMicroCommand {
     Off,
     /// Log every HID key notification, including non-AG macro keys.
     Listen,
+    /// Read a device file to stdout or a local path.
+    Get(CreatorMicroFileArgs),
+    /// Write a local file to the device filesystem in one transaction.
+    Put(CreatorMicroFileArgs),
+    /// Compare a local file against the device copy; exit non-zero on drift.
+    Verify(CreatorMicroFileArgs),
+}
+
+#[derive(Args)]
+struct CreatorMicroFileArgs {
+    /// Remote filename on the device filesystem.
+    remote: String,
+    /// Local file path (read for get, written for put, compared for verify).
+    local: std::path::PathBuf,
 }
 
 #[derive(Subcommand)]
@@ -472,6 +486,54 @@ fn creator_micro_command(command: CreatorMicroCommand) -> Result<()> {
     use beckon::creator_micro::{self, Pad};
     use beckon::render::{AgentState, KeyRender, Motion};
 
+    // Filesystem commands do not need the mutable config and must work even
+    // when only the device is attached.
+    match command {
+        CreatorMicroCommand::Get(args) => {
+            let mut pad = Pad::open()?;
+            let bytes = beckon::creator_micro_fs::get(&mut pad, &args.remote)?;
+            std::fs::write(&args.local, &bytes)
+                .with_context(|| format!("write {}", args.local.display()))?;
+            println!(
+                "read {} bytes from {} -> {}",
+                bytes.len(),
+                args.remote,
+                args.local.display()
+            );
+            return Ok(());
+        }
+        CreatorMicroCommand::Put(args) => {
+            let bytes = std::fs::read(&args.local)
+                .with_context(|| format!("read {}", args.local.display()))?;
+            let mut pad = Pad::open()?;
+            let changed = beckon::creator_micro_fs::ensure(&mut pad, &args.remote, &bytes)?;
+            println!(
+                "{} {} ({} bytes)",
+                if changed { "wrote" } else { "already in sync:" },
+                args.remote,
+                bytes.len()
+            );
+            return Ok(());
+        }
+        CreatorMicroCommand::Verify(args) => {
+            let bytes = std::fs::read(&args.local)
+                .with_context(|| format!("read {}", args.local.display()))?;
+            let mut pad = Pad::open()?;
+            let on_device = beckon::creator_micro_fs::get(&mut pad, &args.remote)?;
+            if on_device == bytes {
+                println!("in sync: {} ({} bytes)", args.remote, bytes.len());
+                return Ok(());
+            }
+            bail!(
+                "drift: {} is {} bytes on device but {} bytes locally",
+                args.remote,
+                on_device.len(),
+                bytes.len()
+            );
+        }
+        _ => {}
+    }
+
     let config = config::load()?;
     let pad_config = config.outputs.creator_micro.clone();
     let mut pad = Pad::open()?;
@@ -481,6 +543,11 @@ fn creator_micro_command(command: CreatorMicroCommand) -> Result<()> {
             creator_micro::clear(&mut pad, &pad_config)?;
             println!("creator-micro: all indicators and ring off");
             return Ok(());
+        }
+        CreatorMicroCommand::Get(_)
+        | CreatorMicroCommand::Put(_)
+        | CreatorMicroCommand::Verify(_) => {
+            unreachable!("filesystem commands return above")
         }
         CreatorMicroCommand::Listen => {
             println!("creator-micro listen: press any pad key, including the mic key.");
