@@ -370,7 +370,7 @@ Several other claims in this document are **assumptions, not verified facts**:
 | `KV_OAI_AG06` -> `AG06` in `v.oai.hid` | observed for `AG` codes only |
 | `AG` and `ACT` share one thstatus id space | **unverified** |
 | ids 13-14 = dial, 15-18 = joystick | from a comment in `micro-manager/OAIProtocol.swift`; the real keymap uses `KV_OAI_ENC_CC/CW/CLK` and joystick `sectors` with their own codes. Possibly wrong |
-| `layer_index` -> keymap array offset | `device.status` reported `5` with five layers (0-4); offset unverified |
+| `layer_index` -> keymap array offset | **verified**: `micro-manager/KeymapManager.swift` states `layer_index` from `device.status` is 1-based against the layer list. `5` = Rex |
 | matrix shape `[2,4,4,3]` = 13 keys | consistent across all five layers in both copies, but a hardware fact |
 | ChatGPT writes ids 0-5 | verified in its host bundle, but that is a third-party app version |
 | `keys` zone lights all keycaps | vendor README: "lighting under the keycaps" |
