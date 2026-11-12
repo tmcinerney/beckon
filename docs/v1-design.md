@@ -355,6 +355,97 @@ Confirmed: `linkedApps` / `linkedAppId` in Input's keymap perform app-to-layer
 switching. Beckon reads the resulting `layer_index` and does not detect apps,
 manage layers, or own the keymap. That remains a device/Input concern.
 
+## What is authoritative, and where the failure points are
+
+Deriving addresses from the device keymap removes duplication but **adds
+dependencies**. It assumes: the device is attached; a non-exclusive HID open
+succeeds; macOS Input Monitoring is granted; `fs.read` works; `/fs/keymap.json`
+exists; the JSON shape (`layout.keymap`, `encoders`, `joystick.sectors`) is
+stable; and the firmware version behaves the same. Any of these can fail.
+
+Several other claims in this document are **assumptions, not verified facts**:
+
+| Assumption | Status |
+|---|---|
+| `KV_OAI_AG06` -> `AG06` in `v.oai.hid` | observed for `AG` codes only |
+| `AG` and `ACT` share one thstatus id space | **unverified** |
+| ids 13-14 = dial, 15-18 = joystick | from a comment in `micro-manager/OAIProtocol.swift`; the real keymap uses `KV_OAI_ENC_CC/CW/CLK` and joystick `sectors` with their own codes. Possibly wrong |
+| `layer_index` -> keymap array offset | `device.status` reported `5` with five layers (0-4); offset unverified |
+| matrix shape `[2,4,4,3]` = 13 keys | consistent across all five layers in both copies, but a hardware fact |
+| ChatGPT writes ids 0-5 | verified in its host bundle, but that is a third-party app version |
+| `keys` zone lights all keycaps | vendor README: "lighting under the keycaps" |
+
+Concrete drift already observed: the **device** keymap has `KV_OAI_AG06`..`AG11`
+on the Rex layer, while Input's **saved copy** has `KA_A38`..`A43` macros.
+Two files that should agree do not.
+
+**Therefore derivation is advisory, never authoritative.**
+
+- Config declares control ids, capability types and roles. That is the source
+  of truth for semantics.
+- A successful keymap read **validates and fills in** addresses. Unknown
+  keycode families are skipped and reported, not fatal.
+- A failed, stale, or unparseable keymap never fails the daemon. The device's
+  display becomes `Unavailable` (matching the existing `PublishOutcome`), or
+  falls back to `address_source = "declared"` with explicit addresses.
+- `beckon devices validate` reports, per layer: derived address, declared
+  address, mismatches, and unverified keycode families. No guessing, no silent
+  substitution.
+- Input's saved copy is never read as authoritative; only the device is, and
+  only when opted in.
+
+### No Creator Micro, no problem
+
+Nothing in core knows about the Creator Micro. It exists only as a `conf.d/`
+fragment and the `creator-micro-usb` adapter, instantiated only when a fragment
+selects that adapter name. Delete `10-creator-micro.toml` and Beckon runs with
+`slots.toml`, `sources/*.toml`, `devices/glove80.toml` and `devices/macbook.toml`
+alone. `address_source`, OAI ids, AG/ACT families and zone names live in
+`adapters/creator_micro.rs`, not `core/`. The doc's Creator Micro emphasis is a
+documentation bias, not a code coupling.
+
+## Control roles: agent vs action is a declared convention
+
+`AG` vs `ACT` is a keycode-family hint, not a semantic rule. Roles are declared
+in config, **per control and per layer**, so they can differ between layers:
+
+| Role | Bindable to | Has agent state | Lights |
+|---|---|---|---|
+| `agent` | a `Target` with state | yes | yes |
+| `action` | a command / macro / integration action | no | yes |
+| `display` | nothing (ring, underlay) | no | yes |
+| `input-only` | nothing (dial, joystick) | no | **no** |
+| `reserved` | nothing; owned by another host | no | depends |
+
+All 13 physical keys have LEDs. The `keys` zone is the global backlight under
+all keycaps; `v.oai.thstatus` ids 0-12 are per-key overrides that only appear
+when that key carries an OAI keycode on the active layer. Keys without one show
+the global `keys` colour. The dial / rotary encoder and joystick have no LEDs
+and are `input-only`; the joystick also emits continuous `v.oai.rad`.
+
+A control declares `bindable = ["agent"]`, `["action"]`, or neither. A layer's
+projection may only assign a slot to a control whose role allows that binding
+kind; validation enforces it. The `AG`/`ACT` family may be used as a hint to
+populate roles, but config wins and no family name appears in core.
+
+### ChatGPT's coupling to ids 0-5
+
+ChatGPT's host is hardcoded to six slots with ids 0-5
+(`slots: Array.from({length:6})`) and contains **zero** references to layers.
+It derives the slot from the `agent` field of a `v.oai.hid` event, i.e. from the
+AG number in the keycode. So:
+
+- Moving the ChatGPT layer to a different layer position does **not** change
+  the ids. They come from the keycodes assigned on that layer, not from the
+  layer index or physical position.
+- Reassigning those keys to `AG06`..`AG11` would change the ids, but ChatGPT
+  still writes 0-5, so it would stop lighting them. That is a constraint of a
+  third-party app we cannot reconfigure.
+- While ChatGPT runs, ids 0-5 are effectively occupied. Declare that in config
+  as `reserved_ids = [0,1,2,3,4,5]` with a comment naming the reason. It is
+  explicit, removable, and never a core invariant. Six is arbitrary in both
+  integrations.
+
 ## Fragment convention and dynamic construction
 
 Beckon scans `conf.d/*.toml` in **lexical filename order** and builds the

@@ -16,34 +16,48 @@ address_source = "device"         # or "declared" for devices with no readable k
 # by reading layout.keymap, layout.encoders, layout.joystick.sectors and the
 # ambient/keys lighting zones. Positions are row-major over the [2,4,4,3]
 # matrix, but the OAI id for each is layer-specific and never hardcoded here.
+# Roles are declared per control, not derived from AG/ACT keycodes. They may
+# be overridden per layer. `bindable` says what kind of binding may attach.
 [[controls]]
 id = "key-1"
 kind = "key"
+role = "agent"
+bindable = ["agent"]
 position = 0
 
 [[controls]]
 id = "key-2"
 kind = "key"
+role = "agent"
+bindable = ["agent"]
 position = 1
 
 [[controls]]
 id = "key-3"
 kind = "key"
+role = "agent"
+bindable = ["agent"]
 position = 2
 
 [[controls]]
 id = "key-4"
 kind = "key"
+role = "agent"
+bindable = ["agent"]
 position = 3
 
 [[controls]]
 id = "key-5"
 kind = "key"
+role = "agent"
+bindable = ["agent"]
 position = 4
 
 [[controls]]
 id = "key-6"
 kind = "key"
+role = "agent"
+bindable = ["agent"]
 position = 5
 
 # A layer may declare more, fewer, or different controls. These are examples;
@@ -57,11 +71,15 @@ position = 5
 [[controls]]
 id = "ring"
 kind = "display"
+role = "display"
+bindable = []
 zone = "ambient"
 
 [[controls]]
 id = "underlay"
 kind = "display"
+role = "display"
+bindable = []
 zone = "keys"
 
 [display.presentation]
@@ -97,6 +115,11 @@ projection = [
 #   { control = "key-1", slot = "s7" },
 #   { control = "key-2", slot = "s8" },
 # ]
+
+# While ChatGPT runs it writes ids 0-5 regardless of layer. This is a
+# third-party host convention, not a firmware reservation. Declared here so
+# validation can flag a collision; remove it if ChatGPT is not running.
+reserved_ids = [0, 1, 2, 3, 4, 5]
 
 # No projection is declared for the ChatGPT layer. That layer is a competing
 # HID host; its AG00-AG05 / ACT06-ACT12 ids are its own convention, not a
