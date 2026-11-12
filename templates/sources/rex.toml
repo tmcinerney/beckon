@@ -20,12 +20,13 @@ activate = ["/usr/bin/open", "-a", "Rex Beta"]
 
 focus = [
   "/Users/tmcinerney/Library/Application Support/com.superlogical.rex/RexServer/Versions/Current/Rex Server.app/Contents/MacOS/rex",
-  "window", "focus", "-s", "$BECKON_AGENT_ID",
+  "focus", "-s", "$BECKON_AGENT_SCOPE", "$BECKON_AGENT_ID",
 ]
 
 # `beckon bind` inside a Rex terminal resolves its identity from these vars.
-# A clean base environment is exported to focus/activate: never inherit the
-# daemon's own REX_BLOCK, or `rex window focus -s` resolves to the wrong block.
+# id_env is REX_BLOCK: bindings are block-level, so a press lands on the exact
+# pane. The explicit block target also avoids `rex window focus` falling back
+# to the daemon's inherited REX_BLOCK.
 [identity]
 scope_env = "REX_SESSION"
-id_env = "REX_SESSION"
+id_env = "REX_BLOCK"

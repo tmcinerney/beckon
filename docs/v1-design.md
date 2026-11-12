@@ -554,10 +554,13 @@ error, and it does not silently enable anything.
   `rex window focus -s SESSION` with no window argument resolves to "the window
   containing REX_BLOCK", i.e. the wrong block. Focus argv and its environment
   must be explicitly declared, with a clean base environment.
-- **Session-level binding is ambiguous** when a session has 6-11 blocks. Exact
-  "take me to the agent" needs a block-level target; session-level keys should
-  show the worst state across the session's agents. Both should be expressible
-  as separate sources, chosen at bind time.
+- **Session-level binding was found too coarse** (a session has 6-11 blocks).
+  As of 2026-11-12 the Rex adapter emits one record **per block**: `scope` is
+  `REX_SESSION`, `id` is `REX_BLOCK`, and `focus` is
+  `rex focus -s "$BECKON_AGENT_SCOPE" "$BECKON_AGENT_ID"`. `beckon bind` inside
+  a Rex terminal therefore resolves the exact pane. A session-level aggregate
+  key remains expressible as a separate source if wanted later; the two are not
+  mutually exclusive.
 - **Agent vs terminal colouring** is a declared `kind` plus a declared neutral
   treatment, not a hardcoded branch in core.
 - **The launchd service uses the published `beckon` binary**, not a worktree

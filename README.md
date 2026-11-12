@@ -1,11 +1,79 @@
 # Beckon
 
-Beckon binds selected Herdr agent panes to logical navigation keys and sends
-their state to optional display integrations. Its current inputs support a
-Glove80 and a MacBook function row; its first display integration adds
-glanceable per-key state to a wired Glove80.
+Beckon binds a logical navigation key (`f1`–`f10`) to an agent identity
+`{source, scope, id}`, then renders agent state to optional display sinks.
+Agent sources are pluggable and declared in configuration; the two live ones
+are **Rex** (block-level) and **Herdr** (pane-level). Display sinks include a
+wired Glove80 and the Work Louder Creator Micro 2. Inputs include the Glove80
+Beckon layer and the MacBook function row.
 
 Licensed under the [MIT License](LICENSE).
+
+## Current integrations (Rex + Creator Micro 2)
+
+This is the actively used setup. It is newer than the Herdr/Glove80
+description in the rest of this README, which still documents the original
+foundation accurately but is no longer the whole picture.
+
+```toml
+[[sources]]
+id = "rex"
+list = ["/Users/you/.config/beckon/rex-agents"]
+refresh_ms = 1000
+activate = ["/usr/bin/open", "-a", "Rex Beta"]
+focus = ["/path/to/rex", "focus", "-s", "$BECKON_AGENT_SCOPE", "$BECKON_AGENT_ID"]
+
+[sources.identity]
+scope_env = "REX_SESSION"
+id_env = "REX_BLOCK"
+
+[outputs]
+adapters = ["glove80-usb", "creator-micro-usb"]
+```
+
+Key points:
+
+- **Rex bindings are block-level**, not session-level. The list adapter emits
+  one record per block; `scope` is `REX_SESSION` and `id` is `REX_BLOCK`.
+  `beckon bind` run inside a Rex terminal resolves both automatically, so a
+  press lands on the exact pane via `rex focus -s <session> <block>`.
+- Herdr is optional. When no `[sources]` entry exists it remains the built-in
+  source; with one present, a stopped Herdr server is non-fatal.
+- `beckon focus --key f4` focuses a bound agent as a pad press would. The
+  daemon runs the source's `activate` and `focus` commands; the global
+  Herdr-flavoured `[focus] command` is skipped for non-Herdr sources.
+- `beckon status` reports `source`, `session` (scope) and `pane` per binding.
+
+### Creator Micro 2 device commands
+
+```sh
+beckon creator-micro demo                              # paint all states
+beckon creator-micro listen                             # log v.oai.hid events
+beckon creator-micro off                                # clear indicators
+beckon creator-micro get keymap.json ./keymap.json       # read device file
+beckon creator-micro put keymap.json ./keymap.json       # write only on drift
+beckon creator-micro verify keymap.json ./keymap.json    # report drift
+```
+
+`put` uses `fs.txbegin` / `fs.writebin` / `fs.txcommit` in one transaction and
+verifies the readback is byte-identical. The keymap can drift between the
+device, Input's saved copy and a versioned canonical file; keep all three in
+sync (the dotfiles repo has a `sync-keymap.sh verify|sync` helper).
+
+App-to-layer switching is **Input's** `linkedApps` / `linkedAppId` feature;
+Beckon does not detect apps or manage layers. Per-key AG overrides only appear
+on the active layer.
+
+### Known limits
+
+- Pad key presses (`v.oai.hid`) are observed by `creator-micro listen` but are
+  not yet routed into the daemon's focus path. `beckon focus --key` is the
+  working substitute.
+- `conf.d` fragments, the slot registry and per-layer projections in
+  [docs/v1-design.md](docs/v1-design.md) are a **design record**, not loaded by
+  the running binary. `templates/` holds example fragments.
+- The launchd `beckond` agent may point at a published binary that cannot parse
+  the current config; a manually started daemon may be what is actually running.
 
 ## Current state
 
