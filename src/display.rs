@@ -14,6 +14,28 @@ use crate::{
 
 use process::ProcessDisplay;
 
+/// Adapter registry boundary. Generic settings carry named channels but never
+/// interpret a device's zones or rewrite its transport options themselves.
+pub fn mutable_channels(device: &crate::device::DeviceConfig) -> &'static [&'static str] {
+    match device.definition.adapter.as_str() {
+        "creator-micro" => crate::creator_micro::mutable_channels(),
+        _ => &[],
+    }
+}
+
+pub fn apply_channels(
+    device: &mut crate::device::DeviceConfig,
+    channels: &BTreeMap<String, Treatment>,
+) -> Result<()> {
+    match device.definition.adapter.as_str() {
+        "creator-micro" => crate::creator_micro::apply_channels(device, channels),
+        _ => anyhow::bail!(
+            "device {:?} exposes no mutable appearance channels",
+            device.id
+        ),
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum DeviceEvent {
     Key { address: Address, pressed: bool },
@@ -33,6 +55,9 @@ pub enum PublishOutcome {
 
 /// One independently managed consumer of Beckon's hardware-neutral state.
 pub trait DisplaySink {
+    fn refresh_presentation(&mut self, _device: &crate::device::DeviceConfig) -> Result<()> {
+        Ok(())
+    }
     fn id(&self) -> &str;
     fn publish(&mut self, plan: &RenderPlan) -> Result<PublishOutcome>;
     /// Physical key events observed by a sink that owns a device. Write-only
@@ -143,6 +168,14 @@ pub struct DisplaySet {
 }
 
 impl DisplaySet {
+    pub fn refresh_presentation(&mut self, devices: &[crate::device::DeviceConfig]) -> Result<()> {
+        for managed in &mut self.sinks {
+            if let Some(device) = devices.iter().find(|device| device.id == managed.sink.id()) {
+                managed.sink.refresh_presentation(device)?;
+            }
+        }
+        Ok(())
+    }
     pub fn from_config(config: &Config) -> Result<Self> {
         config.validate()?;
         let mut sinks = Vec::new();

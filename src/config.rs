@@ -13,7 +13,29 @@ use std::{
 
 const CONFIG_VERSION: u32 = 3;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize)]
+pub struct ConfigurationModel {
+    pub config_version: u32,
+    pub revision: String,
+    pub bindings: Vec<String>,
+    pub devices: Vec<DeviceConfig>,
+    pub sources: Vec<String>,
+    pub display: DisplayModel,
+    pub capabilities: ConfigurationCapabilities,
+}
+#[derive(Debug, Serialize)]
+pub struct DisplayModel {
+    pub theme: String,
+    pub themes: std::collections::BTreeMap<String, crate::render::StateTreatments>,
+}
+#[derive(Debug, Serialize)]
+pub struct ConfigurationCapabilities {
+    pub presentation_changes: Vec<&'static str>,
+    pub binding_release_guard: bool,
+    pub device_channels: std::collections::BTreeMap<String, Vec<&'static str>>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
     config_version: u32,
@@ -69,7 +91,7 @@ impl AgentSourceConfig {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TerminalConfig {
     pub backend: TerminalBackendKind,
@@ -140,25 +162,25 @@ pub struct ProcessOutputPlugin {
     pub id: String,
     pub command: Vec<String>,
 }
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OutputConfig {
     pub plugins: Vec<ProcessOutputPlugin>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ActionsConfig {
     pub confirm: ConfirmConfig,
 }
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConfirmConfig {
     pub enabled: bool,
     pub repeat_press_ms: u64,
     pub keys: Vec<String>,
 }
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FocusConfig {
     pub command: Option<Vec<String>>,
@@ -248,18 +270,7 @@ pub fn load_at(path: &Path) -> Result<Config> {
         .collect();
     // Mutable presentation only. It cannot inject actions, bindings or devices.
     let settings = directory.join("settings.toml");
-    if settings.exists() {
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct Settings {
-            display: crate::render::PresentationSettings,
-        }
-        let settings: Settings = toml::from_str(&fs::read_to_string(&settings)?)?;
-        if let Some(theme) = settings.display.theme {
-            config.display.theme = theme;
-        }
-        config.display.themes.extend(settings.display.themes);
-    }
+    crate::settings::Settings::read(&settings)?.apply(&mut config)?;
     config
         .validate()
         .with_context(|| format!("validate {}", path.display()))?;
@@ -295,44 +306,83 @@ impl Config {
             name,
             self.display.themes.keys().map(String::as_str),
         )?;
-        let path = self
+        let mut settings = crate::settings::Settings::read(&self.settings_path()?)?;
+        settings.display.theme = Some(name.into());
+        self.commit_settings(settings)
+    }
+
+    fn settings_path(&self) -> Result<PathBuf> {
+        Ok(self
             .root
             .parent()
             .context("configuration directory")?
-            .join("settings.toml");
-        let mut settings: toml::Value = if path.exists() {
-            toml::from_str(&fs::read_to_string(&path)?)?
-        } else {
-            toml::Value::Table(toml::Table::new())
-        };
-        let table = settings
-            .as_table_mut()
-            .context("settings must be a table")?;
-        let display = table
-            .entry("display")
-            .or_insert_with(|| toml::Value::Table(toml::Table::new()))
-            .as_table_mut()
-            .context("settings.display must be a table")?;
-        display.insert("theme".into(), toml::Value::String(name.into()));
-        let temporary = path.with_extension(format!("{}.tmp", std::process::id()));
-        use std::{io::Write, os::unix::fs::OpenOptionsExt};
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&temporary)?;
-        let result = (|| -> Result<()> {
-            file.write_all(toml::to_string(&settings)?.as_bytes())?;
-            file.sync_all()?;
-            fs::rename(&temporary, &path)?;
-            Ok(())
-        })();
-        if result.is_err() {
-            let _ = fs::remove_file(&temporary);
-        }
-        result?;
-        self.display.theme = name.into();
+            .join("settings.toml"))
+    }
+
+    fn commit_settings(&mut self, settings: crate::settings::Settings) -> Result<()> {
+        let mut proposed = self.clone();
+        settings.apply(&mut proposed)?;
+        proposed.validate()?;
+        settings.write(&self.settings_path()?)?;
+        *self = proposed;
         Ok(())
+    }
+
+    pub fn set_presentation(
+        &mut self,
+        expected_revision: &str,
+        change: crate::settings::PresentationChange,
+    ) -> Result<ConfigurationModel> {
+        if self.model()?.revision != expected_revision {
+            bail!("configuration revision changed; refresh before saving");
+        }
+        let mut settings = crate::settings::Settings::read(&self.settings_path()?)?;
+        settings.change(self, change)?;
+        self.commit_settings(settings)?;
+        self.model()
+    }
+
+    pub fn model(&self) -> Result<ConfigurationModel> {
+        let mut sources = self
+            .sources
+            .iter()
+            .map(|source| source.id.clone())
+            .collect::<Vec<_>>();
+        if self.herdr.enabled {
+            sources.insert(0, "herdr".into());
+        }
+        let mut model = ConfigurationModel {
+            config_version: CONFIG_VERSION,
+            revision: String::new(),
+            bindings: self.bindings.clone(),
+            devices: self.devices.clone(),
+            sources,
+            display: DisplayModel {
+                theme: self.display.theme.clone(),
+                themes: self.display.themes.clone(),
+            },
+            capabilities: ConfigurationCapabilities {
+                presentation_changes: vec!["theme_state", "device_effect", "device_channel"],
+                binding_release_guard: true,
+                device_channels: self
+                    .devices
+                    .iter()
+                    .map(|device| {
+                        (
+                            device.id.clone(),
+                            crate::display::mutable_channels(device).to_vec(),
+                        )
+                    })
+                    .collect(),
+            },
+        };
+        // An opaque content revision, not an authentication token. Clients must
+        // return it unchanged; equivalent effective models have equal revisions.
+        use std::hash::{DefaultHasher, Hash, Hasher};
+        let mut hasher = DefaultHasher::new();
+        serde_json::to_vec(&model)?.hash(&mut hasher);
+        model.revision = format!("{:016x}", hasher.finish());
+        Ok(model)
     }
 
     pub fn validate(&self) -> Result<()> {

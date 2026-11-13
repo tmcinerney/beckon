@@ -62,6 +62,20 @@ pub struct Switches<E: Emitter> {
 }
 
 impl<E: Emitter> Switches<E> {
+    pub fn refresh_presentation(&mut self, devices: &[DeviceConfig]) {
+        for control in &mut self.controls {
+            if let Some(device) = devices.iter().find(|device| device.id == control.device)
+                && let Some(key) = device.definition.keys.get(&control.name)
+            {
+                control.effects = key
+                    .effects
+                    .as_ref()
+                    .and_then(|name| device.definition.effects.get(name))
+                    .cloned()
+                    .unwrap_or_default();
+            }
+        }
+    }
     pub fn new(devices: &[DeviceConfig], emitter: E) -> Result<Self> {
         let mut controls = Vec::new();
         for device in devices {
@@ -380,5 +394,48 @@ mod tests {
         switches.reset_device("pad").unwrap();
         assert!(!switches.output_down());
         assert_eq!(*calls.borrow(), [true, false, false]);
+    }
+
+    #[test]
+    fn editing_feedback_preserves_the_held_chord_and_group_state() {
+        let (mut switches, calls) = setup("tap-hold");
+        let now = Instant::now();
+        switches.event(&address(16), true, now).unwrap();
+        let treatment = Treatment {
+            color: "#123456".parse().unwrap(),
+            brightness: 0.5,
+            motion: crate::render::Motion::Steady,
+        };
+        let key = crate::device::Key {
+            members: switches.controls[0].members.clone(),
+            binding: None,
+            action: None,
+            effects: Some("record".into()),
+        };
+        let device = DeviceConfig {
+            id: "pad".into(),
+            path: "pad.toml".into(),
+            definition: crate::device::DeviceFile {
+                adapter: "test".into(),
+                options: Default::default(),
+                keys: BTreeMap::from([("key11".into(), key)]),
+                actions: Default::default(),
+                effects: BTreeMap::from([(
+                    "record".into(),
+                    crate::device::Effects {
+                        held: Some(treatment),
+                        ..Default::default()
+                    },
+                )]),
+            },
+        };
+        switches.refresh_presentation(&[device]);
+        assert!(switches.output_down() && switches.held_for(&address(16)));
+        assert_eq!(switches.treatments()[&address(17)], treatment);
+        assert_eq!(*calls.borrow(), [true]);
+        switches
+            .event(&address(16), false, now + Duration::from_secs(1))
+            .unwrap();
+        assert_eq!(*calls.borrow(), [true, false]);
     }
 }

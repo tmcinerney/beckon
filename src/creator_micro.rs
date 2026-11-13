@@ -261,7 +261,7 @@ fn take_json(acc: &mut String) -> Option<Value> {
     None
 }
 
-#[derive(Clone, Debug, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Layer {
     pub profile: u16,
@@ -269,7 +269,7 @@ pub struct Layer {
     pub source: Option<String>,
 }
 
-#[derive(Clone, Debug, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Options {
     pub refresh_ms: u64,
@@ -284,6 +284,33 @@ pub fn options(device: &DeviceConfig) -> Result<Options> {
     toml::Value::Table(device.definition.options.clone())
         .try_into()
         .with_context(|| format!("{}: options", device.path.display()))
+}
+
+pub const fn mutable_channels() -> &'static [&'static str] {
+    &["base", "ring"]
+}
+
+pub fn apply_channels(
+    device: &mut DeviceConfig,
+    channels: &BTreeMap<String, Treatment>,
+) -> Result<()> {
+    let mut options = options(device)?;
+    for (name, treatment) in channels {
+        treatment.validate()?;
+        match name.as_str() {
+            "base" => options.base = *treatment,
+            "ring" => options.ring = *treatment,
+            _ => bail!(
+                "unknown appearance channel {name:?} on {:?}; available: base, ring",
+                device.id
+            ),
+        }
+    }
+    device.definition.options = toml::Value::try_from(options)?
+        .as_table()
+        .context("appearance options must be a table")?
+        .clone();
+    Ok(())
 }
 
 /// Addresses use a declared layer name plus the firmware id, e.g. rex/6.
@@ -618,6 +645,13 @@ impl CreatorMicroDisplay {
 }
 
 impl DisplaySink for CreatorMicroDisplay {
+    fn refresh_presentation(&mut self, device: &DeviceConfig) -> Result<()> {
+        let options = options(device)?;
+        self.options = options;
+        self.device = device.clone();
+        self.last_write = None;
+        Ok(())
+    }
     fn id(&self) -> &str {
         &self.device.id
     }
@@ -886,5 +920,24 @@ mod tests {
                 .to_string()
                 .contains("AG17")
         );
+    }
+
+    #[test]
+    fn appearance_updates_preserve_ids_needed_to_clear_a_departing_layer() {
+        let mut display = configured();
+        display.layer(1, 6);
+        let plan = crate::render::render(&crate::render::DisplayConfig::default(), &[]).unwrap();
+        display.last_frame = display.lighting(&plan, &BTreeMap::new()).unwrap();
+        let mut device = display.device.clone();
+        let treatment = Treatment {
+            color: "#123456".parse().unwrap(),
+            brightness: 0.5,
+            motion: Motion::Steady,
+        };
+        apply_channels(&mut device, &BTreeMap::from([("base".into(), treatment)])).unwrap();
+        display.refresh_presentation(&device).unwrap();
+        display.layer(1, 2);
+        assert!(!display.clear_pending.is_empty());
+        assert!(display.clear_pending.iter().all(|id| *id >= 6));
     }
 }

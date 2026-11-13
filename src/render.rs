@@ -136,7 +136,7 @@ pub struct DisplayConfig {
     pub keys: Vec<KeyDisplay>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PresentationSettings {
     pub theme: Option<String>,

@@ -16,6 +16,7 @@ pub mod input;
 pub mod pane_cache;
 pub mod render;
 pub mod session;
+pub mod settings;
 pub mod source_set;
 pub mod state;
 pub mod switches;

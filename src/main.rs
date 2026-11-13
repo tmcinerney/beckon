@@ -304,9 +304,17 @@ struct HidMalformedArgs {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
-#[serde(tag = "op", rename_all = "snake_case")]
+#[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 enum Request {
-    ConfigModel,
+    ConfigModel {},
+    SetPresentation {
+        expected_revision: String,
+        change: beckon::settings::PresentationChange,
+    },
+    ReleaseBinding {
+        key: String,
+        reference: BindingTarget,
+    },
     SetTheme {
         name: String,
     },
@@ -332,12 +340,20 @@ enum Request {
     ReleaseKey {
         key: String,
     },
-    ReleaseAll,
-    Status,
-    Refresh,
+    ReleaseAll {},
+    Status {},
+    Refresh {},
     FocusKey {
         key: String,
     },
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct BindingTarget {
+    source: String,
+    session: String,
+    pane_id: String,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -354,7 +370,7 @@ fn main() -> Result<()> {
         CommandLine::Reset { device } => client(Request::ResetControls { device }),
         CommandLine::Config {
             command: ConfigCommand::Show,
-        } => client(Request::ConfigModel),
+        } => client(Request::ConfigModel {}),
         CommandLine::Config {
             command: ConfigCommand::Theme { name },
         } => client(Request::SetTheme { name }),
@@ -376,7 +392,7 @@ fn main() -> Result<()> {
                 source,
             })
         }
-        CommandLine::Release(args) if args.all => client(Request::ReleaseAll),
+        CommandLine::Release(args) if args.all => client(Request::ReleaseAll {}),
         CommandLine::Release(args) => match args.key {
             Some(key) => {
                 if args.pane.pane.is_some() {
@@ -394,13 +410,13 @@ fn main() -> Result<()> {
                 })
             }
         },
-        CommandLine::Status => client(Request::Status),
+        CommandLine::Status => client(Request::Status {}),
         CommandLine::Keys => {
             let config = config::load()?;
             println!("{}", serde_json::to_string_pretty(&config.devices)?);
             Ok(())
         }
-        CommandLine::Refresh => client(Request::Refresh),
+        CommandLine::Refresh => client(Request::Refresh {}),
         CommandLine::Terminals(args) => terminals_command(args),
         CommandLine::Adopt(args) => adopt_command(args),
         CommandLine::Forget(args) => forget_command(args),
@@ -948,7 +964,9 @@ fn daemon() -> Result<()> {
         *control_flow =
             ControlFlow::WaitUntil(std::time::Instant::now() + Duration::from_millis(50));
         while let Ok((stream, _)) = listener.accept() {
-            if let Err(error) = handle_connection(stream, &sources, &mut config, &mut switches) {
+            if let Err(error) =
+                handle_connection(stream, &sources, &mut config, &mut switches, &mut displays)
+            {
                 eprintln!("request failed: {error:#}");
             }
         }
@@ -1119,6 +1137,7 @@ fn handle_connection<D: AgentSource>(
     panes: &D,
     config: &mut config::Config,
     switches: &mut Switches<SystemEmitter>,
+    displays: &mut DisplaySet,
 ) -> Result<()> {
     configure_client_stream(&stream)?;
     let mut line = String::new();
@@ -1134,11 +1153,25 @@ fn handle_connection<D: AgentSource>(
                     Err(anyhow::anyhow!("unknown device {device:?}"))
                 }
             }
-            request => dispatch_config(request, panes, config),
+            request => {
+                let presentation_changed = matches!(
+                    request,
+                    Request::SetPresentation { .. } | Request::SetTheme { .. }
+                );
+                dispatch_config(request, panes, config).and_then(|data| {
+                    if presentation_changed {
+                        switches.refresh_presentation(&config.devices);
+                        displays.refresh_presentation(&config.devices).context(
+                            "settings saved, but display refresh failed; refresh the model before retrying",
+                        )?;
+                    }
+                    Ok(data)
+                })
+            }
         } {
             Ok(data) => Response::Ok { data },
             Err(error) => Response::Error {
-                message: error.to_string(),
+                message: format!("{error:#}"),
             },
         },
         Err(error) => Response::Error {
@@ -1195,9 +1228,20 @@ fn dispatch_config<D: AgentSource>(
     let store = JsonBindingStore::from_environment();
     let bindings = BindingService::new(&store, panes).with_keys(&config.bindings);
     match request {
-        Request::ConfigModel => Ok(
-            json!({"config_version":3,"bindings":config.bindings,"devices":config.devices,"display":{"theme":config.display.theme,"themes":config.display.themes}}),
-        ),
+        Request::ConfigModel {} => Ok(serde_json::to_value(config.model()?)?),
+        Request::SetPresentation {
+            expected_revision,
+            change,
+        } => Ok(serde_json::to_value(
+            config.set_presentation(&expected_revision, change)?,
+        )?),
+        Request::ReleaseBinding { key, reference } => {
+            panes.refresh();
+            let reference =
+                AgentRef::for_source(reference.source, reference.session, reference.pane_id);
+            let released = bindings.release_binding(&key, &reference)?;
+            Ok(json!({"key":key,"changed":released.is_some()}))
+        }
         Request::SetTheme { name } => {
             config.set_theme(&name)?;
             Ok(json!({"theme":name}))
@@ -1237,11 +1281,11 @@ fn dispatch_config<D: AgentSource>(
                 "changed": released.is_some(),
             }))
         }
-        Request::ReleaseAll => {
+        Request::ReleaseAll {} => {
             let released = bindings.release_all()?;
             Ok(json!({"released": released.len(), "bindings": released}))
         }
-        Request::Refresh => {
+        Request::Refresh {} => {
             // Clearing the caches makes the daemon's render tick (which runs
             // again in this same event-loop iteration) re-list every source and
             // republish the display from current state instead of a stale
@@ -1259,7 +1303,7 @@ fn dispatch_config<D: AgentSource>(
                 "id": pane.pane_id,
             }))
         }
-        Request::Status => Ok(json!({
+        Request::Status {} => Ok(json!({
             "bindings": bindings.status()?.into_iter().map(|(binding, pane)| json!({
                 "key": binding.key,
                 "source": binding.source,
@@ -1879,6 +1923,63 @@ mod tests {
     }
 
     #[test]
+    fn configuration_socket_round_trip_validates_and_fences_colour_updates() {
+        struct Temporary(PathBuf);
+        impl Drop for Temporary {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+        let directory = Temporary(env::temp_dir().join(format!(
+                "beckon-ui-rpc-{}-{}",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            )));
+        fs::create_dir(&directory.0).unwrap();
+        let path = directory.0.join("config.toml");
+        fs::write(&path, include_str!("../templates/config.toml")).unwrap();
+        let mut config = config::load_at(&path).unwrap();
+        let exchange = |request: Value, config: &mut config::Config| -> Value {
+            let (server, mut client) = UnixStream::pair().unwrap();
+            writeln!(client, "{request}").unwrap();
+            let mut switches = Switches::new(&[], SystemEmitter::default()).unwrap();
+            handle_connection(
+                server,
+                &RecordingDirectory::default(),
+                config,
+                &mut switches,
+                &mut DisplaySet::default(),
+            )
+            .unwrap();
+            let mut reply = String::new();
+            BufReader::new(client).read_line(&mut reply).unwrap();
+            serde_json::from_str(&reply).unwrap()
+        };
+        let model = exchange(json!({"op":"config_model"}), &mut config);
+        let revision = model["data"]["revision"].clone();
+        assert_eq!(model["data"]["capabilities"]["binding_release_guard"], true);
+        let request = json!({"op":"set_presentation","expected_revision":revision,"change":{"kind":"theme_state","theme":"status","state":"working","treatment":{"color":"#123456","brightness":0.6,"motion":"breathe"}}});
+        let success = exchange(request.clone(), &mut config);
+        assert_eq!(success["type"], "ok");
+        assert_eq!(
+            success["data"]["display"]["themes"]["status"]["working"]["color"],
+            "#123456"
+        );
+        assert_eq!(exchange(request, &mut config)["type"], "error");
+        let invalid = exchange(json!({"op":"config_model","typo":true}), &mut config);
+        assert_eq!(invalid["type"], "error");
+        assert!(
+            serde_json::from_value::<Request>(
+                json!({"op":"release_binding","key":"key1","reference":{"pane_id":"p1"}})
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn writes_status_responses_larger_than_the_nonblocking_socket_buffer() {
         let (mut server, client) = UnixStream::pair().unwrap();
         server.set_nonblocking(true).unwrap();
@@ -1945,7 +2046,7 @@ mod tests {
             panes: vec![pane("default", "p1", false)],
             ..Default::default()
         };
-        let data = dispatch(Request::Refresh, &directory).unwrap();
+        let data = dispatch(Request::Refresh {}, &directory).unwrap();
         assert_eq!(directory.refreshes.get(), 1);
         assert_eq!(data, json!({ "refreshed": true }));
     }

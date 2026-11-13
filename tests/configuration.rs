@@ -112,3 +112,174 @@ fn synthesized_outputs_must_not_feed_back_into_registered_inputs() {
     fixture.device("macbook","adapter='hotkeys'\n[keys.a]\nmembers=['macbook:Alt+Control+D']\naction='same'\n[actions.same]\nkind='chord'\nkeys=['ctrl','opt','d']\nmode='hold'");
     assert!(format!("{:#}", fixture.load().unwrap_err()).contains("feedback loop"));
 }
+
+#[test]
+fn colour_mutations_are_revision_fenced_and_survive_reload_without_editing_structure() {
+    use beckon::{
+        render::{AgentState, Motion, StateTreatment},
+        settings::PresentationChange,
+    };
+    let fixture = Fixture::new();
+    let mut config = fixture.load().unwrap();
+    let original = fs::read(fixture.0.join("config.toml")).unwrap();
+    let old = config.model().unwrap().revision;
+    let change = PresentationChange::ThemeState {
+        theme: "status".into(),
+        state: AgentState::Working,
+        treatment: StateTreatment {
+            color: "#123456".parse().unwrap(),
+            brightness: 0.7,
+            motion: Motion::Breathe,
+        },
+    };
+    let updated = config.set_presentation(&old, change.clone()).unwrap();
+    assert_ne!(updated.revision, old);
+    let stored = fs::read(fixture.0.join("settings.toml")).unwrap();
+    assert!(config.set_presentation(&old, change).is_err());
+    assert_eq!(fs::read(fixture.0.join("settings.toml")).unwrap(), stored);
+    let reloaded = fixture.load().unwrap();
+    assert_eq!(
+        reloaded.display.themes["status"].working.color.to_string(),
+        "#123456"
+    );
+    assert_eq!(reloaded.model().unwrap().revision, updated.revision);
+    assert_eq!(fs::read(fixture.0.join("config.toml")).unwrap(), original);
+}
+
+#[test]
+fn device_feedback_and_channel_colours_are_typed_presentation_only() {
+    use beckon::{
+        device::{Effects, Treatment},
+        render::Motion,
+        settings::PresentationChange,
+    };
+    let fixture = Fixture::new();
+    fixture.device(
+        "creator-micro",
+        include_str!("../templates/creator-micro.toml"),
+    );
+    let original = fs::read(fixture.0.join("config.d/creator-micro.toml")).unwrap();
+    let mut config = fixture.load().unwrap();
+    let treatment = Treatment {
+        color: "#123456".parse().unwrap(),
+        brightness: 0.8,
+        motion: Motion::Breathe,
+    };
+    let revision = config.model().unwrap().revision;
+    config
+        .set_presentation(
+            &revision,
+            PresentationChange::DeviceEffect {
+                device: "creator-micro".into(),
+                effect: "dictation".into(),
+                effects: Effects {
+                    idle: None,
+                    held: Some(treatment),
+                    latched: Some(treatment),
+                },
+            },
+        )
+        .unwrap();
+    let revision = config.model().unwrap().revision;
+    config
+        .set_presentation(
+            &revision,
+            PresentationChange::DeviceChannel {
+                device: "creator-micro".into(),
+                channel: "base".into(),
+                treatment,
+            },
+        )
+        .unwrap();
+    let reloaded = fixture.load().unwrap();
+    assert_eq!(
+        reloaded.devices[0].definition.effects["dictation"].held,
+        Some(treatment)
+    );
+    assert_eq!(
+        beckon::creator_micro::options(&reloaded.devices[0])
+            .unwrap()
+            .base,
+        treatment
+    );
+    assert_eq!(
+        fs::read(fixture.0.join("config.d/creator-micro.toml")).unwrap(),
+        original
+    );
+    let revision = config.model().unwrap().revision;
+    assert!(
+        config
+            .set_presentation(
+                &revision,
+                PresentationChange::DeviceChannel {
+                    device: "creator-micro".into(),
+                    channel: "layers".into(),
+                    treatment
+                }
+            )
+            .is_err()
+    );
+    assert!(
+        config
+            .set_presentation(
+                &revision,
+                PresentationChange::DeviceChannel {
+                    device: "missing".into(),
+                    channel: "base".into(),
+                    treatment
+                }
+            )
+            .is_err()
+    );
+}
+
+#[test]
+fn invalid_colour_treatments_cannot_change_disk_or_memory() {
+    use beckon::{
+        render::{AgentState, Motion, StateTreatment},
+        settings::PresentationChange,
+    };
+    let fixture = Fixture::new();
+    let mut config = fixture.load().unwrap();
+    let revision = config.model().unwrap().revision;
+    let change = PresentationChange::ThemeState {
+        theme: "status".into(),
+        state: AgentState::Done,
+        treatment: StateTreatment {
+            color: "#FFFFFF".parse().unwrap(),
+            brightness: 2.0,
+            motion: Motion::Steady,
+        },
+    };
+    assert!(config.set_presentation(&revision, change).is_err());
+    assert_eq!(config.model().unwrap().revision, revision);
+    assert!(!fixture.0.join("settings.toml").exists());
+}
+
+#[test]
+fn a_failed_settings_write_does_not_change_the_effective_model() {
+    use beckon::{
+        render::{AgentState, Motion, StateTreatment},
+        settings::PresentationChange,
+    };
+    let fixture = Fixture::new();
+    let mut config = fixture.load().unwrap();
+    let revision = config.model().unwrap().revision;
+    let temporary = fixture
+        .0
+        .join(format!("settings.{}.tmp", std::process::id()));
+    fs::write(&temporary, "existing writer").unwrap();
+    let change = PresentationChange::ThemeState {
+        theme: "status".into(),
+        state: AgentState::Done,
+        treatment: StateTreatment {
+            color: "#123456".parse().unwrap(),
+            brightness: 0.5,
+            motion: Motion::Breathe,
+        },
+    };
+    assert!(config.set_presentation(&revision, change).is_err());
+    assert_eq!(config.model().unwrap().revision, revision);
+    assert!(!fixture.0.join("settings.toml").exists());
+    assert_eq!(fs::read_to_string(temporary).unwrap(), "existing writer");
+}

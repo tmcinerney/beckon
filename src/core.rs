@@ -405,6 +405,18 @@ impl<'a> BindingService<'a> {
     /// Release a binding by physical key without requiring the caller to be
     /// inside the target pane.
     pub fn release_key(&self, key: &str) -> Result<Option<Binding>> {
+        self.release_key_checked(key, None)
+    }
+
+    pub fn release_binding(&self, key: &str, reference: &AgentRef) -> Result<Option<Binding>> {
+        self.release_key_checked(key, Some(reference))
+    }
+
+    fn release_key_checked(
+        &self,
+        key: &str,
+        expected: Option<&AgentRef>,
+    ) -> Result<Option<Binding>> {
         let key = self.configured_key(key)?;
         let panes = self.panes.panes()?;
         let mut state = self.reconcile_panes(&panes)?;
@@ -414,8 +426,14 @@ impl<'a> BindingService<'a> {
             .find(|binding| binding.key == key)
             .cloned()
         else {
+            if expected.is_some() {
+                bail!("binding changed; refresh before releasing {key}");
+            }
             return Ok(None);
         };
+        if expected.is_some_and(|reference| !binding.matches(reference)) {
+            bail!("binding owner changed; refresh before releasing {key}");
+        }
         state
             .bindings
             .retain(|candidate| candidate.key != binding.key);
@@ -1000,6 +1018,22 @@ mod tests {
         assert_eq!(released.session, DEFAULT_SESSION);
         assert_eq!(panes.panes().unwrap()[0].fkey(), None);
         assert!(service.status().unwrap().is_empty());
+    }
+
+    #[test]
+    fn stale_ui_release_cannot_clear_a_different_owner() {
+        let store = MemoryStore::default();
+        let panes = FakePanes::new(vec![pane("p1"), pane("p2")]);
+        let service = BindingService::new(&store, &panes).with_keys(["key1"]);
+        service.bind(&reference("p1"), Some("key1")).unwrap();
+        assert!(service.release_binding("key1", &reference("p2")).is_err());
+        assert_eq!(service.pane_for_key("key1").unwrap(), reference("p1"));
+        assert!(
+            service
+                .release_binding("key1", &reference("p1"))
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[test]

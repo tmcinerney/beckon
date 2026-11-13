@@ -7,9 +7,10 @@
 - `config.d/NAME.toml`: one device instance. Its adapter, physical addresses,
   actions and feedback live together. `NAME` is arbitrary lowercase kebab-case;
   `adapter` selects code, not the instance's identity or connection transport.
-- `settings.toml`: machine-owned presentation overrides. Currently only
-  `[display] theme` and `[display.themes]` are supported. The daemon writes it
-  atomically; it cannot add devices, bindings or actions.
+- `settings.toml`: machine-owned presentation overrides: `[display] theme`,
+  `[display.themes]`, and `[devices.NAME.channels]` / `[devices.NAME.effects]`.
+  Channels are declared by the adapter, not invented by the UI. The daemon writes
+  atomically; settings cannot add devices, binding targets or actions.
 - State belongs in `$XDG_STATE_HOME/beckon`, not in configuration.
 
 The filename is a grouping/enable boundary, not a loading-order convention. Each
@@ -149,6 +150,9 @@ fields inside adapter options are rejected by that adapter's typed parser.
 `beckon config show` asks the daemon for its effective model over IPC. A Swift UI
 should use this protocol, never open HID or parse/rewrite structural TOML.
 `beckon config theme NAME` validates the theme and updates `settings.toml` via IPC.
+The [configuration IPC contract](ipc-configuration.md) supports revision-fenced
+colour/brightness/motion changes and owner-fenced UI binding release. Presentation
+updates preserve held/latching state; they do not re-trigger an action.
 
 With the daemon stopped, `beckon creator-micro check` reads the actual keymap and
 checks that configured layer/id combinations exist. `get keymap.json FILE`
