@@ -1,0 +1,37 @@
+# The existing firmware still has ten USB status positions. This projects
+# configured bindings onto that wire format without imposing ten keys on core.
+adapter = "glove80"
+
+[options]
+status_bindings = ["key1", "key2", "key3", "key4", "key5", "key6", "key7", "key8", "key9", "key10"]
+
+[keys.key1]
+members = ["glove80:F16"]
+binding = "key1"
+[keys.key2]
+members = ["glove80:F17"]
+binding = "key2"
+[keys.key3]
+members = ["glove80:F18"]
+binding = "key3"
+[keys.key4]
+members = ["glove80:F19"]
+binding = "key4"
+[keys.key5]
+members = ["glove80:F20"]
+binding = "key5"
+[keys.key6]
+members = ["glove80:Shift+F16"]
+binding = "key6"
+[keys.key7]
+members = ["glove80:Shift+F17"]
+binding = "key7"
+[keys.key8]
+members = ["glove80:Shift+F18"]
+binding = "key8"
+[keys.key9]
+members = ["glove80:Shift+F19"]
+binding = "key9"
+[keys.key10]
+members = ["glove80:Shift+F20"]
+binding = "key10"

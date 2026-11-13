@@ -5,6 +5,7 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
+#[cfg(test)]
 pub const KEY_IDS: [&str; 10] = ["f1", "f2", "f3", "f4", "f5", "f6", "f7", "f8", "f9", "f10"];
 pub const STATE_VERSION: u32 = 1;
 
@@ -113,7 +114,7 @@ impl Binding {
     }
 }
 
-#[derive(Debug, Default, Clone, Deserialize, Serialize)]
+#[derive(Debug, Default, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct BindingState {
     pub state_version: u32,
@@ -291,11 +292,34 @@ pub trait AgentSource {
 pub struct BindingService<'a> {
     store: &'a dyn BindingStore,
     panes: &'a dyn AgentSource,
+    keys: Vec<String>,
 }
 
 impl<'a> BindingService<'a> {
     pub fn new(store: &'a dyn BindingStore, panes: &'a dyn AgentSource) -> Self {
-        Self { store, panes }
+        Self {
+            store,
+            panes,
+            keys: Vec::new(),
+        }
+    }
+
+    pub fn with_keys(mut self, keys: impl IntoIterator<Item = impl AsRef<str>>) -> Self {
+        self.keys = keys
+            .into_iter()
+            .map(|key| key.as_ref().to_string())
+            .collect();
+        self
+    }
+
+    fn configured_key<'k>(&self, key: &'k str) -> Result<&'k str> {
+        if !self.keys.iter().any(|candidate| candidate == key) {
+            bail!(
+                "unknown binding key {key:?}; configured: {}",
+                self.keys.join(", ")
+            );
+        }
+        Ok(key)
     }
 
     pub fn bind(&self, pane: &AgentRef, requested_key: Option<&str>) -> Result<BindResult> {
@@ -318,8 +342,11 @@ impl<'a> BindingService<'a> {
             });
         }
         let key = match requested_key {
-            Some(key) => valid_key(key)?.to_string(),
-            None => first_free_key(&state.bindings)
+            Some(key) => self.configured_key(key)?.to_string(),
+            None => self
+                .keys
+                .iter()
+                .find(|key| !state.bindings.iter().any(|binding| binding.key == **key))
                 .context("no Beckon keys are free")?
                 .to_string(),
         };
@@ -378,7 +405,7 @@ impl<'a> BindingService<'a> {
     /// Release a binding by physical key without requiring the caller to be
     /// inside the target pane.
     pub fn release_key(&self, key: &str) -> Result<Option<Binding>> {
-        let key = valid_key(key)?;
+        let key = self.configured_key(key)?;
         let panes = self.panes.panes()?;
         let mut state = self.reconcile_panes(&panes)?;
         let Some(binding) = state
@@ -470,7 +497,7 @@ impl<'a> BindingService<'a> {
     }
 
     pub fn pane_for_key(&self, key: &str) -> Result<AgentRef> {
-        let key = valid_key(key)?;
+        let key = self.configured_key(key)?;
         let panes = self.panes.panes()?;
         let state = self.reconcile_panes(&panes)?;
         state
@@ -483,6 +510,7 @@ impl<'a> BindingService<'a> {
 
     fn reconcile_panes(&self, panes: &[Agent]) -> Result<BindingState> {
         let existing = self.store.load()?;
+        let original = existing.clone();
         let imported_tokens = existing.is_none();
         let mut state = existing.unwrap_or_else(|| BindingState {
             state_version: STATE_VERSION,
@@ -499,6 +527,9 @@ impl<'a> BindingService<'a> {
                 .collect(),
         });
         validate_bindings(&state.bindings)?;
+        for binding in &state.bindings {
+            self.configured_key(&binding.key).with_context(|| format!("ledger contains undeclared binding {:?}; migrate the ledger explicitly or restore its declaration", binding.key))?;
+        }
         // Only sessions with an authoritative snapshot can prove that a pane is
         // gone. Bindings in unobserved sessions stay dormant so a stopped (or
         // not yet running) Herdr session does not silently lose its keys.
@@ -512,7 +543,9 @@ impl<'a> BindingService<'a> {
                 .unwrap_or(false)
                 || panes.iter().any(|pane| binding.matches_agent(pane))
         });
-        self.store.save(&state)?;
+        if original.as_ref() != Some(&state) {
+            self.store.save(&state)?;
+        }
 
         for pane in panes {
             match state
@@ -561,22 +594,18 @@ pub struct BindResult {
 }
 
 pub fn valid_key(key: &str) -> Result<&str> {
-    KEY_IDS
-        .iter()
-        .copied()
-        .find(|candidate| *candidate == key)
-        .context("key must be f1 through f10")
-}
-
-pub fn first_free_key(bindings: &[Binding]) -> Option<&'static str> {
-    KEY_IDS
-        .into_iter()
-        .find(|key| !bindings.iter().any(|binding| binding.key == *key))
+    if !crate::device::valid_id(key) {
+        bail!("invalid binding name {key:?}");
+    }
+    Ok(key)
 }
 
 pub fn validate_bindings(bindings: &[Binding]) -> Result<()> {
     for binding in bindings {
         valid_key(&binding.key)?;
+        if binding.source.is_empty() {
+            bail!("a binding has an empty source");
+        }
         if binding.session.is_empty() {
             bail!("a binding has an empty session");
         }
@@ -587,7 +616,9 @@ pub fn validate_bindings(bindings: &[Binding]) -> Result<()> {
     for (index, binding) in bindings.iter().enumerate() {
         if bindings[index + 1..].iter().any(|other| {
             other.key == binding.key
-                || (other.session == binding.session && other.pane_id == binding.pane_id)
+                || (other.source == binding.source
+                    && other.session == binding.session
+                    && other.pane_id == binding.pane_id)
         }) {
             bail!("bindings must have unique keys and pane references");
         }
@@ -704,7 +735,7 @@ mod tests {
     fn assigns_the_first_free_key_and_mirrors_it() {
         let store = MemoryStore::default();
         let panes = FakePanes::new(vec![pane("p1")]);
-        let service = BindingService::new(&store, &panes);
+        let service = BindingService::new(&store, &panes).with_keys(KEY_IDS);
         let result = service.bind(&reference("p1"), None).unwrap();
         assert_eq!(result.key, "f1");
         assert_eq!(result.session, DEFAULT_SESSION);
@@ -712,10 +743,29 @@ mod tests {
     }
 
     #[test]
+    fn binding_names_and_capacity_are_configured_not_function_keys() {
+        let store = MemoryStore::default();
+        let panes = FakePanes::new((1..=13).map(|i| pane(&format!("p{i}"))).collect());
+        let keys: Vec<_> = (1..=13).map(|i| format!("key{i}")).collect();
+        let service = BindingService::new(&store, &panes).with_keys(&keys);
+        for i in 1..=13 {
+            assert_eq!(
+                service
+                    .bind(&reference(&format!("p{i}")), None)
+                    .unwrap()
+                    .key,
+                format!("key{i}")
+            );
+        }
+        assert!(service.bind(&reference("p1"), Some("f1")).is_err());
+        assert!(BindingService::new(&store, &panes).panes().is_err());
+    }
+
+    #[test]
     fn implicit_rebind_keeps_the_existing_key() {
         let store = MemoryStore::default();
         let panes = FakePanes::new(vec![pane("p1"), pane("p2")]);
-        let service = BindingService::new(&store, &panes);
+        let service = BindingService::new(&store, &panes).with_keys(KEY_IDS);
         assert_eq!(service.bind(&reference("p1"), None).unwrap().key, "f1");
         assert_eq!(service.bind(&reference("p2"), None).unwrap().key, "f2");
 
@@ -729,7 +779,7 @@ mod tests {
     fn binds_the_same_pane_id_in_two_sessions_independently() {
         let store = MemoryStore::default();
         let panes = FakePanes::new(vec![pane("w1:p1"), pane_in("agent-workspace", "w1:p1")]);
-        let service = BindingService::new(&store, &panes);
+        let service = BindingService::new(&store, &panes).with_keys(KEY_IDS);
 
         let first = service
             .bind(&AgentRef::new(DEFAULT_SESSION, "w1:p1"), Some("f1"))
@@ -767,7 +817,7 @@ mod tests {
         let mut rex_pane = pane("w1:p1");
         rex_pane.source = "rex".into();
         let panes = FakePanes::new(vec![pane("w1:p1"), rex_pane]);
-        let service = BindingService::new(&store, &panes);
+        let service = BindingService::new(&store, &panes).with_keys(KEY_IDS);
 
         let herdr = service
             .bind(&AgentRef::new(DEFAULT_SESSION, "w1:p1"), None)
@@ -794,7 +844,7 @@ mod tests {
     fn a_missing_pane_flags_a_stale_identity_without_product_vocabulary() {
         let store = MemoryStore::default();
         let panes = FakePanes::new(vec![pane("p1")]);
-        let service = BindingService::new(&store, &panes);
+        let service = BindingService::new(&store, &panes).with_keys(KEY_IDS);
 
         let default_error = service
             .bind(&reference("gone"), None)
@@ -829,7 +879,7 @@ mod tests {
     fn keeps_bindings_for_unobserved_sessions_dormant() {
         let store = MemoryStore::default();
         let panes = FakePanes::new(vec![pane("p1")]);
-        let service = BindingService::new(&store, &panes);
+        let service = BindingService::new(&store, &panes).with_keys(KEY_IDS);
         service.bind(&reference("p1"), Some("f1")).unwrap();
         {
             let mut state = store.0.borrow_mut();
@@ -856,7 +906,7 @@ mod tests {
         let mut unbound = pane("p2");
         unbound.cwd = Some("/code/feature-pane-presentation".into());
         let panes = FakePanes::new(vec![bound, unbound]);
-        let service = BindingService::new(&store, &panes);
+        let service = BindingService::new(&store, &panes).with_keys(KEY_IDS);
         service.bind(&reference("p1"), Some("f4")).unwrap();
 
         assert_eq!(
@@ -942,7 +992,7 @@ mod tests {
     fn releases_a_binding_by_key() {
         let store = MemoryStore::default();
         let panes = FakePanes::new(vec![pane("p1")]);
-        let service = BindingService::new(&store, &panes);
+        let service = BindingService::new(&store, &panes).with_keys(KEY_IDS);
         service.bind(&reference("p1"), Some("f2")).unwrap();
 
         let released = service.release_key("f2").unwrap().unwrap();
@@ -956,7 +1006,7 @@ mod tests {
     fn releases_all_bindings_and_their_tokens() {
         let store = MemoryStore::default();
         let panes = FakePanes::new(vec![pane("p1"), pane("p2")]);
-        let service = BindingService::new(&store, &panes);
+        let service = BindingService::new(&store, &panes).with_keys(KEY_IDS);
         service.bind(&reference("p1"), Some("f2")).unwrap();
         service.bind(&reference("p2"), Some("f7")).unwrap();
 
@@ -976,7 +1026,7 @@ mod tests {
     fn closes_only_the_observed_sessions_panes() {
         let store = MemoryStore::default();
         let panes = FakePanes::new(vec![pane("p1"), pane("p2")]);
-        let service = BindingService::new(&store, &panes);
+        let service = BindingService::new(&store, &panes).with_keys(KEY_IDS);
         service.bind(&reference("p1"), Some("f2")).unwrap();
 
         panes.panes.borrow_mut().clear();

@@ -6,7 +6,7 @@ use serde::Serialize;
 use crate::render::RenderPlan;
 
 pub const PROTOCOL_NAME: &str = "beckon.display";
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// One newline-delimited JSON message written to a display plugin's stdin.
 #[derive(Debug, Serialize)]
@@ -66,7 +66,7 @@ mod tests {
             json!({
                 "type": "hello",
                 "protocol": "beckon.display",
-                "version": 1,
+                "version": 2,
                 "plugin_id": "status-log"
             })
         );
@@ -79,7 +79,7 @@ mod tests {
 
         assert_eq!(value["type"], "render");
         assert_eq!(value["protocol"], "beckon.display");
-        assert_eq!(value["version"], 1);
+        assert_eq!(value["version"], 2);
         assert_eq!(value["sequence"], 7);
         assert_eq!(value["plan"]["keys"].as_array().unwrap().len(), 10);
         assert_eq!(value["plan"]["keys"][0]["key"], "f1");

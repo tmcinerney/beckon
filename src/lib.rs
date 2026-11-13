@@ -1,9 +1,11 @@
 pub mod action;
+pub mod chord;
 pub mod command_source;
 pub mod config;
 pub mod core;
 pub mod creator_micro;
 pub mod creator_micro_fs;
+pub mod device;
 pub mod display;
 pub mod display_protocol;
 pub mod focus;
@@ -16,4 +18,5 @@ pub mod render;
 pub mod session;
 pub mod source_set;
 pub mod state;
+pub mod switches;
 pub mod terminal;

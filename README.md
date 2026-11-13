@@ -1,375 +1,146 @@
 # Beckon
 
-Beckon binds a logical navigation key (`f1`–`f10`) to an agent identity
-`{source, scope, id}`, then renders agent state to optional display sinks.
-Agent sources are pluggable and declared in configuration; the two live ones
-are **Rex** (block-level) and **Herdr** (pane-level). Display sinks include a
-wired Glove80 and the Work Louder Creator Micro 2. Inputs include the Glove80
-Beckon layer and the MacBook function row.
+Beckon maps configured controls to agent bindings or keyboard actions, and renders
+agent state and interaction feedback on connected devices. Sources include Rex
+blocks and Herdr panes. Devices include the Creator Micro 2, Glove80 and ordinary
+global keyboard shortcuts. Licensed under the [MIT License](LICENSE).
 
-Licensed under the [MIT License](LICENSE).
+## Configuration v3
 
-## Current integrations (Rex + Creator Micro 2)
+This is a clean break: v1/v2 configuration is rejected, not silently upgraded.
+There are no implicit devices, source integrations, binding names or themes.
 
-This is the actively used setup. It is newer than the Herdr/Glove80
-description in the rest of this README, which still documents the original
-foundation accurately but is no longer the whole picture.
-
-```toml
-[[sources]]
-id = "rex"
-list = ["/Users/you/.config/beckon/rex-agents"]
-refresh_ms = 1000
-activate = ["/usr/bin/open", "-a", "Rex Beta"]
-focus = ["/path/to/rex", "focus", "-s", "$BECKON_AGENT_SCOPE", "$BECKON_AGENT_ID"]
-
-[sources.identity]
-scope_env = "REX_SESSION"
-id_env = "REX_BLOCK"
-
-[outputs]
-adapters = ["glove80-usb", "creator-micro-usb"]
+```text
+~/.config/beckon/
+  config.toml               # explicit binding order, sources and themes
+  config.d/
+    creator-micro.toml       # that device's keys, actions and effects together
+    glove80.toml
+    macbook.toml
+  settings.toml             # machine-owned presentation overrides, written via IPC
+~/.local/state/beckon/
+  bindings.json             # agent identities; never configuration
+  surfaces.json             # explicit terminal adoption records
 ```
 
-Key points:
+`beckon init` creates the [root template](templates/config.toml), enabling nothing.
+Copy only the [device templates](templates/) you want, declare their binding ids in
+the root, and configure the sources they reference. Deleting a device file removes
+that device's inputs/output on restart. References do not depend on file ordering.
+`key1` is an example name, not a reserved enum or hardware keycode.
 
-- **Rex bindings are block-level**, not session-level. The list adapter emits
-  one record per block; `scope` is `REX_SESSION` and `id` is `REX_BLOCK`.
-  `beckon bind` run inside a Rex terminal resolves both automatically, so a
-  press lands on the exact pane via `rex focus -s <session> <block>`.
-- Herdr is optional. When no `[sources]` entry exists it remains the built-in
-  source; with one present, a stopped Herdr server is non-fatal.
-- `beckon focus --key f4` focuses a bound agent as a pad press would. The
-  daemon runs the source's `activate` and `focus` commands; the global
-  Herdr-flavoured `[focus] command` is skipped for non-Herdr sources.
-- `beckon status` reports `source`, `session` (scope) and `pane` per binding.
+See [the configuration guide](docs/configuration.md) for the schema, grouping,
+validation, action semantics, permissions and upgrade checklist.
 
-### Creator Micro 2 device commands
+## Typical workflow
 
 ```sh
-beckon creator-micro demo                              # paint all states
-beckon creator-micro listen                             # log v.oai.hid events
-beckon creator-micro off                                # clear indicators
-beckon creator-micro get keymap.json ./keymap.json       # read device file
-beckon creator-micro put keymap.json ./keymap.json       # write only on drift
-beckon creator-micro verify keymap.json ./keymap.json    # report drift
+beckon config check                 # offline validation; no device writes
+beckon keys                         # configured addresses, bindings and actions
+beckon daemon                       # normally run by Home Manager as beckond
+beckon bind --key key3               # run inside the intended agent terminal
+beckon status
+beckon focus --key key3
+beckon release --key key3
+beckon preview --all-states --json   # render inspection; no device writes
+beckon config show                  # daemon's effective typed model over IPC
+beckon config theme status          # daemon writes only settings.toml
+beckon reset --device creator-micro # release held output and clear inferred latch
 ```
 
-`put` uses `fs.txbegin` / `fs.writebin` / `fs.txcommit` in one transaction and
-verifies the readback is byte-identical. The keymap can drift between the
-device, Input's saved copy and a versioned canonical file; keep all three in
-sync (the dotfiles repo has a `sync-keymap.sh verify|sync` helper).
+An omitted `--key` selects the first free configured binding. An already-bound
+agent keeps its key. A requested occupied key is never stolen. Binding ids are
+device-independent; several devices can navigate the same binding.
 
-App-to-layer switching is **Input's** `linkedApps` / `linkedAppId` feature;
-Beckon does not detect apps or manage layers. Per-key AG overrides only appear
-on the active layer.
+Rex identity comes from the source's configured `REX_SESSION` / `REX_BLOCK`
+variables, so registration is block-level. `activate` and `focus` are direct argv
+commands, not shell strings; `$BECKON_AGENT_SOURCE`, `$BECKON_AGENT_SCOPE`,
+`$BECKON_AGENT_ID`, `$BECKON_AGENT_STATE` and `$BECKON_AGENT_TITLE` are substituted.
+`${HOME}`/`~/` work in configured command paths, including the executable.
+For multiple Rex clients/windows, use a host-owned focus script that selects the
+client/session before its block; focusing a block alone need not display its session.
 
-### Logical keys are not physical keys
+Herdr is enabled only by `[herdr] enabled = true`. Its `sessions = "auto"` scans
+reachable default/named sessions; a named array restricts it. Binding identity is
+source + scope + id. Unobserved scopes keep dormant bindings. Herdr's `fkey` token
+is a presentation mirror, not the authoritative ledger.
 
-`f1`–`f10` are **logical slots**, a namespace inherited from the Glove80 F-row
-and the MacBook function row. The Creator Micro has no F-keys. Its six
-indicator keys are addressed by **AG slot ids**, declared in
-`outputs.creator_micro.slots` (currently `6..=11`). `write_plan` and pad-press
-routing both pair that list positionally with `display.keys`, so `slots[2] = 8`
-means `f3` is the third physical AG key. Concretely:
+For adopted Ghostty windows/tabs, see [terminal surface control](docs/terminal-backend-architecture.md):
+`beckon terminals`, `beckon adopt --session NAME --terminal HANDLE`, and
+`beckon forget --session NAME`. The global focus helper and adopted Ghostty path
+apply to Herdr; other sources use their own configured activate/focus commands.
 
-| Logical | AG id | Physical |
-|---|---|---|
-| `f1`–`f6` | `6`–`11` | six lit indicator keys on the Rex layer |
-| `f7`–`f10` | none | no Creator Micro indicator; Glove80/MacBook only |
+## Creator Micro 2
 
-This is why a plain `beckon bind` can be surprising: with `f1`–`f6` occupied it
-picks `f7`, which has no LED on this device. The hardcoded ten-slot `KEY_IDS`
-and positional pairing are known v1 design debt; see
-[docs/v1-design.md](docs/v1-design.md) for the opaque-slot and explicit
-channel-mapping proposal.
+The adapter owns layer tracking and firmware addresses. Core never interprets
+`AG16` or a layer number. A keymap cell carrying an AG code can be used for
+navigation, a generic chord action, or grouped feedback—not just vendor agent use.
 
-### Known limits
-
-- Pad key presses (`v.oai.hid`) are routed into the daemon's focus path on the
-  same HID handle used for lighting. `outputs.creator_micro.slots` paired
-  positionally with `display.keys` is the explicit AG-id → logical-key map; an
-  id outside that map (ChatGPT's 0-5, the seven other keys, the mic key) never
-  focuses anything, and releases are ignored. `beckon focus --key` is the CLI
-  equivalent.
-- `conf.d` fragments, the slot registry and per-layer projections in
-  [docs/v1-design.md](docs/v1-design.md) are a **design record**, not loaded by
-  the running binary. `templates/` holds example fragments.
-- The launchd `beckond` agent may point at a published binary that cannot parse
-  the current config; a manually started daemon may be what is actually running.
-
-## Current state
-
-The current executable has the manual registration foundation:
-
-- `beckon bind [--key f1]` binds `$HERDR_PANE_ID` through the local daemon.
-  Repeating it without `--key` is idempotent: an already-bound pane keeps its
-  existing key.
-- `beckon release` clears the binding for the current pane; `beckon release --key f2`
-  clears F2 from anywhere.
-- `beckon status` shows bindings and their current Herdr pane data.
-- `beckon listen-keys` records the ten Beckon-layer key events.
-- `beckond` renders its live Herdr pane cache to zero or more independent
-  display adapters. The optional Glove80 USB adapter reconnects automatically.
-- `beckon preview` shows the declarative LED plan without writing keyboard HID
-  frames; `beckon preview --all-states` shows every supported state treatment.
-
-Bindings are persisted in `$XDG_STATE_HOME/beckon/bindings.json` (falling back
-to `~/.local/state/beckon`). Herdr's `fkey` pane token is a visible mirror for
-the sidebar, not the source of truth: Herdr does not restore token metadata
-after its server restarts.
-
-## Multiple Herdr sessions
-
-Beckon manages every live Herdr session it finds: the default session's socket
-plus each named session under `~/.config/herdr/sessions/<name>/herdr.sock`.
-Stopped sessions leave their directories behind, so candidates are
-liveness-checked and dead sockets are skipped. Bind, release, and status work
-from any session's panes.
-
-Pane identity is the pair `(session, pane_id)` because Herdr pane IDs are only
-unique within one session. A pane ID that exists in exactly one managed session
-resolves on its own; when the same ID exists in several, `beckon bind --session
-<name>` (or `release --session`) selects one. Bindings for a session that is
-not currently reachable are kept dormant rather than released, so restarting a
-stopped Herdr session restores its keys instead of losing them.
-
-```toml
-[herdr]
-# Pin the CLI for launchd shells whose PATH differs, point at a nonstandard
-# default-session socket, or limit management to named sessions.
-cli = "herdr"
-socket = "/Users/you/.config/herdr/herdr.sock"
-sessions = "auto"  # or ["default", "agent-workspace"]
-```
-
-The `BECKON_HERDR_SOCKET` environment variable still overrides the socket for
-tests and one-off runs; `BECKON_HERDR_SESSIONS_DIR` overrides the discovery
-directory.
-
-## Terminal surface control
-
-Navigation focuses the Herdr pane first; whether the terminal *window or tab*
-displaying that session comes forward is a separate, explicitly configured
-capability. With a backend enabled, Beckon can raise the adopted surface
-before focusing the pane:
-
-```toml
-[terminal]
-# "none" (default) keeps the focus command as the only surface mechanism.
-backend = "ghostty"
-```
-
-Adoption is explicit and machine-local — Beckon never infers which surface
-displays which session, never repairs a stale handle, and never opens windows
-itself:
+The template joins bottom-left and bottom-centre explicitly: either key operates
+one action; rolling between them does not re-trigger it. Held feedback is solid
+red, inferred tap-toggle feedback breathes red, and idle returns to base rendering.
+Bottom-right remains a normal `KC_ENT` key in the device keymap.
 
 ```sh
-beckon terminals                      # list surfaces with opaque handles
-beckon adopt --session agent-workspace --terminal BBD9B110-…
-beckon forget --session agent-workspace
+# Direct device diagnostics require beckond to be stopped (one HID reader/writer).
+beckon creator-micro get keymap.json ./keymap.json
+beckon creator-micro check           # check configured addresses against the keymap
+beckon creator-micro verify keymap.json ./keymap.json
+beckon creator-micro put keymap.json ./keymap.json
+beckon creator-micro listen          # raw ordered notifications, including layers
 ```
 
-Adopted handles live in `surfaces.json` in the state directory (not in
-configuration, which Home Manager may render), and each record names the
-backend that produced it, so changing backends invalidates it honestly. A
-missing record, a stale handle, or a changed backend warns and continues to
-pane focus. Under launchd, the Ghostty backend needs an Automation (Apple
-Events) grant on first use.
+Keep the keymap versioned outside Input and verify readback after every write.
+Input's next save can overwrite it. Merely accepting a write does not prove an id
+is addressable. [Hardware findings](docs/creator-micro-2-hardware.md) separate
+measured behaviour from unknowns. USB is verified; Bluetooth RPC/lighting is not.
 
-A keypress then runs, in order: the adopted surface raise, the `[focus]
-command`, and the Herdr pane focus. The command receives `BECKON_KEY`,
-`BECKON_PANE_ID`, `BECKON_HERDR_SESSION`, and `BECKON_TERMINAL_HANDLE` when a
-handle was raised, so machine-specific scripts can compose instead of guess.
-The design record is
-[docs/terminal-backend-architecture.md](docs/terminal-backend-architecture.md).
+## Glove80 and MacBook
 
-## Optional MacBook function-key input
+The Glove80 template keeps F16–F20 and Shift+F16–F20 as input, plus its existing
+ten-position wired status protocol. MacBook uses ordinary F1–F10 (hold Fn/Globe
+if macOS sends media keys). Both are configuration mappings, not core binding names.
+Global shortcuts cannot distinguish which physical keyboard emitted a shortcut.
+The wider Glove80 firmware/design review is deferred; no firmware changes are
+required by this host-side configuration work.
 
-Beckon's logical slots (`f1` through `f10`) are separate from their physical
-input source. The default `glove80` profile preserves the Glove80 Beckon layer:
-F16-F20 and Shift+F16-Shift+F20. A MacBook can navigate the same bindings by
-opting into its ordinary function-key row alongside the default Glove80 input:
+Glove80 transport diagnostics remain `beckon hid list`, `probe`, `send` and
+`send-malformed --confirm`. They target only its vendor status endpoint, not the
+ordinary keyboard interface. Coordinate diagnostic writers with the daemon.
 
-```toml
-[input]
-profiles = ["glove80", "macbook-function-keys"]
-```
+External displays use the [version 2 NDJSON protocol](docs/display-plugin-protocol.md),
+with a [minimal logging example](examples/display-plugin-log.py).
 
-On macOS Ventura or later, turn on **System Settings → Keyboard → Keyboard
-Shortcuts → Function Keys → Use F1, F2, etc. keys as standard function keys**.
-Without that setting, hold Fn/Globe while pressing a key. Fn/Globe then remains
-the way to access the usual brightness, media, and volume controls. This is an
-input-only profile: it focuses existing Beckon bindings, but does not provide
-per-key status lighting. The Glove80 HID display can remain enabled separately.
-
-When `[input]` is absent, Beckon enables only `glove80` for compatibility. An
-existing single `profile = "macbook-function-keys"` setting remains supported.
-Use `profiles` to enable both inputs. They intentionally target the same
-logical bindings, so F1 on either keyboard focuses the pane bound to F1. Both
-sources use macOS global shortcuts, so either works across apps, OmniWM spaces,
-and a plugged-in desktop setup without switching modes.
-
-## Optional display integrations
-
-Inputs and displays are independent. The compatibility default enables the
-wired Glove80 LED adapter when the `[outputs]` section is absent:
-
-```toml
-[outputs]
-adapters = ["glove80-usb"]
-```
-
-The adapter is optional at runtime. Unplugging the keyboard is an expected
-availability state: bindings, MacBook input, Herdr navigation, and other
-display adapters continue working, and reconnecting the keyboard restores LED
-updates. A navigation-only installation can explicitly select no displays:
-
-```toml
-[outputs]
-adapters = []
-```
-
-Each built-in display implements the same hardware-neutral `DisplaySink`
-boundary and receives a `RenderPlan`. Beckon fans out independently, so one
-failed output cannot block another output or navigation. New built-in adapters
-are added to the typed configuration registry.
-
-External display plugins use a versioned, one-way NDJSON protocol rather than
-an unstable Rust dynamic-library ABI. They run as supervised child processes,
-receive complete render snapshots, and cannot block the hotkey loop or mutate
-bindings. See [the display plugin protocol](docs/display-plugin-protocol.md)
-and its [minimal logging example](examples/display-plugin-log.py).
-
-## Declarative Nix configuration
-
-The bundled Home Manager module can render the configuration rather than
-managing `config.toml` by hand. Beckon owns the configuration version; set only
-the fields you want to configure:
+## Nix / Home Manager
 
 ```nix
-{
-  programs.beckon = {
-    enable = true;
-    settings = {
-      input.profiles = [ "glove80" "macbook-function-keys" ];
-      outputs.adapters = [ "glove80-usb" ];
-      outputs.plugins = [
-        {
-          id = "status-log";
-          command = [ "/absolute/path/to/display-plugin-log.py" "/tmp/beckon-display.log" ];
-        }
-      ];
-      focus.command = [ "/Users/you/.config/beckon/focus-ghostty" ];
-    };
+programs.beckon = {
+  enable = true;
+  settings = builtins.fromTOML (builtins.readFile ./beckon/config.toml);
+  devices = {
+    creator-micro = builtins.fromTOML (builtins.readFile ./beckon/creator-micro.toml);
+    macbook = builtins.fromTOML (builtins.readFile ./beckon/macbook.toml);
   };
-
-  services.beckond.enable = true;
-}
+};
+services.beckond.enable = true;
 ```
 
-An empty `programs.beckon.settings` leaves configuration unmanaged, which is
-the safe default for existing installations. The daemon logs the enabled input
-profiles at startup; a registration conflict identifies the physical shortcut
-and tells you that another application owns it.
+The supplied TOML must be complete and validated. Empty `settings` leaves the root
+unmanaged; empty `devices` installs none. The mutable UI preferences stay separate.
+Upgrade the binary, structural config and existing binding names together—do not
+install v3 configuration while an older launchd service still owns the device.
 
-## Input diagnostics
-
-Beckond records the input receipt and final result in
-`$XDG_STATE_HOME/beckon/key-events.log` (or
-`~/.local/state/beckon/key-events.log`). For a complete per-stage trace while
-diagnosing a shortcut, start the daemon with `BECKON_LOG=debug`. It writes
-structured records for global-hotkey registration, event receipt, logical-key
-routing, binding resolution, the configured terminal-focus command, and the
-Herdr `pane.focus` request/response.
-
-When Home Manager runs the service, those records go to its configured
-`services.beckond.logDirectory` (by default,
-`~/.local/state/beckon/logs/beckond.error.log`). A received raw macOS key event
-that never produces a `received global hotkey event` record was consumed before
-Beckon; use a temporary macOS Input Monitoring event tap to inspect that lower
-layer. Beckon does not request that permission for normal navigation.
-
-Create and validate the optional machine-specific configuration with:
+## Development
 
 ```sh
-devenv shell -- cargo run -- init
-devenv shell -- cargo run -- config check
+nix develop --command cargo test --all-targets
+nix develop --command cargo clippy --all-targets -- -D warnings
+nix develop --command cargo fmt --all --check
+nix build
 ```
 
-This creates `$XDG_CONFIG_HOME/beckon/config.toml` (falling back to
-`~/.config/beckon/config.toml`) without overwriting an existing file.
-
-For the current manual-bind spike, start the daemon then bind from a Herdr
-pane:
-
-```sh
-devenv shell -- cargo run -- daemon
-devenv shell -- cargo run -- bind --key f1
-```
-
-The daemon owns binding writes and global keypress navigation. If `focus.command`
-is set, it runs before `herdr agent focus`; this is where a user integrates their
-terminal and window manager. `preview` remains deliberately read-only: it
-renders plans for inspection, not a simulated or real keyboard update.
-
-## USB status transport diagnostic
-
-The `v0.2.0-rc.1` Beckon firmware exposes a USB-only, status-only vendor HID
-endpoint on the left (split-central) half. `beckond` uses the same strictly
-selected endpoint for normal live status delivery. The diagnostic commands stay
-explicit, for physical protocol checks only:
-
-```sh
-# Read-only discovery and open test.
-devenv shell -- cargo run -- hid list
-devenv shell -- cargo run -- hid probe
-
-# A deliberate valid ten-key snapshot, F1 through F10.
-devenv shell -- cargo run -- hid send --sequence 1 \
-  --states idle,working,blocked,done,unknown,unbound,unbound,unbound,unbound,unbound
-
-# Deliberately malformed 31-byte report; the firmware must ignore it.
-devenv shell -- cargo run -- hid send-malformed --confirm
-```
-
-These commands select only Glove80 `16C0:27DB`, usage page `0xFF60`, usage
-`0x61`. They require one matching wired endpoint and never target the ordinary
-keyboard HID interface.
-They do not change LEDs in this firmware increment; a successful valid write
-only proves the status transport boundary.
-
-For OmniWM and one visible Ghostty window, copy
-`examples/omniwm-focus-ghostty.sh` to `~/.config/beckon/focus-ghostty`, make it
-executable, then add this to `config.toml`:
-
-```toml
-[focus]
-command = ["/Users/you/.config/beckon/focus-ghostty"]
-```
-
-Ghostty users with several windows or tabs can instead adopt surfaces per
-session with the built-in terminal backend (see "Terminal surface control"
-above) and let the focus command handle only the remaining details.
-
-The script re-queries OmniWM on every press because its opaque window IDs are
-session-scoped. It uses `window navigate`, which brings Ghostty to its workspace
-rather than merely focusing it on an already-visible workspace.
-
-## Optional repeat-press confirmation
-
-By default Beckon never sends input to a pane. To deliberately enable a repeat
-press that sends Enter, add this to `config.toml` and restart `beckond`:
-
-```toml
-[actions.confirm]
-enabled = true
-repeat_press_ms = 750
-keys = ["enter"]
-```
-
-The first press focuses the selected bound pane. A second press of the same key
-within the window sends Herdr's logical `enter` key only when that exact pane is
-still focused. `keys` is passed to Herdr as logical key names, which Herdr
-validates before writing anything. This can confirm an agent or tool prompt, so
-enable it only when that behavior is intended.
+`devenv shell -- ...` is also available. Tests use fake emitters and pure render
+plans; they do not synthesize real keystrokes or claim hardware validation.
+`BECKON_LOG=debug` enables detailed daemon tracing. macOS Home Manager logs live in
+`~/Library/Logs/beckon/`; permissions must belong to the actual running binary,
+not merely the terminal that launched an earlier probe.

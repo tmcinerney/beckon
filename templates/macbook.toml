@@ -1,0 +1,34 @@
+# Standard function keys, emitted with Fn/Globe if macOS uses media keys.
+# Global shortcuts cannot distinguish which physical keyboard emitted them.
+adapter = "hotkeys"
+
+[keys.key1]
+members = ["macbook:F1"]
+binding = "key1"
+[keys.key2]
+members = ["macbook:F2"]
+binding = "key2"
+[keys.key3]
+members = ["macbook:F3"]
+binding = "key3"
+[keys.key4]
+members = ["macbook:F4"]
+binding = "key4"
+[keys.key5]
+members = ["macbook:F5"]
+binding = "key5"
+[keys.key6]
+members = ["macbook:F6"]
+binding = "key6"
+[keys.key7]
+members = ["macbook:F7"]
+binding = "key7"
+[keys.key8]
+members = ["macbook:F8"]
+binding = "key8"
+[keys.key9]
+members = ["macbook:F9"]
+binding = "key9"
+[keys.key10]
+members = ["macbook:F10"]
+binding = "key10"

@@ -1,118 +1,87 @@
-use std::{collections::BTreeSet, env, fs, path::PathBuf};
-
+//! Version 3: explicit global bindings/sources and self-contained device files.
+use crate::{
+    device::{self, DeviceConfig},
+    render::{DisplayConfig, KeyDisplay, Rgb},
+};
 use anyhow::{Context, Result, bail};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use std::{
+    collections::BTreeSet,
+    env, fs,
+    path::{Path, PathBuf},
+};
 
-use crate::core::DEFAULT_SOURCE;
-use crate::render::{DisplayConfig, Motion, Rgb, StateTreatment};
-
-const CONFIG_VERSION: u32 = 2;
+const CONFIG_VERSION: u32 = 3;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
     config_version: u32,
-    #[serde(default)]
-    pub input: InputConfig,
-    #[serde(default)]
-    pub outputs: OutputConfig,
-    #[serde(default)]
+    pub bindings: Vec<String>,
     pub focus: FocusConfig,
-    #[serde(default)]
     pub display: DisplayConfig,
-    #[serde(default)]
     pub actions: ActionsConfig,
-    #[serde(default)]
     pub herdr: HerdrConfig,
-    #[serde(default)]
     pub terminal: TerminalConfig,
-    /// Additional agent integrations. Herdr remains the built-in default;
-    /// each entry is fully described by commands, so no integration-specific
-    /// identity or vocabulary lives in Beckon's core.
-    #[serde(default)]
     pub sources: Vec<AgentSourceConfig>,
+    pub outputs: OutputConfig,
+    #[serde(skip)]
+    pub devices: Vec<DeviceConfig>,
+    #[serde(skip)]
+    root: PathBuf,
 }
 
-/// A config-driven agent integration. `list` emits a JSON array of agents;
-/// `focus` and `activate` are argv templates. Beckon never uses a shell: it
-/// substitutes `$BECKON_*` tokens in arguments and exports the same values as
-/// environment variables.
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct AgentSourceConfig {
-    /// Stable id recorded on every binding from this source.
     pub id: String,
-    /// Command emitting `[{"scope","id","state","title","focused","token"}]`.
     pub list: Vec<String>,
-    /// Command run when a bound key is pressed.
-    #[serde(default)]
     pub focus: Vec<String>,
-    /// Optional command run before focus to raise the host application.
-    #[serde(default)]
     pub activate: Vec<String>,
-    /// Environment variables that identify the agent `beckon bind` runs in.
-    #[serde(default)]
     pub identity: Option<SourceIdentity>,
-    /// Minimum milliseconds between `list` refreshes.
-    #[serde(default = "default_source_refresh_ms")]
     pub refresh_ms: u64,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct SourceIdentity {
-    /// Environment variable holding the agent's scope.
     pub scope_env: String,
-    /// Environment variable holding the agent's opaque id.
     pub id_env: String,
-}
-
-fn default_source_refresh_ms() -> u64 {
-    1000
 }
 
 impl AgentSourceConfig {
     pub fn validate(&self) -> Result<()> {
-        if !valid_plugin_id(&self.id) {
-            bail!("sources id {:?} must use lowercase kebab-case", self.id);
-        }
-        if self.list.is_empty() {
-            bail!("sources.{}.list must not be empty", self.id);
-        }
-        if self.refresh_ms == 0 {
-            bail!("sources.{}.refresh_ms must be greater than zero", self.id);
+        if !device::valid_id(&self.id)
+            || self.list.first().is_none_or(|arg| arg.is_empty())
+            || self.refresh_ms == 0
+        {
+            bail!(
+                "sources.{} requires a valid id, list command and positive refresh_ms",
+                self.id
+            );
         }
         if let Some(identity) = &self.identity
             && (identity.scope_env.is_empty() || identity.id_env.is_empty())
         {
-            bail!("sources.{}.identity env names must not be empty", self.id);
+            bail!("sources.{}: identity env names must not be empty", self.id);
         }
         Ok(())
     }
 }
 
-/// Terminal surface control. The backend is a stable registry name; adopted
-/// session-to-surface handles are explicit machine-local state and never part
-/// of configuration. See `docs/terminal-backend-architecture.md`.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TerminalConfig {
-    #[serde(default)]
     pub backend: TerminalBackendKind,
 }
 
-#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum TerminalBackendKind {
-    /// No terminal control plane. The user's focus command remains the only
-    /// surface mechanism, matching pre-backend behavior.
-    #[default]
     None,
-    /// Ghostty >= 1.3 through its scripting dictionary.
     #[serde(rename = "ghostty")]
     GhosttyAppleScript,
 }
-
 impl TerminalBackendKind {
     pub const fn name(self) -> &'static str {
         match self {
@@ -122,523 +91,77 @@ impl TerminalBackendKind {
     }
 }
 
-/// Herdr topology: which server CLI to invoke, where the default session's
-/// socket lives, and which sessions Beckon manages.
-///
-/// Leaving `[herdr]` absent preserves the original behavior: the `herdr`
-/// program from `PATH`, the default socket location, and every live session.
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HerdrConfig {
-    /// The Herdr CLI program to invoke. Under launchd, `PATH` is often narrower
-    /// than an interactive shell's, so an absolute path is more predictable.
-    #[serde(default = "default_herdr_cli")]
+    pub enabled: bool,
     pub cli: String,
-    /// Socket path for the default session. The `BECKON_HERDR_SOCKET`
-    /// environment variable still wins for tests and one-off overrides.
-    #[serde(default)]
     pub socket: Option<PathBuf>,
-    #[serde(default)]
     pub sessions: SessionsConfig,
 }
 
-impl Default for HerdrConfig {
-    fn default() -> Self {
-        Self {
-            cli: default_herdr_cli(),
-            socket: None,
-            sessions: SessionsConfig::default(),
-        }
-    }
-}
-
-fn default_herdr_cli() -> String {
-    "herdr".into()
-}
-
-impl HerdrConfig {
-    pub fn validate(&self) -> Result<()> {
-        if self.cli.trim().is_empty() {
-            bail!("herdr.cli must name the herdr program when set");
-        }
-        if let Some(socket) = &self.socket
-            && socket.as_os_str().is_empty()
-        {
-            bail!("herdr.socket must be a path when set");
-        }
-        if let SessionsConfig::Only(names) = &self.sessions {
-            if names.is_empty() {
-                bail!("herdr.sessions must name at least one session when set");
-            }
-            let mut seen = BTreeSet::new();
-            for name in names {
-                if name.trim().is_empty() {
-                    bail!("herdr.sessions must not contain empty session names");
-                }
-                if !seen.insert(name.as_str()) {
-                    bail!("herdr.sessions contains duplicate session {name}");
-                }
-            }
-        }
-        Ok(())
-    }
-
-    /// `None` manages every live session; `Some` is the explicit allowlist.
-    pub fn allowed_sessions(&self) -> Option<&[String]> {
-        match &self.sessions {
-            SessionsConfig::Auto(_) => None,
-            SessionsConfig::Only(names) => Some(names),
-        }
-    }
-}
-
-/// `sessions = "auto"` (default) or an explicit list of session names.
-#[derive(Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(untagged)]
 pub enum SessionsConfig {
     Auto(AutoSessions),
-    Only(Vec<String>),
+    Named(Vec<String>),
 }
-
-#[derive(Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AutoSessions {
     Auto,
 }
 
-impl Default for SessionsConfig {
-    fn default() -> Self {
-        Self::Auto(AutoSessions::Auto)
-    }
-}
-
-/// Built-in output integrations. The stable names form a configuration
-/// registry; they do not expose Beckon's Rust ABI to third-party code.
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
-#[serde(rename_all = "kebab-case")]
-pub enum OutputAdapter {
-    Glove80Usb,
-    CreatorMicroUsb,
-}
-
-impl OutputAdapter {
-    pub const fn name(self) -> &'static str {
-        match self {
-            Self::Glove80Usb => "glove80-usb",
-            Self::CreatorMicroUsb => "creator-micro-usb",
+impl HerdrConfig {
+    pub fn allowed_sessions(&self) -> Option<&[String]> {
+        match &self.sessions {
+            SessionsConfig::Auto(_) => None,
+            SessionsConfig::Named(names) => Some(names),
         }
     }
-}
-
-/// Lighting for the Work Louder Creator Micro 2. Colours and the AG slot range
-/// are configuration rather than firmware constants so a settings UI can
-/// rewrite them without a rebuild.
-#[derive(Clone, Debug, Deserialize, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub struct CreatorMicroConfig {
-    /// AG slot ids backing the six indicator keys, in display order. The
-    /// default deliberately starts at 6: ChatGPT/Codex owns ids 0-5 and is
-    /// layer-agnostic, so using the same ids makes it blank our keys.
-    #[serde(default = "default_creator_micro_slots")]
-    pub slots: Vec<u8>,
-    /// Colour of the non-indicator keys (the firmware's global `keys` zone).
-    #[serde(default = "default_creator_micro_base_color")]
-    pub base_color: Rgb,
-    #[serde(default = "default_creator_micro_base_brightness")]
-    pub base_brightness: f32,
-    /// Ring underglow when no slot needs attention.
-    #[serde(default = "default_creator_micro_ring_color")]
-    pub ring_color: Rgb,
-    #[serde(default = "default_creator_micro_ring_brightness")]
-    pub ring_brightness: f32,
-    #[serde(default = "default_creator_micro_ring_motion")]
-    pub ring_motion: Motion,
-    /// When true the ring adopts the worst state's theme colour. Off by default
-    /// so the Rex layer keeps its hot pink identity and uses state only for
-    /// brightness and animation.
-    #[serde(default = "default_creator_micro_ring_follows_state_color")]
-    pub ring_follows_state_color: bool,
-}
-
-fn default_creator_micro_ring_follows_state_color() -> bool {
-    false
-}
-
-fn default_creator_micro_slots() -> Vec<u8> {
-    vec![6, 7, 8, 9, 10, 11]
-}
-
-fn default_creator_micro_base_color() -> Rgb {
-    Rgb {
-        red: 0xB3,
-        green: 0x66,
-        blue: 0xFF,
-    }
-}
-
-fn default_creator_micro_base_brightness() -> f32 {
-    0.45
-}
-
-fn default_creator_micro_ring_color() -> Rgb {
-    Rgb {
-        red: 0xFF,
-        green: 0x49,
-        blue: 0x75,
-    }
-}
-
-fn default_creator_micro_ring_brightness() -> f32 {
-    0.5
-}
-
-fn default_creator_micro_ring_motion() -> Motion {
-    Motion::Breathe
-}
-
-impl Default for CreatorMicroConfig {
-    fn default() -> Self {
-        Self {
-            slots: default_creator_micro_slots(),
-            base_color: default_creator_micro_base_color(),
-            base_brightness: default_creator_micro_base_brightness(),
-            ring_color: default_creator_micro_ring_color(),
-            ring_brightness: default_creator_micro_ring_brightness(),
-            ring_motion: default_creator_micro_ring_motion(),
-            ring_follows_state_color: default_creator_micro_ring_follows_state_color(),
-        }
-    }
-}
-
-impl CreatorMicroConfig {
     pub fn validate(&self) -> Result<()> {
-        if self.slots.len() != 6 {
-            bail!("outputs.creator_micro.slots must list exactly six AG slot ids");
+        if self.enabled && self.cli.is_empty() {
+            bail!("herdr.cli must name an executable");
         }
-        let mut seen = BTreeSet::new();
-        for slot in &self.slots {
-            if *slot > 31 {
-                bail!("outputs.creator_micro.slots contains AG id {slot} above 31");
+        if let SessionsConfig::Named(names) = &self.sessions {
+            let unique: BTreeSet<_> = names.iter().collect();
+            if names.is_empty() || unique.len() != names.len() || names.iter().any(String::is_empty)
+            {
+                bail!("herdr.sessions must contain unique non-empty names");
             }
-            if !seen.insert(*slot) {
-                bail!("outputs.creator_micro.slots contains duplicate AG id {slot}");
-            }
-        }
-        if !(0.0..=1.0).contains(&self.base_brightness) {
-            bail!("outputs.creator_micro.base_brightness must be between 0.0 and 1.0");
-        }
-        if !(0.0..=1.0).contains(&self.ring_brightness) {
-            bail!("outputs.creator_micro.ring_brightness must be between 0.0 and 1.0");
         }
         Ok(())
     }
 }
 
-/// One trusted external program that consumes Beckon render snapshots.
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ProcessOutputPlugin {
-    /// Stable name used in diagnostics. IDs share a namespace with built-in
-    /// adapters and use lowercase kebab-case.
     pub id: String,
-    /// Executable followed by arguments. Beckon never evaluates this through
-    /// a shell.
     pub command: Vec<String>,
 }
-
-/// Selects built-in and out-of-process display integrations. An empty
-/// configuration is valid for navigation-only installations.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OutputConfig {
-    #[serde(default = "default_output_adapters")]
-    pub adapters: Vec<OutputAdapter>,
-    #[serde(default)]
     pub plugins: Vec<ProcessOutputPlugin>,
-    #[serde(default)]
-    pub creator_micro: CreatorMicroConfig,
-}
-
-impl Default for OutputConfig {
-    fn default() -> Self {
-        Self {
-            adapters: default_output_adapters(),
-            plugins: Vec::new(),
-            creator_micro: CreatorMicroConfig::default(),
-        }
-    }
-}
-
-impl OutputConfig {
-    pub fn validate(&self) -> Result<()> {
-        self.creator_micro.validate()?;
-        let mut seen = std::collections::BTreeSet::<&str>::new();
-        for adapter in &self.adapters {
-            if !seen.insert(adapter.name()) {
-                bail!(
-                    "outputs.adapters contains duplicate adapter {}",
-                    adapter.name()
-                );
-            }
-        }
-
-        for plugin in &self.plugins {
-            if !valid_plugin_id(&plugin.id) {
-                bail!(
-                    "outputs.plugins id {:?} must use lowercase kebab-case",
-                    plugin.id
-                );
-            }
-            if !seen.insert(&plugin.id) {
-                bail!("outputs contains duplicate id {}", plugin.id);
-            }
-            if plugin
-                .command
-                .first()
-                .is_none_or(|value| value.trim().is_empty())
-            {
-                bail!(
-                    "outputs.plugins entry {} must contain an executable in command",
-                    plugin.id
-                );
-            }
-        }
-        Ok(())
-    }
-
-    pub fn ids(&self) -> Vec<&str> {
-        self.adapters
-            .iter()
-            .map(|adapter| adapter.name())
-            .chain(self.plugins.iter().map(|plugin| plugin.id.as_str()))
-            .collect()
-    }
-}
-
-fn valid_plugin_id(id: &str) -> bool {
-    let mut characters = id.chars();
-    matches!(characters.next(), Some('a'..='z'))
-        && characters.all(|character| {
-            character.is_ascii_lowercase() || character.is_ascii_digit() || character == '-'
-        })
-}
-
-fn default_output_adapters() -> Vec<OutputAdapter> {
-    vec![OutputAdapter::Glove80Usb]
-}
-
-/// Selects the physical source that invokes Beckon's logical F1 through F10
-/// bindings. This affects navigation only; displays remain independently
-/// configured under `[display]`.
-#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
-#[serde(rename_all = "kebab-case")]
-pub enum InputProfile {
-    /// Glove80's Beckon layer: F16-F20 and Shift+F16-F20. This deliberately
-    /// avoids colliding with macOS's normal function-key behavior.
-    #[default]
-    Glove80,
-    /// The MacBook's physical F1-F10 row. macOS must be configured to emit
-    /// standard function keys before this profile can receive them.
-    MacbookFunctionKeys,
-}
-
-impl InputProfile {
-    /// Stable configuration and diagnostic name for this physical source.
-    pub const fn name(self) -> &'static str {
-        match self {
-            Self::Glove80 => "glove80",
-            Self::MacbookFunctionKeys => "macbook-function-keys",
-        }
-    }
-}
-
-#[derive(Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct InputConfig {
-    /// Compatibility spelling for selecting exactly one profile. New
-    /// configurations should use `profiles` so multiple physical keyboards
-    /// can activate the same logical Beckon slots concurrently.
-    #[serde(default)]
-    profile: Option<InputProfile>,
-    /// Physical input profiles to enable together. Their shortcuts must be
-    /// distinct, but profiles may map those shortcuts to the same logical
-    /// Beckon slots.
-    #[serde(default)]
-    profiles: Option<Vec<InputProfile>>,
-}
-
-impl InputConfig {
-    /// Resolves the enabled physical input profiles.
-    ///
-    /// Leaving `[input]` absent preserves the original Glove80-only behavior.
-    /// `profile` remains supported for existing configurations, while
-    /// `profiles` permits multiple sources such as a desktop Glove80 and a
-    /// mobile MacBook keyboard.
-    pub fn enabled_profiles(&self) -> Result<Vec<InputProfile>> {
-        if self.profile.is_some() && self.profiles.is_some() {
-            bail!(
-                "input.profile and input.profiles cannot be used together; use input.profiles for multiple inputs"
-            );
-        }
-
-        let profiles = match (self.profile, &self.profiles) {
-            (Some(profile), None) => vec![profile],
-            (None, None) => vec![InputProfile::default()],
-            (None, Some(profiles)) => profiles.clone(),
-            (Some(_), Some(_)) => unreachable!("mixed input configuration is rejected above"),
-        };
-
-        if profiles.is_empty() {
-            bail!("input.profiles must enable at least one profile");
-        }
-
-        let mut seen = std::collections::BTreeSet::new();
-        for profile in &profiles {
-            if !seen.insert(*profile) {
-                bail!(
-                    "input.profiles contains duplicate profile {}",
-                    profile.name()
-                );
-            }
-        }
-        Ok(profiles)
-    }
-}
-
-/// Deliberately opt-in actions that can send input to a bound pane.
-///
-/// Beckon's default remains display and navigation only. A user must enable an
-/// action explicitly because it can have effects inside an agent session.
-#[derive(Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ActionsConfig {
-    #[serde(default)]
-    pub confirm: ConfirmConfig,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct ActionsConfig {
+    pub confirm: ConfirmConfig,
+}
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ConfirmConfig {
-    #[serde(default)]
     pub enabled: bool,
-    #[serde(default = "default_repeat_press_ms")]
     pub repeat_press_ms: u64,
-    #[serde(default = "default_confirm_keys")]
     pub keys: Vec<String>,
 }
-
-impl Default for ConfirmConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            repeat_press_ms: default_repeat_press_ms(),
-            keys: default_confirm_keys(),
-        }
-    }
-}
-
-fn default_repeat_press_ms() -> u64 {
-    750
-}
-
-fn default_confirm_keys() -> Vec<String> {
-    vec!["enter".into()]
-}
-
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FocusConfig {
-    /// Executable followed by arguments. It runs before `herdr agent focus`.
     pub command: Option<Vec<String>>,
-}
-
-/// Compatibility reader for config version 1. Version 1 had no named themes;
-/// the fields are applied to a generated `legacy-v1` theme at load time so an
-/// existing installation keeps working until its owner chooses to migrate.
-#[derive(Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ConfigV1 {
-    #[serde(rename = "config_version")]
-    _config_version: u32,
-    #[serde(default)]
-    focus: FocusConfig,
-    #[serde(default)]
-    display: LegacyDisplayConfig,
-}
-
-#[derive(Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct LegacyDisplayConfig {
-    #[serde(default)]
-    states: LegacyStateTreatments,
-    // V1 used per-key identity colors. Themes intentionally use one semantic
-    // treatment per state, so preserve the field while ignoring it here.
-    #[serde(default)]
-    #[serde(rename = "keys")]
-    _keys: Vec<toml::Value>,
-}
-
-#[derive(Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct LegacyStateTreatments {
-    #[serde(default)]
-    idle: LegacyStateTreatment,
-    #[serde(default)]
-    working: LegacyStateTreatment,
-    #[serde(default)]
-    blocked: LegacyStateTreatment,
-    #[serde(default)]
-    done: LegacyStateTreatment,
-    #[serde(default)]
-    unknown: LegacyStateTreatment,
-}
-
-#[derive(Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct LegacyStateTreatment {
-    brightness: Option<f32>,
-    motion: Option<Motion>,
-    #[serde(alias = "colour")]
-    color: Option<Rgb>,
-}
-
-impl ConfigV1 {
-    fn upgrade(self) -> Config {
-        let mut display = DisplayConfig::default();
-        let mut theme = display
-            .selected_theme()
-            .expect("built-in default theme must exist");
-        apply_legacy_treatment(&mut theme.idle, self.display.states.idle);
-        apply_legacy_treatment(&mut theme.working, self.display.states.working);
-        apply_legacy_treatment(&mut theme.blocked, self.display.states.blocked);
-        apply_legacy_treatment(&mut theme.done, self.display.states.done);
-        apply_legacy_treatment(&mut theme.unknown, self.display.states.unknown);
-        display.theme = "legacy-v1".into();
-        display.themes.insert("legacy-v1".into(), theme);
-        Config {
-            config_version: CONFIG_VERSION,
-            input: InputConfig::default(),
-            outputs: OutputConfig::default(),
-            focus: self.focus,
-            display,
-            actions: ActionsConfig::default(),
-            herdr: HerdrConfig::default(),
-            terminal: TerminalConfig::default(),
-            sources: Vec::new(),
-        }
-    }
-}
-
-fn apply_legacy_treatment(target: &mut StateTreatment, legacy: LegacyStateTreatment) {
-    if let Some(brightness) = legacy.brightness {
-        target.brightness = brightness;
-    }
-    if let Some(motion) = legacy.motion {
-        target.motion = motion;
-    }
-    if let Some(color) = legacy.color {
-        target.color = color;
-    }
 }
 
 pub fn path() -> PathBuf {
@@ -653,544 +176,262 @@ pub fn initialize() -> Result<()> {
     let path = path();
     if path.exists() {
         bail!(
-            "{} already exists; Beckon will not overwrite it",
+            "{} already exists; refusing to overwrite it",
             path.display()
         );
     }
-    let directory = path.parent().expect("config path has a parent");
-    fs::create_dir_all(directory).with_context(|| format!("create {}", directory.display()))?;
-    fs::write(&path, DEFAULT_CONFIG).with_context(|| format!("write {}", path.display()))?;
-    println!("created {}", path.display());
+    fs::create_dir_all(path.parent().context("configuration directory")?)?;
+    fs::write(&path, include_str!("../templates/config.toml"))?;
+    fs::create_dir_all(path.parent().unwrap().join("config.d"))?;
+    println!(
+        "created {}; no devices enabled (copy a template into config.d/)",
+        path.display()
+    );
     Ok(())
 }
 
 pub fn load() -> Result<Config> {
-    let path = path();
-    let contents = fs::read_to_string(&path).with_context(|| {
-        format!(
-            "read {} (run `beckon init` to create a configuration template)",
-            path.display()
-        )
-    })?;
-    let config = parse(&contents).with_context(|| format!("parse {}", path.display()))?;
-    if config.config_version != CONFIG_VERSION {
+    load_at(&path())
+}
+
+pub fn load_at(path: &Path) -> Result<Config> {
+    let text = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+    // Diagnose old configs before serde reports all newly required fields.
+    let document: toml::Value = toml::from_str(&text)?;
+    if document
+        .get("config_version")
+        .and_then(toml::Value::as_integer)
+        != Some(CONFIG_VERSION as i64)
+    {
         bail!(
-            "{} has config_version {}; this Beckon version supports {}",
-            path.display(),
-            config.config_version,
-            CONFIG_VERSION
+            "{}: expected config_version = {CONFIG_VERSION}; use the v3 templates (no legacy reader)",
+            path.display()
         );
     }
-    if let Some(command) = &config.focus.command
-        && command.is_empty()
+    let mut config: Config =
+        toml::from_str(&text).with_context(|| format!("parse {}", path.display()))?;
+    config.root = path.into();
+    for argv in config
+        .sources
+        .iter_mut()
+        .flat_map(|source| [&mut source.list, &mut source.focus, &mut source.activate])
+        .chain(config.focus.command.iter_mut())
+        .chain(
+            config
+                .outputs
+                .plugins
+                .iter_mut()
+                .map(|plugin| &mut plugin.command),
+        )
     {
-        bail!("focus.command must contain an executable when set");
-    }
-    if config.actions.confirm.repeat_press_ms == 0 {
-        bail!("actions.confirm.repeat_press_ms must be greater than zero");
-    }
-    if config.actions.confirm.keys.is_empty()
-        || config
-            .actions
-            .confirm
-            .keys
-            .iter()
-            .any(|key| key.trim().is_empty())
-    {
-        bail!("actions.confirm.keys must contain one or more logical Herdr key names");
-    }
-    config.input.enabled_profiles()?;
-    config.outputs.validate()?;
-    config.display.validate()?;
-    config.herdr.validate()?;
-    let mut ids = std::collections::BTreeSet::new();
-    for source in &config.sources {
-        source.validate()?;
-        if !ids.insert(source.id.as_str()) {
-            bail!("sources contains duplicate id {:?}", source.id);
-        }
-        if source.id == DEFAULT_SOURCE {
-            bail!(
-                "sources id {:?} is reserved for the built-in Herdr source",
-                source.id
-            );
+        for argument in argv {
+            *argument = expand_home(argument)?;
         }
     }
+    config.herdr.cli = expand_home(&config.herdr.cli)?;
+    if let Some(socket) = &mut config.herdr.socket {
+        *socket = expand_home(&socket.to_string_lossy())?.into();
+    }
+    let directory = path.parent().context("configuration directory")?;
+    config.devices = device::load(&directory.join("config.d"), &config.bindings)?;
+    config.display.keys = config
+        .bindings
+        .iter()
+        .map(|id| KeyDisplay {
+            id: id.clone(),
+            color: Rgb {
+                red: 0,
+                green: 0,
+                blue: 0,
+            },
+        })
+        .collect();
+    // Mutable presentation only. It cannot inject actions, bindings or devices.
+    let settings = directory.join("settings.toml");
+    if settings.exists() {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Settings {
+            display: crate::render::PresentationSettings,
+        }
+        let settings: Settings = toml::from_str(&fs::read_to_string(&settings)?)?;
+        if let Some(theme) = settings.display.theme {
+            config.display.theme = theme;
+        }
+        config.display.themes.extend(settings.display.themes);
+    }
+    config
+        .validate()
+        .with_context(|| format!("validate {}", path.display()))?;
     Ok(config)
 }
 
-fn parse(contents: &str) -> Result<Config> {
-    let version = toml::from_str::<toml::Value>(contents)?
-        .get("config_version")
-        .and_then(toml::Value::as_integer)
-        .ok_or_else(|| anyhow::anyhow!("config_version must be an integer"))?;
-    match version {
-        1 => Ok(toml::from_str::<ConfigV1>(contents)?.upgrade()),
-        value if value == CONFIG_VERSION as i64 => Ok(toml::from_str(contents)?),
-        other => bail!(
-            "config_version {other} is unsupported; this Beckon version supports 1 and {CONFIG_VERSION}"
-        ),
+fn expand_home(text: &str) -> Result<String> {
+    if !(text.starts_with("~/")
+        || text.contains("${HOME}")
+        || text == "$HOME"
+        || text.starts_with("$HOME/"))
+    {
+        return Ok(text.into());
     }
+    let home = env::var("HOME").context("HOME is required by a configured path")?;
+    let text = text
+        .strip_prefix("~/")
+        .map(|suffix| format!("{home}/{suffix}"))
+        .unwrap_or_else(|| text.into());
+    Ok(text
+        .replace("${HOME}", &home)
+        .strip_prefix("$HOME")
+        .map(|suffix| format!("{home}{suffix}"))
+        .unwrap_or_else(|| text.replace("${HOME}", &home)))
 }
 
-const DEFAULT_CONFIG: &str = r##"# Beckon's portable settings. Machine-specific focus behavior is optional.
-config_version = 2
+impl Config {
+    /// Only the single writer changes machine-owned presentation settings.
+    /// Structural config is never rewritten by a UI request.
+    pub fn set_theme(&mut self, name: &str) -> Result<()> {
+        device::require(
+            "theme",
+            name,
+            self.display.themes.keys().map(String::as_str),
+        )?;
+        let path = self
+            .root
+            .parent()
+            .context("configuration directory")?
+            .join("settings.toml");
+        let mut settings: toml::Value = if path.exists() {
+            toml::from_str(&fs::read_to_string(&path)?)?
+        } else {
+            toml::Value::Table(toml::Table::new())
+        };
+        let table = settings
+            .as_table_mut()
+            .context("settings must be a table")?;
+        let display = table
+            .entry("display")
+            .or_insert_with(|| toml::Value::Table(toml::Table::new()))
+            .as_table_mut()
+            .context("settings.display must be a table")?;
+        display.insert("theme".into(), toml::Value::String(name.into()));
+        let temporary = path.with_extension(format!("{}.tmp", std::process::id()));
+        use std::{io::Write, os::unix::fs::OpenOptionsExt};
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&temporary)?;
+        let result = (|| -> Result<()> {
+            file.write_all(toml::to_string(&settings)?.as_bytes())?;
+            file.sync_all()?;
+            fs::rename(&temporary, &path)?;
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(&temporary);
+        }
+        result?;
+        self.display.theme = name.into();
+        Ok(())
+    }
 
-# Run this before Beckon focuses a Herdr agent pane. Leave commented out when
-# Ghostty is already frontmost. Use an executable and its arguments, not a shell
-# string, so no shell quoting or interpolation is involved.
-# [focus]
-# command = ["/Users/you/.config/beckon/focus-ghostty"]
-
-# Select the physical input sources for Beckon's logical F1 through F10
-# bindings. The default preserves the Glove80 Beckon-layer mappings:
-# F16-F20, then Shift+F16-Shift+F20. To also navigate with the built-in
-# MacBook keyboard, uncomment this and enable "Use F1, F2, etc. keys as
-# standard function keys" in macOS Keyboard settings. Hold Fn/Globe when you
-# need the normal macOS brightness, media, or volume behavior.
-# [input]
-# profiles = ["glove80", "macbook-function-keys"]
-
-# Herdr topology. By default Beckon uses the `herdr` program from PATH, the
-# default session socket, and every live session (the default session plus
-# named sessions under ~/.config/herdr/sessions). Pin the CLI for launchd,
-# point at a nonstandard socket, or restrict management to named sessions.
-# [herdr]
-# cli = "herdr"
-# socket = "/Users/you/.config/herdr/herdr.sock"
-# sessions = "auto"  # or ["default", "agent-workspace"]
-
-# Optional terminal surface control. With a backend configured, Beckon can
-# raise the window and tab displaying a bound session before it focuses the
-# pane. Adoption is explicit: `beckon terminals` lists surfaces and
-# `beckon adopt --session <name> --terminal <handle>` records one in the state
-# directory. Defaults to "none", which keeps the focus command as the only
-# surface mechanism.
-# [terminal]
-# backend = "ghostty"
-
-
-# Select independent display outputs. The compatibility default is the
-# optional Glove80 USB LED adapter. Use an empty list for navigation without
-# any physical display; a disconnected optional adapter is not an error.
-# [outputs]
-# adapters = ["glove80-usb"]
-
-# Add trusted, long-running display plugins as argv arrays. Beckon sends a
-# versioned NDJSON stream to each plugin's stdin; it does not invoke a shell.
-# [[outputs.plugins]]
-# id = "status-log"
-# command = ["/absolute/path/to/beckon-display-log"]
-
-# Optional: repeat the same bound F key within this window after Beckon has
-# focused it to send Enter to that pane. Disabled by default because Enter can
-# confirm whatever is selected in an agent UI.
-# [actions.confirm]
-# enabled = true
-# repeat_press_ms = 750
-# keys = ["enter"]
-
-# The selected theme is resolved by Beckon and sent to the keyboard as concrete
-# colors and effects. Firmware never receives a theme name.
-[display]
-theme = "herdr"
-
-# Built-in themes are available without copying them here. Defining a theme in
-# this file adds a new name or replaces a built-in theme of the same name.
-# Every theme defines every state so a status is never ambiguous.
-[display.themes.herdr]
-idle    = { color = "#3BA0FF", brightness = 0.2, motion = "steady" }
-working = { color = "#F9E2AF", brightness = 0.6, motion = "breathe" }
-blocked = { color = "#F38BA8", brightness = 0.8, motion = "pulse" }
-done    = { color = "#A6E3A1", brightness = 0.8, motion = "steady" }
-unknown = { color = "#6C7086", brightness = 0.3, motion = "flicker" }
-"##;
+    pub fn validate(&self) -> Result<()> {
+        if self.config_version != CONFIG_VERSION {
+            bail!("unsupported configuration version");
+        }
+        let mut names = BTreeSet::new();
+        for key in &self.bindings {
+            if !device::valid_id(key) || !names.insert(key) {
+                bail!("bindings must have unique valid names; found {key:?}");
+            }
+        }
+        self.display.validate()?;
+        self.herdr.validate()?;
+        if self
+            .focus
+            .command
+            .as_ref()
+            .is_some_and(|args| args.first().is_none_or(|arg| arg.is_empty()))
+        {
+            bail!("focus.command requires an executable");
+        }
+        if self.actions.confirm.repeat_press_ms == 0 || self.actions.confirm.keys.is_empty() {
+            bail!("confirm requires positive repeat_press_ms and keys");
+        }
+        let mut sources = BTreeSet::new();
+        if self.herdr.enabled {
+            sources.insert("herdr");
+        }
+        for source in &self.sources {
+            source.validate()?;
+            if source.id == "herdr" {
+                bail!(
+                    "source id 'herdr' is reserved for the built-in integration; use [herdr] to enable it"
+                );
+            }
+            if !sources.insert(&source.id) {
+                bail!("duplicate source {:?}", source.id);
+            }
+        }
+        let mut outputs = BTreeSet::new();
+        let mut hardware = BTreeSet::new();
+        for device in &self.devices {
+            device
+                .validate(&self.bindings)
+                .with_context(|| format!("{}", device.path.display()))?;
+            device::require(
+                "adapter",
+                &device.definition.adapter,
+                ["creator-micro", "hotkeys", "glove80"].into_iter(),
+            )?;
+            if device.definition.adapter != "hotkeys"
+                && !hardware.insert(&device.definition.adapter)
+            {
+                bail!(
+                    "multiple {:?} instances need hardware selectors, which are not implemented; refusing two writers for one endpoint",
+                    device.definition.adapter
+                );
+            }
+            match device.definition.adapter.as_str() {
+                "creator-micro" => crate::creator_micro::validate_device(device, &sources)
+                    .with_context(|| format!("{}", device.path.display()))?,
+                "hotkeys" | "glove80" => crate::input::validate_device(device)
+                    .with_context(|| format!("{}", device.path.display()))?,
+                other => bail!(
+                    "{}: unknown adapter {other:?}; available: creator-micro, hotkeys, glove80",
+                    device.path.display()
+                ),
+            }
+            outputs.insert(device.id.as_str());
+        }
+        for plugin in &self.outputs.plugins {
+            if !device::valid_id(&plugin.id)
+                || !outputs.insert(&plugin.id)
+                || plugin.command.first().is_none_or(|v| v.is_empty())
+            {
+                bail!("invalid/duplicate output plugin {:?}", plugin.id);
+            }
+        }
+        crate::input::ConfiguredInput::plan(&self.devices)?;
+        Ok(())
+    }
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
     #[test]
-    fn upgrades_a_v1_state_override_into_a_named_theme() {
-        let config = parse(
-            r##"
-config_version = 1
-[display.states.working]
-brightness = 0.4
-motion = "pulse"
-colour = "#112233"
-"##,
-        )
-        .unwrap();
-        assert_eq!(config.display.theme, "legacy-v1");
-        let theme = config.display.selected_theme().unwrap();
-        assert_eq!(theme.working.brightness, 0.4);
-        assert_eq!(theme.working.motion, Motion::Pulse);
-        assert_eq!(theme.working.color.to_string(), "#112233");
-        assert!(!config.actions.confirm.enabled);
+    fn template_has_no_implicit_devices_or_sources() {
+        let config: Config = toml::from_str(include_str!("../templates/config.toml")).unwrap();
+        config.validate().unwrap();
+        assert!(config.devices.is_empty() && config.sources.is_empty() && !config.herdr.enabled);
     }
-
     #[test]
-    fn confirmation_is_disabled_unless_explicitly_enabled() {
-        let config = parse("config_version = 2").unwrap();
-        assert_eq!(
-            config.input.enabled_profiles().unwrap(),
-            [InputProfile::Glove80]
-        );
-        assert_eq!(config.outputs.adapters, [OutputAdapter::Glove80Usb]);
-        assert!(!config.actions.confirm.enabled);
-        assert_eq!(config.actions.confirm.repeat_press_ms, 750);
-        assert_eq!(config.actions.confirm.keys, ["enter"]);
-    }
-
-    #[test]
-    fn allows_navigation_without_a_display_output() {
-        let config = parse(
-            r#"
-config_version = 2
-[outputs]
-adapters = []
-"#,
-        )
-        .unwrap();
-
-        assert!(config.outputs.adapters.is_empty());
-        assert!(config.outputs.plugins.is_empty());
-    }
-
-    #[test]
-    fn rejects_duplicate_display_outputs() {
-        let config = parse(
-            r#"
-config_version = 2
-[outputs]
-adapters = ["glove80-usb", "glove80-usb"]
-"#,
-        )
-        .unwrap();
-        let error = config.outputs.validate().unwrap_err();
-
-        assert!(error.to_string().contains("duplicate adapter glove80-usb"));
-    }
-
-    #[test]
-    fn parses_process_display_plugin() {
-        let config = parse(
-            r#"
-config_version = 2
-[outputs]
-adapters = []
-
-[[outputs.plugins]]
-id = "status-log"
-command = ["/usr/bin/tee", "/tmp/beckon.ndjson"]
-"#,
-        )
-        .unwrap();
-
-        config.outputs.validate().unwrap();
-        assert_eq!(config.outputs.ids(), ["status-log"]);
-        assert_eq!(
-            config.outputs.plugins[0].command,
-            ["/usr/bin/tee", "/tmp/beckon.ndjson"]
-        );
-    }
-
-    #[test]
-    fn rejects_invalid_or_colliding_process_display_plugins() {
-        for (contents, expected) in [
-            (
-                r#"
-config_version = 2
-[[outputs.plugins]]
-id = "Status Log"
-command = ["logger"]
-"#,
-                "lowercase kebab-case",
-            ),
-            (
-                r#"
-config_version = 2
-[[outputs.plugins]]
-id = "glove80-usb"
-command = ["logger"]
-"#,
-                "duplicate id glove80-usb",
-            ),
-            (
-                r#"
-config_version = 2
-[outputs]
-adapters = []
-[[outputs.plugins]]
-id = "status-log"
-command = ["logger"]
-[[outputs.plugins]]
-id = "status-log"
-command = ["logger"]
-"#,
-                "duplicate id status-log",
-            ),
-            (
-                r#"
-config_version = 2
-[[outputs.plugins]]
-id = "status-log"
-command = []
-"#,
-                "must contain an executable",
-            ),
-        ] {
-            let config = parse(contents).unwrap();
-            let error = config.outputs.validate().unwrap_err();
-            assert!(error.to_string().contains(expected), "{error:#}");
-        }
-    }
-
-    #[test]
-    fn confirmation_allows_a_user_selected_logical_key_sequence() {
-        let config = parse(
-            r#"
-config_version = 2
-[actions.confirm]
-enabled = true
-keys = ["ctrl+c"]
-"#,
-        )
-        .unwrap();
-        assert_eq!(config.actions.confirm.keys, ["ctrl+c"]);
-    }
-
-    #[test]
-    fn parses_opt_in_macbook_function_key_input() {
-        let config = parse(
-            r#"
-config_version = 2
-[input]
-profile = "macbook-function-keys"
-"#,
-        )
-        .unwrap();
-
-        assert_eq!(
-            config.input.enabled_profiles().unwrap(),
-            [InputProfile::MacbookFunctionKeys]
-        );
-    }
-
-    #[test]
-    fn enables_glove80_and_macbook_inputs_together() {
-        let config = parse(
-            r#"
-config_version = 2
-[input]
-profiles = ["glove80", "macbook-function-keys"]
-"#,
-        )
-        .unwrap();
-
-        assert_eq!(
-            config.input.enabled_profiles().unwrap(),
-            [InputProfile::Glove80, InputProfile::MacbookFunctionKeys]
-        );
-    }
-
-    #[test]
-    fn rejects_ambiguous_or_duplicate_input_profiles() {
-        let mixed = parse(
-            r#"
-config_version = 2
-[input]
-profile = "glove80"
-profiles = ["macbook-function-keys"]
-"#,
-        )
-        .unwrap();
-        assert!(mixed.input.enabled_profiles().is_err());
-
-        let duplicate = parse(
-            r#"
-config_version = 2
-[input]
-profiles = ["glove80", "glove80"]
-"#,
-        )
-        .unwrap();
-        assert!(duplicate.input.enabled_profiles().is_err());
-
-        let empty = parse(
-            r#"
-config_version = 2
-[input]
-profiles = []
-"#,
-        )
-        .unwrap();
-        assert!(empty.input.enabled_profiles().is_err());
-    }
-
-    #[test]
-    fn rejects_unknown_config_versions() {
-        assert!(parse("config_version = 9").is_err());
-    }
-
-    #[test]
-    fn herdr_defaults_manage_every_live_session() {
-        let config = parse("config_version = 2").unwrap();
-        config.herdr.validate().unwrap();
-
-        assert_eq!(config.herdr.cli, "herdr");
-        assert!(config.herdr.socket.is_none());
-        assert!(config.herdr.allowed_sessions().is_none());
-    }
-
-    #[test]
-    fn herdr_session_allowlist_is_explicit() {
-        let config = parse(
-            r#"
-config_version = 2
-[herdr]
-sessions = ["default", "agent-workspace"]
-"#,
-        )
-        .unwrap();
-        config.herdr.validate().unwrap();
-
-        assert_eq!(
-            config.herdr.allowed_sessions(),
-            Some(["default".to_string(), "agent-workspace".to_string()].as_slice())
-        );
-    }
-
-    #[test]
-    fn herdr_rejects_duplicate_or_empty_session_lists() {
-        for (contents, expected) in [
-            (
-                r#"
-config_version = 2
-[herdr]
-sessions = ["default", "default"]
-"#,
-                "duplicate session default",
-            ),
-            (
-                r#"
-config_version = 2
-[herdr]
-sessions = []
-"#,
-                "at least one session",
-            ),
-            (
-                r#"
-config_version = 2
-[herdr]
-sessions = ["  "]
-"#,
-                "empty session names",
-            ),
-        ] {
-            let config = parse(contents).unwrap();
-            let error = config.herdr.validate().unwrap_err();
-            assert!(error.to_string().contains(expected), "{error:#}");
-        }
-    }
-
-    #[test]
-    fn herdr_rejects_unknown_keys() {
-        assert!(parse("config_version = 2\n[herdr]\nunknown = 1\n").is_err());
-    }
-
-    #[test]
-    fn terminal_backend_defaults_to_none_and_accepts_registry_names() {
-        let default = parse("config_version = 2").unwrap();
-        assert_eq!(default.terminal.backend, TerminalBackendKind::None);
-
-        let ghostty = parse(
-            r#"
-config_version = 2
-[terminal]
-backend = "ghostty"
-"#,
-        )
-        .unwrap();
-        assert_eq!(
-            ghostty.terminal.backend,
-            TerminalBackendKind::GhosttyAppleScript
-        );
-        assert_eq!(ghostty.terminal.backend.name(), "ghostty");
-    }
-
-    #[test]
-    fn terminal_rejects_unknown_backends_and_keys() {
-        assert!(
-            parse("config_version = 2\n[terminal]\nbackend = \"tmux\"\n").is_err(),
-            "unregistered backend names must fail validation"
-        );
-        assert!(parse("config_version = 2\n[terminal]\nsurfaces = []\n").is_err());
-    }
-
-    #[test]
-    fn herdr_accepts_a_pinned_cli_and_socket() {
-        let config = parse(
-            r#"
-config_version = 2
-[herdr]
-cli = "/nix/store/herdr/bin/herdr"
-socket = "/tmp/custom-herdr.sock"
-"#,
-        )
-        .unwrap();
-        config.herdr.validate().unwrap();
-
-        assert_eq!(config.herdr.cli, "/nix/store/herdr/bin/herdr");
-        assert_eq!(
-            config.herdr.socket.as_deref(),
-            Some(std::path::Path::new("/tmp/custom-herdr.sock"))
-        );
-    }
-
-    #[test]
-    fn creator_micro_defaults_outside_chatgpt_slot_range() {
-        let config = parse("config_version = 2").unwrap();
-        assert_eq!(config.outputs.creator_micro.slots, vec![6, 7, 8, 9, 10, 11]);
-        config.outputs.creator_micro.validate().unwrap();
-    }
-
-    #[test]
-    fn creator_micro_rejects_bad_slot_lists() {
-        let too_few = parse(
-            r#"
-config_version = 2
-[outputs.creator_micro]
-slots = [6, 7]
-"#,
-        )
-        .unwrap();
-        assert!(too_few.outputs.validate().is_err());
-
-        let duplicate = parse(
-            r#"
-config_version = 2
-[outputs.creator_micro]
-slots = [6, 7, 8, 9, 10, 10]
-"#,
-        )
-        .unwrap();
-        assert!(duplicate.outputs.validate().is_err());
-    }
-
-    #[test]
-    fn creator_micro_adapter_is_a_valid_selection() {
-        let config = parse(
-            r#"
-config_version = 2
-[outputs]
-adapters = ["glove80-usb", "creator-micro-usb"]
-"#,
-        )
-        .unwrap();
-        assert_eq!(config.outputs.adapters.len(), 2);
-        assert_eq!(config.outputs.adapters[1].name(), "creator-micro-usb");
+    fn unknown_fields_and_versions_fail() {
+        let text = include_str!("../templates/config.toml");
+        assert!(toml::from_str::<Config>(&format!("typo=true\n{text}")).is_err());
+        let mut config: Config = toml::from_str(text).unwrap();
+        config.config_version = 2;
+        assert!(config.validate().is_err());
     }
 }

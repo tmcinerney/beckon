@@ -3,7 +3,7 @@ use std::{collections::BTreeMap, fmt, str::FromStr};
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 
-use crate::core::{Agent, Binding, KEY_IDS};
+use crate::core::{Agent, Binding};
 
 /// A host-independent LED instruction. Firmware transports this later; it is
 /// deliberately not coupled to HID reports or keyboard-specific coordinates.
@@ -86,7 +86,7 @@ pub enum AgentState {
 }
 
 impl AgentState {
-    pub fn from_herdr(status: &str) -> Self {
+    pub fn from_status(status: &str) -> Self {
         match status.trim().to_ascii_lowercase().as_str() {
             "idle" => Self::Idle,
             "working" => Self::Working,
@@ -129,20 +129,27 @@ pub struct StateTreatments {
 pub struct DisplayConfig {
     /// A user-visible name, resolved only on the host. The firmware receives
     /// concrete treatments and therefore has no knowledge of named themes.
-    #[serde(default = "default_theme_name")]
     pub theme: String,
     /// User-defined themes overlay the built-in themes of the same name.
-    #[serde(default)]
     pub themes: BTreeMap<String, StateTreatments>,
-    #[serde(default = "default_keys")]
+    #[serde(skip)]
     pub keys: Vec<KeyDisplay>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PresentationSettings {
+    pub theme: Option<String>,
+    #[serde(default)]
+    pub themes: BTreeMap<String, StateTreatments>,
+}
+
+#[cfg(test)]
 impl Default for DisplayConfig {
     fn default() -> Self {
         Self {
             theme: default_theme_name(),
-            themes: BTreeMap::new(),
+            themes: built_in_themes(),
             keys: default_keys(),
         }
     }
@@ -150,23 +157,14 @@ impl Default for DisplayConfig {
 
 impl DisplayConfig {
     pub fn validate(&self) -> Result<()> {
-        if self.keys.len() != KEY_IDS.len() {
-            bail!("display.keys must configure exactly ten Beckon keys");
-        }
         let configured = self
             .keys
             .iter()
             .map(|key| key.id.as_str())
             .collect::<Vec<_>>();
-        for key in KEY_IDS {
-            if configured
-                .iter()
-                .filter(|configured_key| **configured_key == key)
-                .count()
-                != 1
-            {
-                bail!("display.keys must configure {key} exactly once");
-            }
+        let unique: std::collections::BTreeSet<_> = configured.iter().collect();
+        if unique.len() != configured.len() {
+            bail!("display keys must be unique");
         }
         let theme = self.selected_theme()?;
         for (name, treatment) in state_treatments(theme) {
@@ -182,8 +180,7 @@ impl DisplayConfig {
     }
 
     pub fn selected_theme(&self) -> Result<StateTreatments> {
-        let mut themes = built_in_themes();
-        themes.extend(self.themes.clone());
+        let mut themes = self.themes.clone();
         themes.remove(&self.theme).ok_or_else(|| {
             anyhow::anyhow!(
                 "display.theme {:?} is not defined; available themes: {}",
@@ -240,6 +237,7 @@ fn state_treatments(theme: StateTreatments) -> [(&'static str, StateTreatment); 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct KeyRender {
     pub key: String,
+    pub source: Option<String>,
     pub state: Option<AgentState>,
     pub color: Rgb,
     pub brightness: f32,
@@ -289,10 +287,17 @@ pub fn render(display: &DisplayConfig, bindings: &[(Binding, Agent)]) -> Result<
         .iter()
         .map(|key| match panes_by_key.get(key.id.as_str()) {
             Some(pane) => {
-                render_state(&key.id, AgentState::from_herdr(&pane.agent_status), display)
+                let mut render = render_state(
+                    &key.id,
+                    AgentState::from_status(&pane.agent_status),
+                    display,
+                );
+                render.source = Some(pane.source.clone());
+                render
             }
             None => KeyRender {
                 key: key.id.clone(),
+                source: None,
                 state: None,
                 color: key.color,
                 brightness: 0.0,
@@ -345,6 +350,7 @@ pub fn demo_plan(display: &DisplayConfig) -> Result<RenderPlan> {
             Some(state) => render_state(&key.id, state, display),
             None => KeyRender {
                 key: key.id.clone(),
+                source: None,
                 state: None,
                 color: key.color,
                 brightness: 0.0,
@@ -359,6 +365,7 @@ fn render_state(key: &str, state: AgentState, display: &DisplayConfig) -> KeyRen
     let treatment = display.treatment(state).expect("validated display theme");
     KeyRender {
         key: key.to_string(),
+        source: None,
         state: Some(state),
         color: treatment.color,
         brightness: treatment.brightness,
@@ -366,6 +373,7 @@ fn render_state(key: &str, state: AgentState, display: &DisplayConfig) -> KeyRen
     }
 }
 
+#[cfg(test)]
 fn default_keys() -> Vec<KeyDisplay> {
     [
         ("f1", "#3BA0FF"),
@@ -387,10 +395,12 @@ fn default_keys() -> Vec<KeyDisplay> {
     .collect()
 }
 
+#[cfg(test)]
 fn default_theme_name() -> String {
     "herdr".into()
 }
 
+#[cfg(test)]
 fn built_in_themes() -> BTreeMap<String, StateTreatments> {
     [
         ("herdr".into(), herdr_theme()),
@@ -400,6 +410,7 @@ fn built_in_themes() -> BTreeMap<String, StateTreatments> {
     .collect()
 }
 
+#[cfg(test)]
 fn herdr_theme() -> StateTreatments {
     StateTreatments {
         idle: StateTreatment {
@@ -430,6 +441,7 @@ fn herdr_theme() -> StateTreatments {
     }
 }
 
+#[cfg(test)]
 fn catppuccin_mocha_theme() -> StateTreatments {
     herdr_theme()
 }
@@ -502,9 +514,11 @@ mod tests {
     }
 
     #[test]
-    fn rejects_incomplete_key_configuration() {
+    fn accepts_arbitrary_counts_but_rejects_duplicate_keys() {
         let mut display = DisplayConfig::default();
         display.keys.pop();
+        assert!(display.validate().is_ok());
+        display.keys.push(display.keys[0].clone());
         assert!(display.validate().is_err());
     }
 }

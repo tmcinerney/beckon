@@ -1,6 +1,12 @@
 # Beckon v1 design: clean break, explicit config, portable device model
 
-Status: design note, not yet implemented. This replaces the incremental
+Status: historical broader design. The implemented config-v3 device/action slice
+is documented in [configuration.md](configuration.md); it uses `config.d/`,
+per-device local actions/effects, explicit key groups and a global ordered binding
+list. The envelope/slot/route sketches below are not the runtime schema. The
+broader Target-model rewrite and Glove80 firmware redesign remain deferred.
+
+This replaces the incremental
 adapter-architecture plan in `adapter-architecture.md` where the two disagree.
 
 ## Ground rules
@@ -246,19 +252,22 @@ So all 13 physical keys have an OAI id there; the first six are "agent keys"
 Delta, Rex) have plain keycodes in the saved copy. The Rex layer's `AG06`..`AG11`
 exists only on the device, written during our test.
 
-Per the vendor `OAIProtocol.swift`, the id space is:
+The id space was measured on the device; see
+[creator-micro-2-hardware.md](creator-micro-2-hardware.md) for the evidence and
+the validation traps.
 
-| Ids | Control | Lights? |
-|---|---|---|
-| 0-12 | 13 physical keys (`AG` or `ACT` keycodes) | yes |
-| 13-14 | dial detents (clockwise / counter-clockwise) | **no** ("nothing is under them") |
-| 15-18 | joystick cardinal sectors | **no** |
-| `v.oai.rad` | joystick angle + distance (continuous) | n/a |
+| Ids | Status |
+|---|---|
+| 0-5 | reserved for the ChatGPT layer; firmware rejects these keycodes elsewhere |
+| 6-18 | usable, 13 ids — one per physical key, all colourable |
+| 19+ | **not addressable** — accepted by `put`, but the key keeps the base colour |
 
-`AG` vs `ACT` is a keycode-family distinction, not a different id space. An
-`ACT06` key presumably reports as `v.oai.hid` and maps to thstatus id 6, but
-that is **unverified**; only `AG06`..`AG11` have been proven. Verify before
-relying on `ACT` ids.
+An earlier revision of this section claimed ids 13-18 were dial detents and
+joystick sectors with no lights. That was wrong: all 13 keys light, and the
+ceiling is 18. There is no per-layer id block — 13 ids for 13 keys means a second
+layer must reuse `AG06`-`AG18`, which is why the Creator Micro adapter tracks the
+active layer. `ACT` vs `AG` is a keycode-family distinction, not a separate id
+space; whether `ACT06`-`ACT12` report as slots 6-12 is still **unverified**.
 
 Therefore:
 

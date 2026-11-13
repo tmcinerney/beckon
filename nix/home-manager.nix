@@ -50,28 +50,24 @@ in
       settings = mkOption {
         type = toml.type;
         default = { };
-        example = {
-          input.profiles = [
-            "glove80"
-            "macbook-function-keys"
-          ];
-          outputs.adapters = [ "glove80-usb" ];
-          outputs.plugins = [
-            {
-              id = "status-log";
-              command = [
-                "/absolute/path/to/display-plugin-log.py"
-                "/tmp/beckon-display.log"
-              ];
-            }
-          ];
-          focus.command = [ "/Users/you/.config/beckon/focus-ghostty" ];
-        };
+        example = builtins.fromTOML (builtins.readFile ../templates/config.toml);
         description = ''
           Beckon configuration rendered declaratively to
           <filename>$XDG_CONFIG_HOME/beckon/config.toml</filename>. Beckon
-          supplies <literal>config_version = 2</literal>; leave this empty to
+          supplies <literal>config_version = 3</literal>; all other fields
+          must be explicit. Leave this empty to
           manage its TOML configuration outside Home Manager.
+        '';
+      };
+
+      devices = mkOption {
+        type = types.attrsOf toml.type;
+        default = { };
+        example.macbook = builtins.fromTOML (builtins.readFile ../templates/macbook.toml);
+        description = ''
+          Self-contained device definitions written to beckon/config.d/NAME.toml.
+          Names are device instance ids. Removing an entry removes that device's
+          inputs and output; action/effect references stay local to each file.
         '';
       };
     };
@@ -123,10 +119,23 @@ in
       xdg.configFile."beckon/config.toml" = {
         source = toml.generate "beckon-config.toml" (
           lib.recursiveUpdate programCfg.settings {
-            config_version = 2;
+            config_version = 3;
           }
         );
       };
+    })
+
+    (mkIf (programCfg.devices != { }) {
+      assertions = lib.mapAttrsToList (name: _: {
+        assertion = builtins.match "[a-z][a-z0-9-]*" name != null;
+        message = "Beckon device names must use lowercase kebab-case: ${name}";
+      }) programCfg.devices;
+      xdg.configFile = lib.mapAttrs' (
+        name: value:
+        lib.nameValuePair "beckon/config.d/${name}.toml" {
+          source = toml.generate "beckon-device-${name}.toml" value;
+        }
+      ) programCfg.devices;
     })
 
     (mkIf serviceCfg.enable {

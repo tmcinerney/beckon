@@ -1,0 +1,80 @@
+# Filename = device instance id. Only the adapter interprets rex/6: named
+# layer "rex", firmware agent id 6, not physical key number 6.
+adapter = "creator-micro"
+
+[options]
+refresh_ms = 400
+effect_speed = 0.5
+ring_follows_state_color = true
+base = { color = "#B366FF", brightness = 0.45, motion = "steady" }
+ring = { color = "#FF4975", brightness = 0.5, motion = "breathe" }
+
+# Profile selector and 1-based layer position reported by device.status/kb.pl.
+# Do not declare the ChatGPT layer: Beckon leaves unowned layers alone.
+[options.layers.rex]
+profile = 1
+position = 3
+source = "rex"
+
+[options.layers.test]
+profile = 1
+position = 6
+
+[keys.key1]
+members = ["creator-micro:rex/6", "creator-micro:test/6"]
+binding = "key1"
+
+[keys.key2]
+members = ["creator-micro:rex/7", "creator-micro:test/7"]
+binding = "key2"
+
+[keys.key3]
+members = ["creator-micro:rex/8", "creator-micro:test/8"]
+binding = "key3"
+
+[keys.key4]
+members = ["creator-micro:rex/9", "creator-micro:test/9"]
+binding = "key4"
+
+[keys.key5]
+members = ["creator-micro:rex/10", "creator-micro:test/10"]
+binding = "key5"
+
+[keys.key6]
+members = ["creator-micro:rex/11", "creator-micro:test/11"]
+binding = "key6"
+
+[keys.key7]
+members = ["creator-micro:test/12"]
+binding = "key7"
+
+[keys.key8]
+members = ["creator-micro:test/13"]
+binding = "key8"
+
+[keys.key9]
+members = ["creator-micro:test/14"]
+binding = "key9"
+
+[keys.key10]
+members = ["creator-micro:test/15"]
+binding = "key10"
+
+# One logical control, explicitly grouped. Either bottom key operates both.
+# Bottom-right remains KC_ENT in the device keymap; Beckon never intercepts it.
+[keys.key11]
+members = ["creator-micro:rex/16", "creator-micro:rex/17", "creator-micro:test/16", "creator-micro:test/17"]
+action = "dictate"
+effects = "dictation"
+
+# "dictate" is an arbitrary local name, not a reserved action or app integration.
+[actions.dictate]
+kind = "chord"
+keys = ["ctrl", "opt", "d"]
+mode = "tap-hold"
+tap_ms = 300
+
+[effects.dictation]
+held = { color = "#FF0000", brightness = 1.0, motion = "steady" }
+latched = { color = "#FF0000", brightness = 1.0, motion = "breathe" }
+# Absent idle treatment restores the configured binding/base rendering.

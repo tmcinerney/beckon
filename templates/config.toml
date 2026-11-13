@@ -1,0 +1,33 @@
+# No default devices or source integrations. Copy the device templates you want
+# into config.d/ and declare the binding ids they reference here, in assignment order.
+config_version = 3
+bindings = []
+sources = []
+
+[focus]
+
+[terminal]
+backend = "none"
+
+[herdr]
+enabled = false
+cli = "herdr"
+sessions = "auto"
+
+[outputs]
+plugins = []
+
+[actions.confirm]
+enabled = false
+repeat_press_ms = 750
+keys = ["enter"]
+
+[display]
+theme = "status"
+
+[display.themes.status]
+idle = { color = "#ECEFF1", brightness = 0.45, motion = "steady" }
+working = { color = "#3B82F6", brightness = 0.45, motion = "breathe" }
+blocked = { color = "#FFB020", brightness = 0.6, motion = "breathe" }
+done = { color = "#22C55E", brightness = 0.45, motion = "steady" }
+unknown = { color = "#EF4444", brightness = 0.8, motion = "pulse" }

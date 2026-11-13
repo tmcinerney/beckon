@@ -1,4 +1,4 @@
-//! Built-in Work Louder Creator Micro 2 USB display adapter.
+//! Built-in Work Louder Creator Micro 2 HID adapter (USB verified; Bluetooth unverified).
 //!
 //! The pad is addressed by **AG slot id**, not by matrix position. Per-slot
 //! state goes through `v.oai.thstatus` as overrides above the global `keys`
@@ -6,13 +6,15 @@
 //! fire-and-forget writes so a `v.oai.hid` key notification is never swallowed
 //! by a blocking reply read.
 //!
-//! AIDEV-NOTE: ChatGPT/Codex is a second, layer-agnostic HID host with exactly
-//! six slots (ids 0-5) and no concept of layers. The default slot range starts
-//! at 6 so the two integrations never write the same override. Re-assert the
-//! global `keys` zone on every publish: ChatGPT's inactivity write can darken
-//! the seven non-indicator keys, which sit on the base rather than on a slot.
+//! AIDEV-NOTE: ChatGPT is a second HID host owning ids 0-5. Config can only
+//! claim 6-18, and only on explicitly owned layers. No lighting is published
+//! on other layers. Re-assert the keys zone on owned layers because the other
+//! host can overwrite it independently of our render state.
 
-use std::time::{Duration, Instant};
+use std::{
+    collections::{BTreeMap, BTreeSet, VecDeque},
+    time::{Duration, Instant},
+};
 
 use anyhow::{Context, Result, bail};
 use hidapi::{HidApi, HidDevice};
@@ -20,8 +22,8 @@ use serde_json::{Value, json};
 use tracing::{debug, info};
 
 use crate::{
-    config::CreatorMicroConfig,
-    display::{DisplaySink, PublishOutcome},
+    device::{Address, DeviceConfig, Treatment},
+    display::{DeviceEvent, DisplaySink, PublishOutcome},
     render::{Motion, RenderPlan, Rgb},
 };
 
@@ -49,30 +51,11 @@ fn effect(motion: Motion) -> u8 {
     }
 }
 
-/// One `v.oai.hid` notification, already decoded. `key` is the firmware's
-/// keycode string; AG keys parse to a slot id, ordinary macro keys do not.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HidEvent {
-    pub key: String,
-    pub pressed: bool,
-    /// Firmware's `ag` field: the AG slot index, when the key has one.
-    pub agent: Option<u8>,
-}
-
-impl HidEvent {
-    pub fn slot(&self) -> Option<u8> {
-        self.agent.or_else(|| {
-            self.key
-                .strip_prefix("AG")
-                .and_then(|suffix| suffix.parse::<u8>().ok())
-        })
-    }
-}
-
 pub struct Pad {
     dev: HidDevice,
     next_id: i64,
     acc: String,
+    pending: VecDeque<Value>,
 }
 
 impl Pad {
@@ -86,11 +69,13 @@ impl Pad {
         api.set_open_exclusive(false);
         let candidates = api
             .device_list()
-            .filter(|info| info.vendor_id() == VENDOR_ID)
+            .filter(|info| {
+                info.vendor_id() == VENDOR_ID && matches!(info.product_id(), 0x8297 | 0x8298)
+            })
             .map(|info| (info.product_id(), info.path().to_owned()))
             .collect::<Vec<_>>();
         if candidates.is_empty() {
-            bail!("no Work Louder device on the HID bus (vendor 0x303A)");
+            bail!("no Creator Micro 2 on the HID bus (303A:8297 or 303A:8298)");
         }
 
         let mut last = String::new();
@@ -106,6 +91,7 @@ impl Pad {
                 dev,
                 next_id: 1,
                 acc: String::new(),
+                pending: VecDeque::new(),
             };
             match pad.call("sys.version", json!(null)) {
                 Ok(_) => return Ok(pad),
@@ -144,6 +130,9 @@ impl Pad {
                 continue;
             };
             if value.get("id").and_then(Value::as_i64) != Some(id) {
+                if value.get("m").is_some() {
+                    self.pending.push_back(value);
+                }
                 continue;
             }
             if let Some(err) = value.get("error") {
@@ -181,10 +170,17 @@ impl Pad {
 
     /// Read one HID report and return the next complete JSON frame, if any.
     fn take_frame(&mut self) -> Result<Option<Value>> {
+        self.read_frame_timeout(250)
+    }
+
+    fn read_frame_timeout(&mut self, timeout: i32) -> Result<Option<Value>> {
+        if let Some(frame) = take_json(&mut self.acc) {
+            return Ok(Some(frame));
+        }
         let mut buf = vec![0u8; REPORT_SIZE];
         let n = self
             .dev
-            .read_timeout(&mut buf, 250)
+            .read_timeout(&mut buf, timeout)
             .context("IOHIDDeviceGetReport failed")?;
         if n == 0 {
             return Ok(None);
@@ -196,53 +192,17 @@ impl Pad {
         Ok(take_json(&mut self.acc))
     }
 
-    /// Block briefly for a key notification. Returns `None` on timeout.
-    pub fn poll_event(&mut self) -> Result<Option<HidEvent>> {
-        self.poll_event_timeout(200)
+    /// Raw frames are decoded by the adapter so layer notifications and key
+    /// notifications preserve their wire order.
+    pub fn poll_frame(&mut self) -> Result<Option<Value>> {
+        self.poll_frame_timeout(0)
     }
 
-    /// Non-blocking variant for a shared event loop. With `timeout_ms = 0`
-    /// this returns immediately when no HID report is queued, so the daemon
-    /// can read pad presses on the same handle it uses to write lighting
-    /// without stalling its 50ms tick.
-    pub fn poll_event_timeout(&mut self, timeout_ms: i32) -> Result<Option<HidEvent>> {
-        let mut buf = vec![0u8; REPORT_SIZE];
-        let n = self
-            .dev
-            .read_timeout(&mut buf, timeout_ms)
-            .context("IOHIDDeviceGetReport failed")?;
-        if n == 0 {
-            return Ok(None);
+    pub fn poll_frame_timeout(&mut self, timeout: i32) -> Result<Option<Value>> {
+        if let Some(frame) = self.pending.pop_front() {
+            return Ok(Some(frame));
         }
-        let Some(text) = report_text(&buf[..n]) else {
-            return Ok(None);
-        };
-        self.acc.push_str(text);
-        let mut found = None;
-        while let Some(value) = take_json(&mut self.acc) {
-            if value.get("m").and_then(Value::as_str) != Some("v.oai.hid") {
-                continue;
-            }
-            let params = value.get("p");
-            let key = params
-                .and_then(|p| p.get("k"))
-                .and_then(Value::as_str)
-                .unwrap_or("");
-            if key.is_empty() {
-                continue;
-            }
-            let pressed = params.and_then(|p| p.get("act")).and_then(Value::as_i64) == Some(1);
-            let agent = params
-                .and_then(|p| p.get("ag"))
-                .and_then(Value::as_u64)
-                .map(|value| value as u8);
-            found = Some(HidEvent {
-                key: key.to_string(),
-                pressed,
-                agent,
-            });
-        }
-        Ok(found)
+        self.read_frame_timeout(timeout)
     }
 }
 
@@ -301,202 +261,567 @@ fn take_json(acc: &mut String) -> Option<Value> {
     None
 }
 
-/// One complete lighting frame: global base + ring, then six slot overrides.
-pub fn write_plan(pad: &mut Pad, plan: &RenderPlan, config: &CreatorMicroConfig) -> Result<()> {
-    // The ring reflects the worst state across the bound slots, so it agrees
-    // with every other display sink instead of inventing its own priority.
-    let (ring_color, ring_brightness, ring_motion) = match plan.worst_state() {
-        Some(state) => {
-            let treatment = plan.treatments.for_state(state);
-            // State normally drives urgency, not identity: the Rex layer keeps
-            // its hot pink ring. Opting in lets the ring adopt the worst
-            // state's theme colour instead.
-            let color = if config.ring_follows_state_color {
-                treatment.color
-            } else {
-                config.ring_color
-            };
-            (
-                color,
-                treatment.brightness.max(config.ring_brightness),
-                if state == crate::render::AgentState::Blocked {
-                    Motion::Pulse
-                } else {
-                    config.ring_motion
-                },
-            )
+#[derive(Clone, Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Layer {
+    pub profile: u16,
+    pub position: u16,
+    pub source: Option<String>,
+}
+
+#[derive(Clone, Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Options {
+    pub refresh_ms: u64,
+    pub effect_speed: f32,
+    pub base: Treatment,
+    pub ring: Treatment,
+    pub ring_follows_state_color: bool,
+    pub layers: BTreeMap<String, Layer>,
+}
+
+pub fn options(device: &DeviceConfig) -> Result<Options> {
+    toml::Value::Table(device.definition.options.clone())
+        .try_into()
+        .with_context(|| format!("{}: options", device.path.display()))
+}
+
+/// Addresses use a declared layer name plus the firmware id, e.g. rex/6.
+/// Reserved ChatGPT ids never become writable, even through configuration.
+fn parse_address<'a>(options: &'a Options, address: &str) -> Result<(&'a str, u8)> {
+    let (layer, id) = address
+        .split_once('/')
+        .context("expected layer/id (e.g. rex/6)")?;
+    let (name, _) = options
+        .layers
+        .get_key_value(layer)
+        .with_context(|| format!("unknown layer {layer:?}"))?;
+    let id: u8 = id.parse().context("agent id must be an integer")?;
+    if !(6..=18).contains(&id) {
+        bail!(
+            "id {id} is not usable; AG00–AG05 are reserved, AG19+ unaddressable on tested firmware"
+        );
+    }
+    Ok((name, id))
+}
+
+pub fn validate_device(device: &DeviceConfig, sources: &BTreeSet<&str>) -> Result<()> {
+    let options = options(device)?;
+    if options.refresh_ms == 0 {
+        bail!("refresh_ms must be positive");
+    }
+    if !(0.0..=1.0).contains(&options.effect_speed) {
+        bail!("effect_speed must be between 0 and 1 (firmware s field)");
+    }
+    options.base.validate()?;
+    options.ring.validate()?;
+    let mut selectors = BTreeSet::new();
+    for (name, layer) in &options.layers {
+        if !crate::device::valid_id(name)
+            || layer.position == 0
+            || !selectors.insert((layer.profile, layer.position))
+        {
+            bail!("layer {name}: invalid name, zero position or duplicate selector");
         }
-        None => (
-            config.ring_color,
-            config.ring_brightness,
-            config.ring_motion,
-        ),
-    };
-
-    pad.send_only(
-        "v.oai.rgbcfg",
-        json!({
-            "keys": {
-                "e": EFFECT_SOLID,
-                "b": config.base_brightness,
-                "s": 0.5,
-                "m": 1,
-                "c": rgb_u32(config.base_color),
-            },
-            "ambient": {
-                "e": effect(ring_motion),
-                "b": ring_brightness,
-                "s": 0.3,
-                "m": 0.35,
-                "c": rgb_u32(ring_color),
-            },
-        }),
-    )?;
-
-    let threads = config
-        .slots
-        .iter()
-        .zip(plan.keys.iter())
-        .map(|(slot, key)| match key.state {
-            None => json!({ "id": slot, "c": 0, "b": 0.0, "e": EFFECT_OFF, "s": 0.5 }),
-            Some(_) => json!({
-                "id": slot,
-                "c": rgb_u32(key.color),
-                "b": key.brightness,
-                "e": effect(key.motion),
-                "s": 0.5,
-            }),
-        })
-        .collect::<Vec<_>>();
-    pad.send_only("v.oai.thstatus", Value::Array(threads))
+        if let Some(source) = &layer.source {
+            crate::device::require("source", source, sources.iter().copied())?;
+        }
+    }
+    let mut addresses = BTreeSet::new();
+    for member in device.definition.keys.values().flat_map(|key| &key.members) {
+        let parsed = parse_address(&options, &member.address)
+            .with_context(|| format!("{}: {:?}", device.path.display(), member.address))?;
+        if !addresses.insert(parsed) {
+            bail!("duplicate physical address {:?}", member.address);
+        }
+    }
+    Ok(())
 }
 
-/// Turn every indicator and the ring off. Used by `creator-micro off`.
-pub fn clear(pad: &mut Pad, config: &CreatorMicroConfig) -> Result<()> {
-    pad.send_only(
-        "v.oai.rgbcfg",
-        json!({
-            "keys": { "e": EFFECT_OFF, "b": 0.0, "s": 0.5, "m": 1, "c": 0 },
-            "ambient": { "e": EFFECT_OFF, "b": 0.0, "s": 0.3, "m": 0.35, "c": 0 },
-        }),
-    )?;
-    let threads = config
-        .slots
-        .iter()
-        .map(|slot| json!({ "id": slot, "c": 0, "b": 0.0, "e": EFFECT_OFF, "s": 0.5 }))
-        .collect::<Vec<_>>();
-    pad.send_only("v.oai.thstatus", Value::Array(threads))
+/// Separate online validation: config syntax/ranges can be checked while the
+/// device is disconnected, but only its current keymap proves an id is mapped.
+pub fn validate_keymap(device: &DeviceConfig, keymap: &Value) -> Result<()> {
+    let options = options(device)?;
+    for member in device.definition.keys.values().flat_map(|key| &key.members) {
+        let (name, id) = parse_address(&options, &member.address)?;
+        let selector = &options.layers[name];
+        let profiles = keymap
+            .get("profiles")
+            .and_then(Value::as_array)
+            .context("keymap has no profiles array")?;
+        let profile = profiles
+            .iter()
+            .find(|profile| {
+                profile.get("id").and_then(Value::as_u64) == Some(selector.profile as u64)
+            })
+            .with_context(|| format!("keymap has no profile id {}", selector.profile))?;
+        let layer = profile
+            .get("layers")
+            .and_then(Value::as_array)
+            .and_then(|layers| layers.get(selector.position as usize - 1))
+            .with_context(|| format!("keymap has no layer position {}", selector.position))?;
+        let rows = layer
+            .pointer("/layout/keymap")
+            .and_then(Value::as_array)
+            .context("layer has no layout.keymap")?;
+        let code = format!("KV_OAI_AG{id:02}");
+        if !rows
+            .iter()
+            .filter_map(Value::as_array)
+            .flatten()
+            .any(|cell| cell.as_str() == Some(&code))
+        {
+            bail!(
+                "{}:{} is configured but {code} is missing from profile {}, layer position {}; update the canonical keymap and verify its readback",
+                device.id,
+                member.address,
+                selector.profile,
+                selector.position
+            );
+        }
+    }
+    Ok(())
 }
 
-/// Lazily attached pad. A missing device is `Unavailable`, never a startup or
-/// navigation failure, and reconnects on a later tick.
-pub struct CreatorMicroUsbDisplay {
-    config: CreatorMicroConfig,
+fn frame(id: u8, treatment: Option<Treatment>, speed: f32) -> Value {
+    match treatment {
+        Some(t) => {
+            json!({"id":id,"c":rgb_u32(t.color),"b":t.brightness,"e":effect(t.motion),"s":speed})
+        }
+        None => json!({"id":id,"c":0,"b":0.0,"e":EFFECT_OFF,"s":speed}),
+    }
+}
+
+/// One handle owns both input and lighting. The adapter tracks layers, then
+/// emits device-neutral addresses; the daemon never interprets a layer number.
+pub struct CreatorMicroDisplay {
+    device: DeviceConfig,
+    options: Options,
     pad: Option<Pad>,
-    last_plan: Option<RenderPlan>,
+    active: Option<String>,
+    selector: Option<(u16, u16)>,
+    last_frame: Option<(Value, Value)>,
     last_write: Option<Instant>,
-    refresh_every: Duration,
-    attached_once: bool,
+    last_try: Option<Instant>,
+    reset_pending: bool,
+    binding_sources: BTreeMap<String, String>,
+    clear_pending: Vec<u8>,
 }
 
-impl CreatorMicroUsbDisplay {
-    pub fn new(config: CreatorMicroConfig) -> Self {
-        Self {
-            config,
+impl CreatorMicroDisplay {
+    pub fn new(device: DeviceConfig) -> Result<Self> {
+        let options = options(&device)?;
+        Ok(Self {
+            device,
+            options,
             pad: None,
-            last_plan: None,
+            active: None,
+            selector: None,
+            last_frame: None,
             last_write: None,
-            refresh_every: Duration::from_secs(2),
-            attached_once: false,
+            last_try: None,
+            reset_pending: false,
+            binding_sources: BTreeMap::new(),
+            clear_pending: Vec::new(),
+        })
+    }
+
+    fn layer(&mut self, profile: u16, position: u16) {
+        let selector = Some((profile, position));
+        if self.selector != selector {
+            if let Some((_, entries)) = &self.last_frame {
+                self.clear_pending
+                    .extend(
+                        entries
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .filter_map(|entry| {
+                                entry
+                                    .get("id")
+                                    .and_then(Value::as_u64)
+                                    .and_then(|id| u8::try_from(id).ok())
+                            }),
+                    );
+            }
+            self.reset_pending = true;
+            self.last_frame = None;
+        }
+        self.selector = selector;
+        self.active = self
+            .options
+            .layers
+            .iter()
+            .find(|(_, layer)| layer.profile == profile && layer.position == position)
+            .map(|(name, _)| name.clone());
+    }
+
+    fn connect(&mut self) -> Result<bool> {
+        if self.pad.is_some() {
+            return Ok(true);
+        }
+        if self
+            .last_try
+            .is_some_and(|last| last.elapsed() < Duration::from_secs(2))
+        {
+            return Ok(false);
+        }
+        self.last_try = Some(Instant::now());
+        let Ok(mut pad) = Pad::open() else {
+            return Ok(false);
+        };
+        let status = pad.call_json("device.status", json!(null))?;
+        let profile = u16::try_from(
+            status
+                .get("profile_index")
+                .and_then(Value::as_u64)
+                .context("device.status omitted profile_index")?,
+        )?;
+        let layer = u16::try_from(
+            status
+                .get("layer_index")
+                .and_then(Value::as_u64)
+                .context("device.status omitted layer_index")?,
+        )?;
+        self.layer(profile, layer);
+        // Notifications preceding this authoritative status response describe
+        // old presses; replaying one on startup could trigger an unintended action.
+        pad.pending.clear();
+        self.pad = Some(pad);
+        info!(device = %self.device.id, "connected Creator Micro");
+        Ok(true)
+    }
+
+    fn lost(&mut self) {
+        self.pad = None;
+        self.active = None;
+        self.selector = None;
+        self.last_frame = None;
+        self.reset_pending = true;
+    }
+
+    fn decode(&mut self, value: &Value) -> Option<DeviceEvent> {
+        match value.get("m").and_then(Value::as_str)? {
+            "kb.pl" => {
+                let p = value.get("p")?;
+                let profile = u16::try_from(p.get("p")?.as_u64()?).ok()?;
+                let position = u16::try_from(p.get("l")?.as_u64()?).ok()?;
+                if self.selector == Some((profile, position)) {
+                    return None;
+                }
+                self.layer(profile, position);
+                self.reset_pending = false;
+                Some(DeviceEvent::Reset {
+                    device: self.device.id.clone(),
+                })
+            }
+            "v.oai.hid" => {
+                let p = value.get("p")?;
+                let key = p.get("k")?.as_str()?;
+                let id = key.strip_prefix("AG")?.parse::<u8>().ok()?;
+                let pressed = match p.get("act")?.as_u64()? {
+                    1 => true,
+                    0 => false,
+                    _ => return None,
+                };
+                let active = self.active.as_ref()?;
+                let address = Address {
+                    device: self.device.id.clone(),
+                    address: format!("{active}/{id}"),
+                };
+                // Match canonical addresses (6 and 06 mean the same firmware id).
+                let (key, member) = self
+                    .device
+                    .definition
+                    .keys
+                    .values()
+                    .flat_map(|key| key.members.iter().map(move |member| (key, member)))
+                    .find(|(_, member)| {
+                        parse_address(&self.options, &member.address).ok()
+                            == Some((active.as_str(), id))
+                    })?;
+                if let (Some(binding), Some(source)) =
+                    (&key.binding, &self.options.layers[active].source)
+                    && self.binding_sources.get(binding) != Some(source)
+                {
+                    return None;
+                }
+                Some(DeviceEvent::Key {
+                    address: if member.address == address.address {
+                        address
+                    } else {
+                        member.clone()
+                    },
+                    pressed,
+                })
+            }
+            _ => None,
         }
     }
 
-    /// The firmware drops AG slot overrides when the writing HID host closes
-    /// its handle, and ChatGPT periodically rewrites the global `keys` zone.
-    /// Re-assert a full frame on a slow tick even when the plan is unchanged.
-    fn needs_write(&self, plan: &RenderPlan, now: Instant) -> bool {
-        if self.last_plan.as_ref() != Some(plan) {
-            return true;
+    fn lighting(
+        &self,
+        plan: &RenderPlan,
+        feedback: &BTreeMap<Address, Treatment>,
+    ) -> Result<Option<(Value, Value)>> {
+        let Some(active) = &self.active else {
+            return Ok(None);
+        };
+        let layer = &self.options.layers[active];
+        let mut entries = Vec::new();
+        let mut visible = Vec::new();
+        for key in self.device.definition.keys.values() {
+            let render = key
+                .binding
+                .as_ref()
+                .and_then(|binding| plan.keys.iter().find(|render| &render.key == binding))
+                .filter(|render| {
+                    layer
+                        .source
+                        .as_ref()
+                        .is_none_or(|source| render.source.as_ref() == Some(source))
+                });
+            for member in &key.members {
+                let (name, id) = parse_address(&self.options, &member.address)?;
+                if name != active {
+                    continue;
+                }
+                if let Some(render) = render {
+                    visible.push(render);
+                }
+                let treatment = feedback.get(member).copied().or_else(|| {
+                    render.filter(|r| r.state.is_some()).map(|r| Treatment {
+                        color: r.color,
+                        brightness: r.brightness,
+                        motion: r.motion,
+                    })
+                });
+                entries.push(frame(id, treatment, self.options.effect_speed));
+            }
         }
-        self.last_write
-            .is_none_or(|last| now.duration_since(last) >= self.refresh_every)
+        let mut ring = self.options.ring;
+        if self.options.ring_follows_state_color
+            && let Some(state) = visible
+                .into_iter()
+                .filter_map(|r| r.state)
+                .max_by_key(|s| s.attention_rank())
+        {
+            let treatment = plan.treatments.for_state(state);
+            ring.color = treatment.color;
+        }
+        let zone = |t: Treatment| json!({"e":effect(t.motion),"b":t.brightness,"s":self.options.effect_speed,"m":1,"c":rgb_u32(t.color)});
+        Ok(Some((
+            json!({"keys":zone(self.options.base),"ambient":zone(ring)}),
+            Value::Array(entries),
+        )))
     }
 }
 
-impl DisplaySink for CreatorMicroUsbDisplay {
+impl DisplaySink for CreatorMicroDisplay {
     fn id(&self) -> &str {
-        "creator-micro-usb"
+        &self.device.id
     }
-
-    fn poll_input(&mut self) -> Result<Vec<HidEvent>> {
-        // AIDEV-NOTE: Beckon is the single HID writer AND reader. Reuse the
-        // lighting handle instead of opening a second non-exclusive device,
-        // and reopen it here if a failed lighting write dropped it. Presses
-        // on AG ids outside the declared slots are filtered by the daemon.
-        if self.pad.is_none() {
-            match Pad::open() {
-                Ok(pad) => self.pad = Some(pad),
-                Err(_) => return Ok(Vec::new()),
+    fn poll_input(&mut self) -> Result<Vec<DeviceEvent>> {
+        let mut events = Vec::new();
+        if self.reset_pending {
+            events.push(DeviceEvent::Reset {
+                device: self.device.id.clone(),
+            });
+            self.reset_pending = false;
+        }
+        if !self.connect()? {
+            return Ok(events);
+        }
+        if self.reset_pending {
+            events.push(DeviceEvent::Reset {
+                device: self.device.id.clone(),
+            });
+            self.reset_pending = false;
+        }
+        // Bounded draining preserves every press/release without starving IPC.
+        for _ in 0..128 {
+            match self.pad.as_mut().unwrap().poll_frame_timeout(0) {
+                Ok(Some(value)) => {
+                    if let Some(event) = self.decode(&value) {
+                        events.push(event);
+                    }
+                }
+                Ok(None) => break,
+                Err(error) => {
+                    self.lost();
+                    return Err(error);
+                }
             }
         }
-        let outcome = self
-            .pad
-            .as_mut()
-            .expect("pad opened above")
-            .poll_event_timeout(0);
-        match outcome {
-            Ok(Some(event)) => Ok(vec![event]),
-            Ok(None) => Ok(Vec::new()),
-            Err(error) => {
-                self.pad = None;
-                Err(error)
-            }
-        }
+        Ok(events)
     }
-
     fn publish(&mut self, plan: &RenderPlan) -> Result<PublishOutcome> {
-        if !self.needs_write(plan, Instant::now()) {
+        self.publish_feedback(plan, &BTreeMap::new())
+    }
+    fn publish_feedback(
+        &mut self,
+        plan: &RenderPlan,
+        feedback: &BTreeMap<Address, Treatment>,
+    ) -> Result<PublishOutcome> {
+        self.binding_sources = plan
+            .keys
+            .iter()
+            .filter_map(|key| {
+                key.source
+                    .as_ref()
+                    .map(|source| (key.key.clone(), source.clone()))
+            })
+            .collect();
+        // Connect/poll happens before publish, so a layer reset reaches the
+        // switch engine before any stale feedback can be written.
+        if self.pad.is_none() {
+            return Ok(PublishOutcome::Unavailable);
+        }
+        if !self.clear_pending.is_empty() {
+            let entries = self
+                .clear_pending
+                .iter()
+                .map(|id| frame(*id, None, self.options.effect_speed))
+                .collect();
+            if let Err(error) = self
+                .pad
+                .as_mut()
+                .unwrap()
+                .send_only("v.oai.thstatus", Value::Array(entries))
+            {
+                self.lost();
+                return Err(error);
+            }
+            self.clear_pending.clear();
+        }
+        let Some(frame) = self.lighting(plan, feedback)? else {
+            return Ok(PublishOutcome::Unchanged);
+        };
+        let refresh = Duration::from_millis(self.options.refresh_ms);
+        if self.last_frame.as_ref() == Some(&frame)
+            && self.last_write.is_some_and(|last| last.elapsed() < refresh)
+        {
             return Ok(PublishOutcome::Unchanged);
         }
-        if self.pad.is_none() {
-            match Pad::open() {
-                Ok(pad) => self.pad = Some(pad),
-                Err(_) => return Ok(PublishOutcome::Unavailable),
-            }
+        let pad = self.pad.as_mut().unwrap();
+        if let Err(error) = pad
+            .send_only("v.oai.rgbcfg", frame.0.clone())
+            .and_then(|()| pad.send_only("v.oai.thstatus", frame.1.clone()))
+        {
+            self.lost();
+            return Err(error);
         }
-        // A failed write usually means the pad was unplugged. Drop the handle
-        // so the next tick retries from a fresh open.
-        let result = write_plan(
-            self.pad.as_mut().expect("pad opened above"),
-            plan,
-            &self.config,
-        );
-        match result {
-            Ok(()) => {
-                self.last_plan = Some(plan.clone());
-                self.last_write = Some(Instant::now());
-                if !self.attached_once {
-                    self.attached_once = true;
-                    info!(
-                        slots = ?self.config.slots,
-                        "creator-micro: attached and published first lighting frame"
-                    );
-                } else {
-                    debug!("creator-micro: re-asserted lighting frame");
-                }
-                Ok(PublishOutcome::Updated)
-            }
-            Err(error) => {
-                self.pad = None;
-                Err(error)
-            }
-        }
+        self.last_frame = Some(frame);
+        self.last_write = Some(Instant::now());
+        debug!(device=%self.device.id, "published Creator Micro frame");
+        Ok(PublishOutcome::Updated)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn configured() -> CreatorMicroDisplay {
+        CreatorMicroDisplay::new(DeviceConfig {
+            id: "creator-micro".into(),
+            path: "creator-micro.toml".into(),
+            definition: toml::from_str(include_str!("../templates/creator-micro.toml")).unwrap(),
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn address_ranges_and_layer_selectors_are_validated_offline() {
+        let display = configured();
+        for id in ["rex/0", "rex/5", "rex/19", "rex/255", "missing/6", "6"] {
+            assert!(parse_address(&display.options, id).is_err());
+        }
+        assert_eq!(
+            parse_address(&display.options, "rex/16").unwrap(),
+            ("rex", 16)
+        );
+    }
+
+    #[test]
+    fn layer_notifications_translate_addresses_without_leaking_layers_into_core() {
+        let mut display = configured();
+        assert!(matches!(
+            display.decode(&json!({"m":"kb.pl","p":{"p":1,"l":6}})),
+            Some(DeviceEvent::Reset { .. })
+        ));
+        assert!(
+            matches!(display.decode(&json!({"m":"v.oai.hid","p":{"act":1,"k":"AG16"}})), Some(DeviceEvent::Key{address,pressed:true}) if address.address == "test/16")
+        );
+        display.decode(&json!({"m":"kb.pl","p":{"p":1,"l":2}}));
+        assert!(
+            display
+                .decode(&json!({"m":"v.oai.hid","p":{"act":1,"k":"AG16"}}))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn source_filters_apply_to_navigation_and_lighting() {
+        let mut display = configured();
+        display.layer(1, 3);
+        display
+            .binding_sources
+            .insert("key1".into(), "other".into());
+        let press = json!({"m":"v.oai.hid","p":{"act":1,"k":"AG06"}});
+        assert!(display.decode(&press).is_none());
+        display.binding_sources.insert("key1".into(), "rex".into());
+        assert!(matches!(
+            display.decode(&press),
+            Some(DeviceEvent::Key { .. })
+        ));
+        let mut plan = crate::render::demo_plan(&crate::render::DisplayConfig::default()).unwrap();
+        plan.keys[0].key = "key1".into();
+        plan.keys[0].source = Some("other".into());
+        let (_, entries) = display.lighting(&plan, &BTreeMap::new()).unwrap().unwrap();
+        assert_eq!(entries[0]["e"], 0);
+        plan.keys[0].source = Some("rex".into());
+        let (_, entries) = display.lighting(&plan, &BTreeMap::new()).unwrap().unwrap();
+        assert_eq!(entries[0]["e"], 1);
+    }
+
+    #[test]
+    fn feedback_paints_the_joined_pair_and_never_reserved_ids() {
+        let mut display = configured();
+        display.layer(1, 6);
+        let t = Treatment {
+            color: Rgb {
+                red: 255,
+                green: 0,
+                blue: 0,
+            },
+            brightness: 1.0,
+            motion: Motion::Breathe,
+        };
+        let feedback = [16, 17]
+            .into_iter()
+            .map(|id| {
+                (
+                    Address {
+                        device: "creator-micro".into(),
+                        address: format!("test/{id}"),
+                    },
+                    t,
+                )
+            })
+            .collect();
+        let plan = crate::render::render(&crate::render::DisplayConfig::default(), &[]).unwrap();
+        let (_, entries) = display.lighting(&plan, &feedback).unwrap().unwrap();
+        let entries = entries.as_array().unwrap();
+        assert!(
+            entries
+                .iter()
+                .all(|entry| entry["id"].as_u64().unwrap() >= 6)
+        );
+        assert_eq!(entries.iter().filter(|entry| entry["e"] == 4).count(), 2);
+        display.layer(1, 2);
+        assert!(display.lighting(&plan, &feedback).unwrap().is_none());
+    }
 
     #[test]
     fn rgb_packs_as_a_single_firmware_integer() {
@@ -525,29 +850,6 @@ mod tests {
     }
 
     #[test]
-    fn hid_events_keep_non_ag_keycodes_for_the_mic_key() {
-        let ag = HidEvent {
-            key: "AG06".into(),
-            pressed: true,
-            agent: None,
-        };
-        assert_eq!(ag.slot(), Some(6));
-        let by_field = HidEvent {
-            key: "KV_OAI_ACT12".into(),
-            pressed: true,
-            agent: Some(12),
-        };
-        assert_eq!(by_field.slot(), Some(12));
-        let macro_key = HidEvent {
-            key: "KA_M1".into(),
-            pressed: true,
-            agent: None,
-        };
-        assert_eq!(macro_key.slot(), None);
-        assert_eq!(macro_key.key, "KA_M1");
-    }
-
-    #[test]
     fn take_json_survives_a_chunk_boundary() {
         let mut acc = String::from("{\"m\":\"v.oai.hid\",");
         let first = take_json(&mut acc);
@@ -556,5 +858,33 @@ mod tests {
         let value = take_json(&mut acc).unwrap();
         assert_eq!(value["p"]["k"], "AG06");
         assert!(acc.is_empty());
+    }
+
+    #[test]
+    fn concatenated_frames_keep_every_edge_in_wire_order() {
+        let mut acc = String::from(
+            r#"{"m":"v.oai.hid","p":{"k":"AG16","act":1}}{"m":"v.oai.hid","p":{"k":"AG16","act":0}}"#,
+        );
+        assert_eq!(take_json(&mut acc).unwrap()["p"]["act"], 1);
+        assert_eq!(take_json(&mut acc).unwrap()["p"]["act"], 0);
+        assert!(acc.is_empty());
+    }
+
+    #[test]
+    fn online_mapping_check_catches_missing_joined_members() {
+        let display = configured();
+        let codes: Vec<_> = (6..=17)
+            .map(|id| json!(format!("KV_OAI_AG{id:02}")))
+            .collect();
+        let layer = json!({"layout":{"keymap":[codes]}});
+        let mut keymap = json!({"profiles":[{"id":1,"layers":vec![layer;6]}]});
+        validate_keymap(&display.device, &keymap).unwrap();
+        keymap["profiles"][0]["layers"][5]["layout"]["keymap"][0][11] = json!("KC_ENT");
+        assert!(
+            validate_keymap(&display.device, &keymap)
+                .unwrap_err()
+                .to_string()
+                .contains("AG17")
+        );
     }
 }

@@ -188,7 +188,8 @@ fn run(argv: &[String], vars: &BTreeMap<String, String>) -> Result<Vec<u8>> {
     let (program, arguments) = argv
         .split_first()
         .ok_or_else(|| anyhow::anyhow!("empty command"))?;
-    let mut command = Command::new(program);
+    let program = expand(program, vars);
+    let mut command = Command::new(&program);
     for (name, value) in vars {
         command.env(name, value);
     }

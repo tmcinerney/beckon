@@ -1,4 +1,21 @@
-# Config templates (v1 proposal)
+# Configuration templates
+
+## Active v3 templates
+
+Use the root-level `config.toml`, `creator-micro.toml`, `glove80.toml` and
+`macbook.toml`. These are exercised by the configuration integration tests.
+Copy the root to `~/.config/beckon/config.toml` and chosen device files to
+`~/.config/beckon/config.d/`. Declare their global binding ids and source
+integrations in the root before enabling them. See
+[the configuration guide](../docs/configuration.md).
+
+## Historical v1 sketches below
+
+The `devices/`, `sources/` and `slots.toml` sketches below are retained as design
+history, not deployable v3 configuration. Do not copy them to `config.d/`.
+The implemented v3 schema supersedes this proposal.
+
+### Original proposal (not runtime instructions)
 
 **These files are not loaded by the current binary.** They are reference
 definitions for the v1 fragment convention described in

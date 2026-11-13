@@ -15,10 +15,7 @@ use std::{
 use anyhow::{Context, Result, bail};
 use hidapi::{DeviceInfo, HidApi, HidDevice};
 
-use crate::{
-    core::KEY_IDS,
-    render::{AgentState, Motion, RenderPlan, Rgb, StateTreatment},
-};
+use crate::render::{AgentState, Motion, RenderPlan, Rgb, StateTreatment};
 
 pub const VENDOR_USAGE_PAGE: u16 = 0xFF60;
 pub const STATUS_USAGE: u16 = 0x0061;
@@ -206,6 +203,9 @@ fn treatment_for_render(treatment: StateTreatment) -> Treatment {
         motion: treatment.motion,
     }
 }
+
+// Names in this private projection are wire positions, not core binding ids.
+const KEY_IDS: [&str; 10] = ["f1", "f2", "f3", "f4", "f5", "f6", "f7", "f8", "f9", "f10"];
 
 fn slots_for_plan(plan: &RenderPlan) -> Result<[Status; SLOT_COUNT]> {
     let renders = plan
@@ -517,6 +517,7 @@ mod tests {
                 .into_iter()
                 .zip(states)
                 .map(|(key, state)| KeyRender {
+                    source: None,
                     key: key.into(),
                     state,
                     color: "#000000".parse::<Rgb>().unwrap(),

@@ -15,7 +15,7 @@ def main() -> int:
     with output.open("a", encoding="utf-8", buffering=1) as log:
         for line in sys.stdin:
             message = json.loads(line)
-            if message.get("protocol") != "beckon.display" or message.get("version") != 1:
+            if message.get("protocol") != "beckon.display" or message.get("version") != 2:
                 print("unsupported Beckon display protocol", file=sys.stderr)
                 return 1
             if message.get("type") == "hello":

@@ -11,21 +11,19 @@ use std::{
 use anyhow::{Context, Result, bail};
 use beckon::{
     action::RepeatPressConfirm,
-    config::{self, InputProfile},
+    config::{self},
     core::{
         AgentPresentation, AgentRef, AgentSource, BindingService, BindingState, BindingStore,
         PresentationTokenWrite, STATE_VERSION,
     },
-    display::DisplaySet,
+    display::{DeviceEvent, DisplaySet},
     focus::{CommandFocus, FocusAdapter, FocusContext},
     herdr::{HerdrCli, LivePaneDirectory, discover_sessions},
     hid::{self, Status, StatusSnapshot},
-    input::{
-        Glove80HotkeyInput, InputAdapter, MacbookFunctionKeyInput, RegisteredInput,
-        register_adapters,
-    },
+    input::ConfiguredInput,
     session::SessionRouter,
     state::JsonBindingStore,
+    switches::{Switches, SystemEmitter},
     terminal::{self, SurfaceHandle, SurfaceRecord, TerminalLink},
 };
 use clap::{Args, Parser, Subcommand};
@@ -43,15 +41,15 @@ use tracing_subscriber::EnvFilter;
     about = "Bind agents to navigation keys and render their state to device lights",
     long_about = "Beckon is a local, display-and-navigation-first companion for agent\n\
 terminals. Sources are pluggable and declared in configuration (Rex blocks and\n\
-Herdr panes today). It binds an explicitly selected agent to a logical F key,\n\
+Herdr panes today). It binds an explicitly selected agent to a configured key,\n\
 shows bindings, focuses a bound agent, and renders state to device lights. It\n\
-never sends agent input, approves tools, or answers prompts unless the optional\n\
+never sends keystrokes unless a chord action is explicitly configured or the\n\
 repeat-press confirmation action is explicitly enabled.",
     after_help = "AGENT WORKFLOW:\n\
   1. Run `beckon status` to inspect currently occupied keys.\n\
-  2. In the intended Rex terminal or Herdr pane, run `beckon bind --key f3`;\n\
+  2. In the intended Rex terminal or Herdr pane, run `beckon bind --key key3`;\n\
      omit --key only when first-free assignment is intended.\n\
-  3. From any context, run `beckon release --key f3` to clear that key.\n\
+  3. From any context, run `beckon release --key key3` to clear that key.\n\
 \n\
 The `beckond` command is an installed PATH wrapper for `beckon daemon`. Normally\n\
 Home Manager starts it. Start it manually only for local development or recovery.\n\
@@ -65,6 +63,13 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum CommandLine {
+    /// Clear inferred feedback state and release any held output for a device.
+    Reset {
+        #[arg(long)]
+        device: String,
+    },
+    /// Print configured physical controls, binding targets and action references.
+    Keys,
     /// Create a commented configuration template without overwriting an existing file.
     #[command(
         long_about = "Create the optional machine-local configuration template.\n\
@@ -93,19 +98,18 @@ Run this inside the terminal being registered. `beckon` resolves the identity\n\
 from the source's configured environment: REX_SESSION + REX_BLOCK for Rex,\n\
 HERDR_PANE_ID for Herdr. From anywhere else, provide `--pane <id>`.\n\
 \n\
-Specify `--key f1` through `--key f10` to choose a key. Omitting --key uses the\n\
+Specify a configured id, e.g. `--key key1`, to choose a key. Omitting --key uses the\n\
 first available key, except that an already-bound agent keeps its existing key.\n\
 Beckon never auto-registers agents. A requested key that is already occupied\n\
-is not replaced: release it first with `beckon release --key f1`.\n\
+is not replaced: release it first with `beckon release --key key1`.\n\
 \n\
-Note that logical keys f7-f10 have no physical Creator Micro indicator; only\n\
-the AG ids declared in outputs.creator_micro.slots are lit."
+Run `beckon keys` to inspect physical mappings and their binding ids."
     )]
     Bind(BindArgs),
     /// Clear a pane's Beckon binding. Defaults to $HERDR_PANE_ID; --key works from any pane.
     #[command(
         long_about = "Remove a Beckon registration. Run this in the bound pane, provide\n\
-`--pane <pane-id>`, or use `--key f1` through `--key f10` from anywhere.\n\
+`--pane <pane-id>`, or use a configured `--key key1` from anywhere.\n\
 For a pane ID that exists in more than one Herdr session, add `--session`.\n\
 This changes only the local Beckon binding and the pane's visible fkey token; it\n\
 does not close a pane or control an agent."
@@ -152,7 +156,7 @@ these commands write ordinary keyboard input or control Herdr agents."
         #[command(subcommand)]
         command: HidCommand,
     },
-    /// Log the ten Beckon-layer function-key events until interrupted.
+    /// Log configured global-shortcut events until interrupted.
     ListenKeys,
     /// Focus the agent bound to a logical key, as a pad press would.
     Focus(FocusArgs),
@@ -165,13 +169,15 @@ these commands write ordinary keyboard input or control Herdr agents."
 
 #[derive(Args)]
 struct FocusArgs {
-    /// Logical Beckon slot, for example f4.
+    /// Configured binding id, for example key4.
     #[arg(long)]
     key: String,
 }
 
 #[derive(Subcommand)]
 enum CreatorMicroCommand {
+    /// Check configured addresses against the device's current keymap (read-only).
+    Check,
     /// Paint every agent state, then highlight a key when it is pressed.
     Demo,
     /// Turn every indicator and the ring off.
@@ -198,6 +204,10 @@ struct CreatorMicroFileArgs {
 enum ConfigCommand {
     /// Parse the configuration without starting the daemon or changing state.
     Check,
+    /// Ask the daemon for its typed, effective configuration model.
+    Show,
+    /// Change the selected theme through the daemon; writes only settings.toml.
+    Theme { name: String },
 }
 
 #[derive(Args)]
@@ -296,6 +306,13 @@ struct HidMalformedArgs {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 enum Request {
+    ConfigModel,
+    SetTheme {
+        name: String,
+    },
+    ResetControls {
+        device: String,
+    },
     Bind {
         pane_id: String,
         #[serde(default)]
@@ -334,6 +351,13 @@ fn main() -> Result<()> {
     initialize_tracing();
     match Cli::parse().command {
         CommandLine::Init => config::initialize(),
+        CommandLine::Reset { device } => client(Request::ResetControls { device }),
+        CommandLine::Config {
+            command: ConfigCommand::Show,
+        } => client(Request::ConfigModel),
+        CommandLine::Config {
+            command: ConfigCommand::Theme { name },
+        } => client(Request::SetTheme { name }),
         CommandLine::Config {
             command: ConfigCommand::Check,
         } => {
@@ -371,6 +395,11 @@ fn main() -> Result<()> {
             }
         },
         CommandLine::Status => client(Request::Status),
+        CommandLine::Keys => {
+            let config = config::load()?;
+            println!("{}", serde_json::to_string_pretty(&config.devices)?);
+            Ok(())
+        }
         CommandLine::Refresh => client(Request::Refresh),
         CommandLine::Terminals(args) => terminals_command(args),
         CommandLine::Adopt(args) => adopt_command(args),
@@ -478,8 +507,14 @@ fn hid_command(command: HidCommand) -> Result<()> {
 /// pressed, so the transport, slot mapping and HID notifications are all
 /// exercised without needing a live Herdr or Rex source.
 fn creator_micro_command(command: CreatorMicroCommand) -> Result<()> {
-    use beckon::creator_micro::{self, Pad};
-    use beckon::render::{AgentState, KeyRender, Motion};
+    use beckon::creator_micro::Pad;
+    use beckon::display::DisplaySink;
+
+    if UnixStream::connect(socket_path()).is_ok() {
+        bail!(
+            "stop beckond before running direct device diagnostics; it owns the HID reader/writer"
+        );
+    }
 
     // Filesystem commands do not need the mutable config and must work even
     // when only the device is attached.
@@ -530,100 +565,52 @@ fn creator_micro_command(command: CreatorMicroCommand) -> Result<()> {
     }
 
     let config = config::load()?;
-    let pad_config = config.outputs.creator_micro.clone();
-    let mut pad = Pad::open()?;
-
-    match command {
-        CreatorMicroCommand::Off => {
-            creator_micro::clear(&mut pad, &pad_config)?;
-            println!("creator-micro: all indicators and ring off");
-            return Ok(());
-        }
-        CreatorMicroCommand::Get(_)
-        | CreatorMicroCommand::Put(_)
-        | CreatorMicroCommand::Verify(_) => {
-            unreachable!("filesystem commands return above")
-        }
-        CreatorMicroCommand::Listen => {
-            println!("creator-micro listen: press any pad key, including the mic key.");
-            println!("Ctrl-C to stop. No lighting is written.");
-            loop {
-                if let Some(event) = pad.poll_event()? {
-                    let action = if event.pressed { "PRESS" } else { "RELEASE" };
-                    let agent = event
-                        .agent
-                        .map(|value| format!("ag={value}"))
-                        .unwrap_or_else(|| "ag=-".into());
-                    println!("  {action:<7} {:<16} {agent}", event.key);
-                }
+    if matches!(command, CreatorMicroCommand::Check) {
+        let device = config
+            .devices
+            .iter()
+            .find(|device| device.definition.adapter == "creator-micro")
+            .context("no Creator Micro configured")?;
+        let mut pad = Pad::open()?;
+        let keymap = beckon::creator_micro_fs::get(&mut pad, "keymap.json")?;
+        beckon::creator_micro::validate_keymap(device, &serde_json::from_slice(&keymap)?)?;
+        println!("configured Creator Micro addresses exist in the current keymap");
+        return Ok(());
+    }
+    if matches!(command, CreatorMicroCommand::Listen) {
+        let mut pad = Pad::open()?;
+        loop {
+            if let Some(frame) = pad.poll_frame_timeout(200)? {
+                println!("{frame}");
             }
         }
-        CreatorMicroCommand::Demo => {}
     }
-
+    if matches!(command, CreatorMicroCommand::Off) {
+        let mut pad = Pad::open()?;
+        pad.send_only(
+            "v.oai.thstatus",
+            json!(
+                (6..=18)
+                    .map(|id| json!({"id":id,"c":0,"b":0.0,"e":0,"s":0.5}))
+                    .collect::<Vec<_>>()
+            ),
+        )?;
+        return Ok(());
+    }
+    let device = config
+        .devices
+        .iter()
+        .find(|device| device.definition.adapter == "creator-micro")
+        .context("no Creator Micro device configured")?;
+    let mut display = beckon::creator_micro::CreatorMicroDisplay::new(device.clone())?;
     let plan = beckon::render::demo_plan(&config.display)?;
-    creator_micro::write_plan(&mut pad, &plan, &pad_config)?;
-
-    println!("creator-micro demo: six slots painted");
-    for (index, slot) in pad_config.slots.iter().enumerate() {
-        let key = plan
-            .keys
-            .get(index)
-            .map_or("?", |render| render.key.as_str());
-        let state = plan
-            .keys
-            .get(index)
-            .and_then(|render| render.state)
-            .map_or("unbound".to_string(), |state| {
-                format!("{state:?}").to_lowercase()
-            });
-        println!("  {key} <- AG{slot:02}  {state}");
-    }
-    println!("Press and hold any of the six top keys. Leave this running.");
-    println!("Ctrl-C stops the writer; the pad then goes dark by design.");
-
-    // AIDEV-NOTE: the firmware drops AG slot overrides when the writing HID
-    // host closes its handle, and ChatGPT rewrites the global keys zone. Keep
-    // re-asserting the frame so the lights survive while this command runs.
-    let mut current_plan = plan.clone();
-    let mut last_write = Instant::now();
-    let refresh_every = Duration::from_secs(2);
+    println!("Demo uses the configured keys and active layer; Ctrl-C to stop.");
     loop {
-        if let Some(event) = pad.poll_event()? {
-            let Some(slot) = event.slot() else {
-                continue;
-            };
-            let Some(index) = pad_config
-                .slots
-                .iter()
-                .position(|candidate| *candidate == slot)
-            else {
-                continue;
-            };
-            let logical = plan.keys.get(index).map_or("?", |key| key.key.as_str());
-            current_plan = plan.clone();
-            if event.pressed {
-                println!("  HOLD    {logical} ({})", event.key);
-                if let Some(render) = current_plan.keys.get_mut(index) {
-                    let done = plan.treatments.for_state(AgentState::Done);
-                    *render = KeyRender {
-                        key: render.key.clone(),
-                        state: Some(AgentState::Done),
-                        color: done.color,
-                        brightness: 1.0,
-                        motion: Motion::Pulse,
-                    };
-                }
-            } else {
-                println!("  RELEASE {logical} ({})", event.key);
-            }
-            creator_micro::write_plan(&mut pad, &current_plan, &pad_config)?;
-            last_write = Instant::now();
+        for event in display.poll_input()? {
+            println!("{event:?}");
         }
-        if last_write.elapsed() >= refresh_every {
-            creator_micro::write_plan(&mut pad, &current_plan, &pad_config)?;
-            last_write = Instant::now();
-        }
+        display.publish(&plan)?;
+        std::thread::sleep(Duration::from_millis(50));
     }
 }
 
@@ -634,7 +621,7 @@ fn preview(args: PreviewArgs) -> Result<()> {
     } else {
         let store = JsonBindingStore::from_environment();
         let sources = cli_sources(&config)?;
-        let bindings = BindingService::new(&store, &sources);
+        let bindings = BindingService::new(&store, &sources).with_keys(&config.bindings);
         beckon::render::render(&config.display, &bindings.status()?)?
     };
     if args.json {
@@ -761,36 +748,26 @@ fn terminal_link(config: &config::Config) -> Result<TerminalLink> {
 }
 
 fn listen_keys() -> Result<()> {
-    // Keep this diagnostic usable before `beckon init`: if configuration is
-    // absent it tests the default Glove80 profile. An existing config is still
-    // fully validated before its input profiles are used.
-    let input_profiles = if config::path().exists() {
-        config::load()?.input.enabled_profiles()?
-    } else {
-        vec![InputProfile::default()]
-    };
+    let config = config::load()?;
     let event_loop = background_event_loop();
     let manager = GlobalHotKeyManager::new().context("initialize macOS global hotkeys")?;
-    let input = register_input(&input_profiles, &manager)?;
-    info!(profiles = %input_diagnostic(&input_profiles), "input listener registered shortcuts");
-    eprintln!("beckon inputs: {}", input_diagnostic(&input_profiles));
-    eprintln!("Listening for Beckon F keys. Press Control-C to stop.");
+    let input = ConfiguredInput::register(&config.devices, &manager)?;
+    eprintln!("Listening for configured shortcuts. Press Control-C to stop.");
     eprintln!("Logging presses to {}", key_event_log_path().display());
     let receiver = GlobalHotKeyEvent::receiver();
     event_loop.run(move |_event, _, control_flow| {
         *control_flow = ControlFlow::Wait;
         while let Ok(event) = receiver.try_recv() {
             debug!(hotkey_id = event.id, state = ?event.state, "received global hotkey event");
-            let Some(binding) = input.pressed(&event) else {
+            let Some((address, pressed)) = input.event(&event) else {
                 debug!(hotkey_id = event.id, "ignored unowned global hotkey event");
                 continue;
             };
-            info!(
-                key = binding.key,
-                physical = binding.description,
-                "routed input to logical key"
+            let line = key_event_line(
+                &address.device,
+                &address.address,
+                if pressed { "press" } else { "release" },
             );
-            let line = key_event_line(binding.key, binding.description, "listener");
             print!("{line}");
             let _ = std::io::stdout().flush();
             if let Err(error) = append_key_event(&line) {
@@ -813,30 +790,6 @@ fn key_event_line(key: &str, description: &str, source: &str) -> String {
         .expect("system clock is before Unix epoch")
         .as_millis();
     format!("{timestamp}\t{key}\t{}\t{source}\n", description)
-}
-
-fn register_input(
-    profiles: &[InputProfile],
-    manager: &GlobalHotKeyManager,
-) -> Result<RegisteredInput> {
-    let glove80 = Glove80HotkeyInput;
-    let macbook = MacbookFunctionKeyInput;
-    let adapters = profiles
-        .iter()
-        .map(|profile| match profile {
-            InputProfile::Glove80 => &glove80 as &dyn InputAdapter,
-            InputProfile::MacbookFunctionKeys => &macbook as &dyn InputAdapter,
-        })
-        .collect::<Vec<_>>();
-    register_adapters(&adapters, manager)
-}
-
-fn input_diagnostic(profiles: &[InputProfile]) -> String {
-    profiles
-        .iter()
-        .map(|profile| profile.name())
-        .collect::<Vec<_>>()
-        .join(", ")
 }
 
 fn focus_result_line(key: &str, result: &str) -> String {
@@ -927,7 +880,7 @@ fn socket_path() -> PathBuf {
 }
 
 fn daemon() -> Result<()> {
-    let config = config::load()?;
+    let mut config = config::load()?;
     let path = socket_path();
     if let Some(directory) = path.parent()
         && directory == JsonBindingStore::from_environment().directory()
@@ -966,82 +919,50 @@ fn daemon() -> Result<()> {
             "terminal surface backend configured"
         );
     }
-    let output_ids = config.outputs.ids();
-    let mut displays = DisplaySet::from_config(&config.outputs)?;
-    // AIDEV-NOTE: resolve physical AG ids to logical keys from explicit config
-    // only. `slots` and `display.keys` are paired positionally by write_plan,
-    // so a press focuses exactly the key whose LED it sits under. An AG id
-    // outside this list (ChatGPT's 0-5, the seven other keys, the mic key) has
-    // no mapping and is ignored. Nothing here is derived or defaulted.
-    let pad_key_map: Vec<(u8, String)> = config
-        .outputs
-        .creator_micro
-        .slots
-        .iter()
-        .copied()
-        .zip(config.display.keys.iter().map(|key| key.id.clone()))
-        .collect();
+    let mut displays = DisplaySet::from_config(&config)?;
+    let mut switches = Switches::new(&config.devices, SystemEmitter::default())?;
     let mut last_render_error = None;
+    let mut current_plan = beckon::render::render(&config.display, &[])?;
     let mut presentation = PresentationPublisher::default();
     let mut last_presentation_error = None;
     let event_loop = background_event_loop();
     let manager = GlobalHotKeyManager::new().context("initialize macOS global hotkeys")?;
-    let input_profiles = config.input.enabled_profiles()?;
-    let input = register_input(&input_profiles, &manager)?;
-    info!(profiles = %input_diagnostic(&input_profiles), socket = %path.display(), "daemon registered input shortcuts");
-    eprintln!("beckond inputs: {}", input_diagnostic(&input_profiles));
-    info!(
-        outputs = %output_ids.join(", "),
-        "daemon configured display outputs"
-    );
+    let input = ConfiguredInput::register(&config.devices, &manager)?;
+    info!(devices = %config.devices.iter().map(|d| d.id.as_str()).collect::<Vec<_>>().join(", "), "configured devices");
     let receiver = GlobalHotKeyEvent::receiver();
     let mut confirm = RepeatPressConfirm::default();
+    let stopping = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = stopping.clone();
+    ctrlc::set_handler(move || flag.store(true, std::sync::atomic::Ordering::SeqCst))?;
     event_loop.run(move |_event, _, control_flow| {
+        if stopping.load(std::sync::atomic::Ordering::SeqCst) {
+            for device in &config.devices {
+                if let Err(error) = switches.reset_device(&device.id) {
+                    eprintln!("shutdown: {error:#}");
+                }
+            }
+            let _ = fs::remove_file(&path);
+            *control_flow = ControlFlow::Exit;
+            return;
+        }
         *control_flow =
             ControlFlow::WaitUntil(std::time::Instant::now() + Duration::from_millis(50));
         while let Ok((stream, _)) = listener.accept() {
-            if let Err(error) = handle_connection(stream, &sources) {
+            if let Err(error) = handle_connection(stream, &sources, &mut config, &mut switches) {
                 eprintln!("request failed: {error:#}");
-            }
-        }
-        match publish_display(&config, &sources, &mut displays) {
-            Ok(failures) => {
-                last_render_error = None;
-                for failure in failures {
-                    eprintln!(
-                        "update {} status display: {}",
-                        failure.adapter, failure.message
-                    );
-                }
-            }
-            Err(error) => {
-                let error = format!("{error:#}");
-                if last_render_error.as_deref() != Some(error.as_str()) {
-                    eprintln!("render status display: {error}");
-                    last_render_error = Some(error);
-                }
-            }
-        }
-        match presentation.sync(&sources) {
-            Ok(_) => last_presentation_error = None,
-            Err(error) => {
-                let error = format!("{error:#}");
-                if last_presentation_error.as_deref() != Some(error.as_str()) {
-                    eprintln!("update Herdr pane presentation: {error}");
-                    last_presentation_error = Some(error);
-                }
             }
         }
         while let Ok(event) = receiver.try_recv() {
             debug!(hotkey_id = event.id, state = ?event.state, "received global hotkey event");
-            if let Some(binding) = input.pressed(&event) {
-                route_key(
-                    binding.key,
-                    binding.description,
+            if let Some((address, pressed)) = input.event(&event) {
+                route_device_key(
+                    &address,
+                    pressed,
                     &config,
                     &sources,
                     terminal.as_ref(),
                     &mut confirm,
+                    &mut switches,
                 );
             }
         }
@@ -1050,26 +971,58 @@ fn daemon() -> Result<()> {
             eprintln!("poll {} input: {}", failure.adapter, failure.message);
         }
         for event in pad_events {
-            // Only a press focuses. Releases, macro keys and the mic key carry
-            // no AG slot, and AG ids outside the declared slots are ignored.
-            if !event.pressed {
-                continue;
+            match event {
+                DeviceEvent::Key { address, pressed } => route_device_key(
+                    &address,
+                    pressed,
+                    &config,
+                    &sources,
+                    terminal.as_ref(),
+                    &mut confirm,
+                    &mut switches,
+                ),
+                DeviceEvent::Reset { device } => {
+                    if let Err(error) = switches.reset_device(&device) {
+                        eprintln!("reset {device}: {error:#}");
+                    }
+                }
             }
-            let Some(slot) = event.slot() else {
-                continue;
-            };
-            let Some(key) = pad_key_for_slot(&pad_key_map, slot) else {
-                debug!(slot, key = %event.key, "pad press outside declared indicator slots");
-                continue;
-            };
-            route_key(
-                key,
-                &event.key,
-                &config,
-                &sources,
-                terminal.as_ref(),
-                &mut confirm,
-            );
+        }
+        // AIDEV-NOTE: don't spawn periodic source/metadata commands while an
+        // output chord is down. Feedback uses the latest good plan and release
+        // events are drained before any background work can delay them.
+        if !switches.output_down() {
+            match render_snapshot(&config, &sources) {
+                Ok(plan) => {
+                    last_render_error = None;
+                    current_plan = plan;
+                }
+                Err(error) => {
+                    let error = format!("{error:#}");
+                    if last_render_error.as_deref() != Some(error.as_str()) {
+                        eprintln!("render: {error}");
+                        last_render_error = Some(error);
+                    }
+                }
+            }
+        }
+        for failure in displays.publish_feedback(&current_plan, &switches.treatments()) {
+            if let Err(error) = switches.reset_device(&failure.adapter) {
+                eprintln!("reset {}: {error:#}", failure.adapter);
+            }
+            eprintln!("update {} display: {}", failure.adapter, failure.message);
+        }
+        if !switches.output_down() {
+            match presentation.sync(&sources, &config.bindings) {
+                Ok(_) => last_presentation_error = None,
+                Err(error) => {
+                    let error = format!("{error:#}");
+                    if last_presentation_error.as_deref() != Some(error.as_str()) {
+                        eprintln!("update pane presentation: {error}");
+                        last_presentation_error = Some(error);
+                    }
+                }
+            }
         }
         let _keep_manager_registered = &manager;
     })
@@ -1084,9 +1037,9 @@ struct PresentationPublisher {
 }
 
 impl PresentationPublisher {
-    fn sync<D: AgentSource>(&mut self, panes: &D) -> Result<bool> {
+    fn sync<D: AgentSource>(&mut self, panes: &D, keys: &[String]) -> Result<bool> {
         let store = JsonBindingStore::from_environment();
-        let presentation = BindingService::new(&store, panes).panes()?;
+        let presentation = BindingService::new(&store, panes).with_keys(keys).panes()?;
         self.publish(panes, presentation)
     }
 
@@ -1137,11 +1090,7 @@ fn pane_reference(pane: &AgentPresentation) -> AgentRef {
 /// live pane cache, and send a new transport snapshot only when it matters.
 /// Binding reconciliation remains a CLI/request operation; polling it here
 /// would rewrite the state file and Herdr metadata on every event-loop tick.
-fn publish_display<D>(
-    config: &config::Config,
-    panes: &D,
-    displays: &mut DisplaySet,
-) -> Result<Vec<beckon::display::DisplayFailure>>
+fn render_snapshot<D>(config: &config::Config, panes: &D) -> Result<beckon::render::RenderPlan>
 where
     D: AgentSource,
 {
@@ -1162,16 +1111,31 @@ where
                 .map(|pane| (binding, pane))
         })
         .collect::<Vec<_>>();
-    let plan = beckon::render::render(&config.display, &bindings)?;
-    Ok(displays.publish(&plan))
+    beckon::render::render(&config.display, &bindings)
 }
 
-fn handle_connection<D: AgentSource>(mut stream: UnixStream, panes: &D) -> Result<()> {
+fn handle_connection<D: AgentSource>(
+    mut stream: UnixStream,
+    panes: &D,
+    config: &mut config::Config,
+    switches: &mut Switches<SystemEmitter>,
+) -> Result<()> {
     configure_client_stream(&stream)?;
     let mut line = String::new();
     BufReader::new(stream.try_clone()?).read_line(&mut line)?;
     let response = match serde_json::from_str::<Request>(&line) {
-        Ok(request) => match dispatch(request, panes) {
+        Ok(request) => match match request {
+            Request::ResetControls { device } => {
+                if config.devices.iter().any(|d| d.id == device) {
+                    switches
+                        .reset_device(&device)
+                        .map(|()| json!({"reset":device}))
+                } else {
+                    Err(anyhow::anyhow!("unknown device {device:?}"))
+                }
+            }
+            request => dispatch_config(request, panes, config),
+        } {
             Ok(data) => Response::Ok { data },
             Err(error) => Response::Error {
                 message: error.to_string(),
@@ -1223,10 +1187,22 @@ fn client(request: Request) -> Result<()> {
     }
 }
 
-fn dispatch<D: AgentSource>(request: Request, panes: &D) -> Result<Value> {
+fn dispatch_config<D: AgentSource>(
+    request: Request,
+    panes: &D,
+    config: &mut config::Config,
+) -> Result<Value> {
     let store = JsonBindingStore::from_environment();
-    let bindings = BindingService::new(&store, panes);
+    let bindings = BindingService::new(&store, panes).with_keys(&config.bindings);
     match request {
+        Request::ConfigModel => Ok(
+            json!({"config_version":3,"bindings":config.bindings,"devices":config.devices,"display":{"theme":config.display.theme,"themes":config.display.themes}}),
+        ),
+        Request::SetTheme { name } => {
+            config.set_theme(&name)?;
+            Ok(json!({"theme":name}))
+        }
+        Request::ResetControls { .. } => bail!("reset must be handled by the device owner"),
         Request::Bind {
             pane_id,
             session,
@@ -1337,12 +1313,8 @@ fn resolve_pane<D: AgentSource>(
 /// setup can still drive the pad when Herdr is not running.
 fn build_sources(config: &config::Config) -> Result<beckon::source_set::SourceSet> {
     let mut sources: Vec<Box<dyn AgentSource>> = Vec::new();
-    match live_directories(config) {
-        Ok(herdr) => sources.push(Box::new(herdr)),
-        Err(error) if config.sources.is_empty() => return Err(error),
-        Err(error) => {
-            eprintln!("beckond: Herdr unavailable, continuing with configured sources: {error:#}")
-        }
+    if config.herdr.enabled {
+        sources.push(Box::new(live_directories(config)?));
     }
     for source in &config.sources {
         sources.push(Box::new(beckon::command_source::CommandSource::new(
@@ -1355,10 +1327,8 @@ fn build_sources(config: &config::Config) -> Result<beckon::source_set::SourceSe
 /// One-shot equivalent for read-only CLI commands such as `beckon preview`.
 fn cli_sources(config: &config::Config) -> Result<beckon::source_set::SourceSet> {
     let mut sources: Vec<Box<dyn AgentSource>> = Vec::new();
-    match cli_directories(config) {
-        Ok(herdr) => sources.push(Box::new(herdr)),
-        Err(error) if config.sources.is_empty() => return Err(error),
-        Err(error) => eprintln!("beckon: Herdr unavailable: {error:#}"),
+    if config.herdr.enabled {
+        sources.push(Box::new(cli_directories(config)?));
     }
     for source in &config.sources {
         sources.push(Box::new(beckon::command_source::CommandSource::new(
@@ -1416,10 +1386,50 @@ fn cli_directories(config: &config::Config) -> Result<SessionRouter<HerdrCli>> {
 /// Resolve a physical AG id to the logical key declared for that slot. Returns
 /// `None` for ids the configuration does not claim (ChatGPT's 0-5, the seven
 /// other physical keys, the mic key), so those presses never focus anything.
+#[cfg(test)]
 fn pad_key_for_slot(map: &[(u8, String)], slot: u8) -> Option<&str> {
     map.iter()
         .find(|(id, _)| *id == slot)
         .map(|(_, key)| key.as_str())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn route_device_key<D: AgentSource>(
+    address: &beckon::device::Address,
+    pressed: bool,
+    config: &config::Config,
+    sources: &D,
+    terminal: Option<&TerminalLink>,
+    confirm: &mut RepeatPressConfirm,
+    switches: &mut Switches<SystemEmitter>,
+) {
+    let already_held = switches.held_for(address);
+    if let Err(error) = switches.event(address, pressed, Instant::now()) {
+        eprintln!("action {}:{}: {error:#}", address.device, address.address);
+        if let Err(error) = switches.reset_device(&address.device) {
+            eprintln!("release failed output: {error:#}");
+        }
+        return;
+    }
+    if !pressed || already_held {
+        return;
+    }
+    let key = config
+        .devices
+        .iter()
+        .filter(|device| device.id == address.device)
+        .flat_map(|device| device.definition.keys.values())
+        .find(|key| key.members.contains(address));
+    if let Some(binding) = key.and_then(|key| key.binding.as_deref()) {
+        route_key(
+            binding,
+            &address.address,
+            config,
+            sources,
+            terminal,
+            confirm,
+        );
+    }
 }
 
 /// Route one logical key activation from any physical input (a global hotkey
@@ -1438,7 +1448,7 @@ fn route_key<D: AgentSource>(
         eprintln!("record {key}: {error:#}");
     }
     let now = Instant::now();
-    let target = pane_for_key(key, sources);
+    let target = pane_for_key(key, sources, &config.bindings);
     let confirmed = config.actions.confirm.enabled
         && target.as_ref().is_ok_and(|pane| {
             confirm.take_if_ready(key, pane, pane_is_focused(sources, pane), now)
@@ -1507,7 +1517,7 @@ fn focus_key<D: AgentSource>(
 ) -> Result<()> {
     let span = info_span!("focus_bound_pane", key);
     let _entered = span.enter();
-    let pane = pane_for_key(key, panes)?;
+    let pane = pane_for_key(key, panes, &config.bindings)?;
     info!(session = %pane.session, pane_id = %pane.pane_id, "resolved bound pane");
     // Raising the adopted surface is best effort: a missing record, a changed
     // backend, or a stale handle warns and degrades to command + pane focus.
@@ -1543,9 +1553,11 @@ fn focus_key<D: AgentSource>(
     Ok(())
 }
 
-fn pane_for_key<D: AgentSource>(key: &str, panes: &D) -> Result<AgentRef> {
+fn pane_for_key<D: AgentSource>(key: &str, panes: &D, keys: &[String]) -> Result<AgentRef> {
     let store = JsonBindingStore::from_environment();
-    BindingService::new(&store, panes).pane_for_key(key)
+    BindingService::new(&store, panes)
+        .with_keys(keys)
+        .pane_for_key(key)
 }
 
 fn pane_is_focused<D: AgentSource>(panes: &D, pane: &AgentRef) -> bool {
@@ -1571,6 +1583,12 @@ mod tests {
     use super::*;
     use clap::CommandFactory;
 
+    fn dispatch<D: AgentSource>(request: Request, panes: &D) -> Result<Value> {
+        let mut config: config::Config = toml::from_str(include_str!("../templates/config.toml"))?;
+        config.bindings = (1..=10).map(|n| format!("f{n}")).collect();
+        dispatch_config(request, panes, &mut config)
+    }
+
     fn help_for(args: &[&str]) -> String {
         let mut command = Cli::command();
         let command = args.iter().fold(&mut command, |command, name| {
@@ -1595,7 +1613,7 @@ mod tests {
         let bind_help = help_for(&["bind"]);
         assert!(bind_help.contains("Beckon never auto-registers agents"));
         assert!(bind_help.contains("REX_SESSION + REX_BLOCK"));
-        assert!(bind_help.contains("--key f1"));
+        assert!(bind_help.contains("--key key1"));
         assert!(bind_help.contains("release it first"));
 
         let release_help = help_for(&["release"]);
@@ -1853,11 +1871,11 @@ mod tests {
     }
 
     #[test]
-    fn describes_enabled_input_profiles_at_startup() {
-        assert_eq!(
-            input_diagnostic(&[InputProfile::Glove80, InputProfile::MacbookFunctionKeys]),
-            "glove80, macbook-function-keys"
-        );
+    fn configured_key_inspection_is_a_cli_command() {
+        assert!(matches!(
+            Cli::try_parse_from(["beckon", "keys"]).unwrap().command,
+            CommandLine::Keys
+        ));
     }
 
     #[test]

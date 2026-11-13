@@ -6,7 +6,7 @@
 
 rustPlatform.buildRustPackage {
   pname = "beckon";
-  version = "0.4.0";
+  version = "0.5.0";
   src = ../.;
   cargoLock.lockFile = ../Cargo.lock;
   nativeBuildInputs = [ makeWrapper ];

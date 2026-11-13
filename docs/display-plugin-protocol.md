@@ -11,22 +11,21 @@ directly; it never evaluates the command through a shell.
 
 ```toml
 [outputs]
-adapters = ["glove80-usb"]
 
 [[outputs.plugins]]
 id = "status-log"
 command = ["/absolute/path/to/display-plugin-log.py", "/tmp/beckon-display.log"]
 ```
 
-Built-in adapters and external plugins share one ID namespace. IDs must use
-lowercase kebab-case and must be unique. `adapters` may be empty, and built-in
-adapters and external plugins may run together.
+Device instances and external plugins share one ID namespace. IDs must use
+lowercase kebab-case and must be unique. Built-in devices are declared in
+`config.d/`; they and external plugins may run together.
 
 Plugins are trusted local executables running with the user's permissions.
 Only configure programs you trust. Relative executable names use the daemon's
 `PATH`; absolute paths are more predictable for launchd and declarative Nix
-installations. Arguments are not expanded, so `~`, environment variables, and
-shell syntax remain literal text.
+installations. Only `~/`, `$HOME/` and `${HOME}` path expansion is supported;
+other environment references and shell syntax remain literal text.
 
 ## Transport and lifecycle
 
@@ -39,7 +38,7 @@ on standard input:
 3. A new complete snapshot whenever the resolved render plan changes.
 
 Standard output is discarded. Standard error is inherited by `beckond` and
-therefore appears in the daemon's error log. Version 1 has no response or
+therefore appears in the daemon's error log. Version 2 has no response or
 command channel. A successful write means the child process accepted bytes
 through its operating-system pipe; it does not acknowledge that a physical
 display rendered them.
@@ -54,14 +53,14 @@ When Beckon shuts down, it closes the stream and gives the child a brief period
 to exit before terminating it. Plugins should exit normally when standard
 input reaches EOF.
 
-## Protocol version 1
+## Protocol version 2
 
 Every message names the protocol and version. A plugin should reject an
 unknown protocol or unsupported version and ignore unknown fields within a
 supported version.
 
 ```json
-{"type":"hello","protocol":"beckon.display","version":1,"plugin_id":"status-log"}
+{"type":"hello","protocol":"beckon.display","version":2,"plugin_id":"status-log"}
 ```
 
 Render messages contain a monotonically increasing sequence number and a full
@@ -71,19 +70,21 @@ render plan:
 {
   "type": "render",
   "protocol": "beckon.display",
-  "version": 1,
+  "version": 2,
   "sequence": 12,
   "plan": {
     "keys": [
       {
-        "key": "f1",
+        "key": "key1",
+        "source": "rex",
         "state": "blocked",
         "color": "#F38BA8",
         "brightness": 0.8,
         "motion": "pulse"
       },
       {
-        "key": "f2",
+        "key": "key2",
+        "source": null,
         "state": null,
         "color": "#00C48C",
         "brightness": 0.0,
@@ -101,7 +102,8 @@ render plan:
 }
 ```
 
-The actual plan always contains all ten logical keys. `state: null` means the
+The plan contains every configured binding id, with no fixed count or F-key
+namespace. `source` identifies the integration owning a bound key. `state: null` means the
 key is unbound; Beckon currently resolves that to zero brightness. Colors use
 `#RRGGBB`, brightness is between `0.0` and `1.0`, and motion is one of
 `steady`, `breathe`, `pulse`, or `flicker`.
@@ -121,4 +123,4 @@ daemon IPC, and explicit action configuration.
 
 The protocol schema is implemented in `src/display_protocol.rs`. Breaking
 wire-format changes require a new `version`; additive fields may be introduced
-within version 1 because consumers are required to ignore unknown fields.
+within version 2 because consumers are required to ignore unknown fields.

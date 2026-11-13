@@ -13,6 +13,118 @@ use global_hotkey::{
 };
 use tracing::debug;
 
+use crate::device::{Address, DeviceConfig};
+
+#[derive(Clone, Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GloveOptions {
+    pub status_bindings: Vec<String>,
+}
+
+pub fn validate_device(device: &DeviceConfig) -> Result<()> {
+    if device.definition.adapter == "glove80" {
+        let options: GloveOptions =
+            toml::Value::Table(device.definition.options.clone()).try_into()?;
+        // Ten is the deployed Glove80 wire protocol's width, not a core limit.
+        if options.status_bindings.len() != crate::hid::SLOT_COUNT {
+            anyhow::bail!(
+                "{}: Glove80 status_bindings requires {} wire positions",
+                device.path.display(),
+                crate::hid::SLOT_COUNT
+            );
+        }
+        for binding in &options.status_bindings {
+            if !device
+                .definition
+                .keys
+                .values()
+                .any(|key| key.binding.as_ref() == Some(binding))
+            {
+                anyhow::bail!(
+                    "{}: status binding {binding:?} has no input key",
+                    device.path.display()
+                );
+            }
+        }
+    } else if !device.definition.options.is_empty() {
+        anyhow::bail!(
+            "{}: hotkeys adapter takes no options",
+            device.path.display()
+        );
+    }
+    for key in device.definition.keys.values() {
+        for member in &key.members {
+            member.address.parse::<HotKey>().with_context(|| {
+                format!("{}: shortcut {:?}", device.path.display(), member.address)
+            })?;
+        }
+    }
+    Ok(())
+}
+
+/// Runtime mappings are configuration data; no leaked static strings or fixed
+/// function-key profiles are needed to register a new keyboard layout.
+pub struct ConfiguredInput {
+    bindings: BTreeMap<u32, Address>,
+}
+impl ConfiguredInput {
+    pub fn plan(devices: &[DeviceConfig]) -> Result<Self> {
+        let mut bindings = BTreeMap::new();
+        for device in devices
+            .iter()
+            .filter(|d| matches!(d.definition.adapter.as_str(), "hotkeys" | "glove80"))
+        {
+            validate_device(device)?;
+            for member in device.definition.keys.values().flat_map(|key| &key.members) {
+                let hotkey: HotKey = member.address.parse()?;
+                if let Some(previous) = bindings.insert(hotkey.id(), member.clone()) {
+                    anyhow::bail!(
+                        "shortcut {:?} claimed by {:?} and {:?}",
+                        member.address,
+                        previous,
+                        member
+                    );
+                }
+            }
+        }
+        for device in devices {
+            for (name, action) in &device.definition.actions {
+                let crate::device::Action::Chord { keys, .. } = action;
+                let shortcut = keys
+                    .iter()
+                    .map(|key| if key == "opt" { "alt" } else { key.as_str() })
+                    .collect::<Vec<_>>()
+                    .join("+");
+                // The chord parser is stricter; every supported key also has a
+                // global-hotkey spelling. Fail closed instead of feeding our
+                // synthesized shortcut back into the input graph.
+                let shortcut: HotKey = shortcut.parse()?;
+                if bindings.contains_key(&shortcut.id()) {
+                    anyhow::bail!(
+                        "{}.actions.{name}: output chord is also a registered input (feedback loop)",
+                        device.id
+                    );
+                }
+            }
+        }
+        Ok(Self { bindings })
+    }
+    pub fn register<R: HotkeyRegistrar>(devices: &[DeviceConfig], registrar: &R) -> Result<Self> {
+        // Check every collision before making any OS registrations.
+        let planned = Self::plan(devices)?;
+        for address in planned.bindings.values() {
+            registrar.register(address.address.parse()?)?;
+        }
+        Ok(planned)
+    }
+    pub fn event(&self, event: &GlobalHotKeyEvent) -> Option<(Address, bool)> {
+        self.bindings
+            .get(&event.id)
+            .cloned()
+            .map(|address| (address, event.state == HotKeyState::Pressed))
+    }
+}
+
 /// One physical shortcut exposed by an input adapter.
 #[derive(Clone, Copy, Debug)]
 pub struct InputBinding {

@@ -3,14 +3,22 @@
 mod process;
 
 use anyhow::Result;
+use std::collections::BTreeMap;
 
 use crate::{
-    config::{OutputAdapter, OutputConfig},
+    config::Config,
+    device::{Address, Treatment},
     hid::{self, StatusWriter, UsbStatusWriter},
     render::RenderPlan,
 };
 
 use process::ProcessDisplay;
+
+#[derive(Debug, Clone)]
+pub enum DeviceEvent {
+    Key { address: Address, pressed: bool },
+    Reset { device: String },
+}
 
 /// Result of offering the current render plan to one display integration.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -29,14 +37,23 @@ pub trait DisplaySink {
     fn publish(&mut self, plan: &RenderPlan) -> Result<PublishOutcome>;
     /// Physical key events observed by a sink that owns a device. Write-only
     /// sinks return an empty list; the daemon maps AG ids onto logical keys.
-    fn poll_input(&mut self) -> Result<Vec<crate::creator_micro::HidEvent>> {
+    fn poll_input(&mut self) -> Result<Vec<DeviceEvent>> {
         Ok(Vec::new())
+    }
+    fn publish_feedback(
+        &mut self,
+        plan: &RenderPlan,
+        _feedback: &BTreeMap<Address, Treatment>,
+    ) -> Result<PublishOutcome> {
+        self.publish(plan)
     }
 }
 
 /// The Glove80's optional wired USB status display.
 pub struct Glove80UsbDisplay<W = UsbStatusWriter> {
     sink: hid::RenderSink<W>,
+    bindings: Option<Vec<String>>,
+    id: String,
 }
 
 impl Default for Glove80UsbDisplay<UsbStatusWriter> {
@@ -52,6 +69,8 @@ where
     pub fn new(writer: W) -> Self {
         Self {
             sink: hid::RenderSink::new(writer),
+            bindings: None,
+            id: "glove80".into(),
         }
     }
 }
@@ -61,10 +80,35 @@ where
     W: StatusWriter,
 {
     fn id(&self) -> &str {
-        OutputAdapter::Glove80Usb.name()
+        &self.id
     }
 
     fn publish(&mut self, plan: &RenderPlan) -> Result<PublishOutcome> {
+        let projected;
+        let plan = if let Some(bindings) = &self.bindings {
+            projected = RenderPlan {
+                keys: bindings
+                    .iter()
+                    .enumerate()
+                    .map(|(index, binding)| {
+                        let mut render = plan
+                            .keys
+                            .iter()
+                            .find(|render| &render.key == binding)
+                            .cloned()
+                            .ok_or_else(|| {
+                                anyhow::anyhow!("Glove80 binding {binding:?} missing")
+                            })?;
+                        render.key = format!("f{}", index + 1);
+                        Ok(render)
+                    })
+                    .collect::<Result<Vec<_>>>()?,
+                treatments: plan.treatments.clone(),
+            };
+            &projected
+        } else {
+            plan
+        };
         match self.sink.publish(plan) {
             Ok(true) => Ok(PublishOutcome::Updated),
             Ok(false) => Ok(PublishOutcome::Unchanged),
@@ -99,26 +143,33 @@ pub struct DisplaySet {
 }
 
 impl DisplaySet {
-    pub fn from_config(config: &OutputConfig) -> Result<Self> {
+    pub fn from_config(config: &Config) -> Result<Self> {
         config.validate()?;
-        let mut sinks = config
-            .adapters
-            .iter()
-            .map(|adapter| match adapter {
-                OutputAdapter::Glove80Usb => {
-                    Box::new(Glove80UsbDisplay::default()) as Box<dyn DisplaySink>
+        let mut sinks = Vec::new();
+        for device in &config.devices {
+            let sink: Box<dyn DisplaySink> = match device.definition.adapter.as_str() {
+                "creator-micro" => Box::new(crate::creator_micro::CreatorMicroDisplay::new(
+                    device.clone(),
+                )?),
+                "glove80" => {
+                    let options: crate::input::GloveOptions =
+                        toml::Value::Table(device.definition.options.clone()).try_into()?;
+                    let display = Glove80UsbDisplay {
+                        id: device.id.clone(),
+                        bindings: Some(options.status_bindings),
+                        ..Glove80UsbDisplay::default()
+                    };
+                    Box::new(display)
                 }
-                OutputAdapter::CreatorMicroUsb => Box::new(
-                    crate::creator_micro::CreatorMicroUsbDisplay::new(config.creator_micro.clone()),
-                ) as Box<dyn DisplaySink>,
-            })
-            .map(|sink| ManagedSink {
+                _ => continue,
+            };
+            sinks.push(ManagedSink {
                 sink,
                 last_error: None,
                 last_input_error: None,
-            })
-            .collect::<Vec<_>>();
-        for plugin in &config.plugins {
+            });
+        }
+        for plugin in &config.outputs.plugins {
             sinks.push(ManagedSink {
                 sink: Box::new(ProcessDisplay::new(plugin.clone())?),
                 last_error: None,
@@ -143,9 +194,17 @@ impl DisplaySet {
     }
 
     pub fn publish(&mut self, plan: &RenderPlan) -> Vec<DisplayFailure> {
+        self.publish_feedback(plan, &BTreeMap::new())
+    }
+
+    pub fn publish_feedback(
+        &mut self,
+        plan: &RenderPlan,
+        feedback: &BTreeMap<Address, Treatment>,
+    ) -> Vec<DisplayFailure> {
         let mut failures = Vec::new();
         for managed in &mut self.sinks {
-            match managed.sink.publish(plan) {
+            match managed.sink.publish_feedback(plan, feedback) {
                 Ok(PublishOutcome::Updated) => managed.last_error = None,
                 Ok(PublishOutcome::Unchanged | PublishOutcome::Unavailable) => {}
                 Err(error) => {
@@ -166,7 +225,7 @@ impl DisplaySet {
     /// Collect physical key events from every sink that can produce them.
     /// Errors are de-duplicated per adapter, matching `publish`, so a
     /// disconnected pad does not flood the daemon log on every tick.
-    pub fn poll_input(&mut self) -> (Vec<crate::creator_micro::HidEvent>, Vec<DisplayFailure>) {
+    pub fn poll_input(&mut self) -> (Vec<DeviceEvent>, Vec<DisplayFailure>) {
         let mut events = Vec::new();
         let mut failures = Vec::new();
         for managed in &mut self.sinks {
@@ -176,6 +235,9 @@ impl DisplaySet {
                     events.append(&mut found);
                 }
                 Err(error) => {
+                    events.push(DeviceEvent::Reset {
+                        device: managed.sink.id().to_string(),
+                    });
                     let message = format!("{error:#}");
                     if managed.last_input_error.as_deref() != Some(message.as_str()) {
                         failures.push(DisplayFailure {
