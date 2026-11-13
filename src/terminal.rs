@@ -301,18 +301,35 @@ mod tests {
 
     impl TestStore {
         fn new() -> Self {
-            let directory = std::env::temp_dir().join(format!(
-                "beckon-surfaces-test-{}-{}",
-                std::process::id(),
+            Self::with_timestamp(
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap()
-                    .as_nanos()
+                    .as_nanos(),
+            )
+        }
+
+        fn with_timestamp(timestamp: u128) -> Self {
+            // AIDEV-NOTE: optimized Darwin tests can observe identical wall-clock
+            // timestamps. A process-local sequence keeps parallel fixtures private.
+            static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+            let directory = std::env::temp_dir().join(format!(
+                "beckon-surfaces-test-{}-{}-{}",
+                std::process::id(),
+                timestamp,
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             ));
             Self(SurfaceStore {
                 path: directory.join("surfaces.json"),
             })
         }
+    }
+
+    #[test]
+    fn fixtures_remain_isolated_when_the_clock_returns_the_same_timestamp() {
+        let first = TestStore::with_timestamp(123);
+        let second = TestStore::with_timestamp(123);
+        assert_ne!(first.0.path, second.0.path);
     }
 
     impl Drop for TestStore {
