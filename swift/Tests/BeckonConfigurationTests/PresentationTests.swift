@@ -53,6 +53,10 @@ private actor PresentationFixture: Transport {
     }
     func setOutcome(_ value: Outcome) { outcome = value }
     func setCapabilities(_ capabilities: Capabilities?) { config.capabilities = capabilities }
+    func changeElsewhere() {
+        config.revision = "other-client"
+        config.display.themes["night"]?["idle"] = Treatment(color: "#FF0000", brightness: 0.8, motion: .flicker)
+    }
     func send(_ request: Request, to endpoint: String) async throws -> Data {
         requests.append(request)
         switch request {
@@ -164,5 +168,40 @@ final class PresentationModelTests: XCTestCase {
         XCTAssertEqual(model.configuration?.devices[0].definition.channelTreatment("ring"), treatment)
         XCTAssertEqual(model.configuration?.devices[0].definition.keys, originalKeys)
         XCTAssertNotNil(model.notice)
+    }
+    @MainActor func testConflictRefreshRetainsDraftUntilExplicitReconciliation() async throws {
+        let fixture = try PresentationFixture()
+        let model = ConfigurationModel(endpoint: "/fixture.sock", transport: fixture)
+        await model.connect()
+        var draft = AppearanceDraft(try XCTUnwrap(model.configuration?.display.themes["night"]?["idle"]), revision: "r1")
+        draft.value.color = "#00FF00"
+        let proposed = PresentationChange.themeState(theme: "night", state: .idle, treatment: draft.value)
+        await fixture.changeElsewhere()
+        let rejected = await model.setPresentation(proposed, expectedRevision: "r1")
+        XCTAssertFalse(rejected)
+        await model.refresh()
+        let current = try XCTUnwrap(model.configuration?.display.themes["night"]?["idle"])
+        XCTAssertEqual(current.color, "#FF0000")
+        XCTAssertEqual(draft.value.color, "#00FF00")
+        XCTAssertFalse(draft.matches(model.configuration?.revision))
+        XCTAssertEqual(draft.revision, "r1")
+        draft.reconcile(using: current, revision: model.configuration?.revision)
+        XCTAssertEqual(draft.value.color, "#00FF00")
+        XCTAssertEqual(draft.baseline, current)
+        let accepted = await model.setPresentation(proposed, expectedRevision: try XCTUnwrap(draft.revision))
+        XCTAssertTrue(accepted)
+        draft.discard(using: try XCTUnwrap(model.configuration?.display.themes["night"]?["idle"]), revision: model.configuration?.revision)
+        XCTAssertFalse(draft.hasChanges)
+        XCTAssertEqual(draft.value.color, "#00FF00")
+    }
+    func testFeedbackDraftDiscardRestoresLatestStateRatherThanOriginal() {
+        let held = Treatment(color: "#FFFFFF", brightness: 1, motion: .steady)
+        var draft = AppearanceDraft(Feedback(held: held), revision: "initial")
+        draft.value.held = nil; draft.value.latched = held
+        let latest = Feedback(idle: held)
+        XCTAssertFalse(draft.matches("new"))
+        draft.discard(using: latest, revision: "new")
+        XCTAssertEqual(draft.value, latest); XCTAssertEqual(draft.revision, "new")
+        XCTAssertFalse(draft.hasChanges)
     }
 }

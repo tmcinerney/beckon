@@ -82,21 +82,28 @@ import BeckonConfiguration
             Button("Apply theme") { Task { await model.setTheme(theme) } }
                 .disabled(!editable || config.display.themes[theme] == nil || theme == config.display.theme)
             Text(config.supportsPresentation("theme_state")
-                 ? "Edit a treatment, then Save. Unsaved drafts reset when the configuration revision changes."
+                 ? "Edit a treatment, then Save. If configuration changes, review and reconcile your retained draft."
                  : "This daemon does not advertise theme treatment editing. Local previews cannot be saved.")
                 .font(.caption).foregroundStyle(.secondary)
-            if let treatments = config.display.themes[config.display.theme] {
-                ForEach(treatments.keys.sorted(), id: \.self) { state in
-                    if let treatment = treatments[state] {
-                        TreatmentView(label: state, treatment: treatment)
-                        DisclosureGroup("Edit \(state) appearance") {
-                            TreatmentEditor(treatment: treatment, label: "\(state) appearance",
-                                            supported: config.supportsPresentation("theme_state") && ThemeState(rawValue: state) != nil,
-                                            editable: editable) { draft in
-                                if let revision = config.revision, let state = ThemeState(rawValue: state) {
-                                    Task { await model.setPresentation(.themeState(theme: config.display.theme, state: state, treatment: draft), expectedRevision: revision) }
+            ForEach(config.display.themes.keys.sorted(), id: \.self) { themeName in
+                DisclosureGroup("Theme \(themeName)") {
+                    if let treatments = config.display.themes[themeName] {
+                        ForEach(treatments.keys.sorted(), id: \.self) { state in
+                            if let treatment = treatments[state] {
+                                TreatmentView(label: state, treatment: treatment)
+                                DisclosureGroup("Edit \(state) appearance") {
+                                    TreatmentEditor(treatment: treatment, revision: config.revision, label: "\(themeName) \(state) appearance",
+                                                    supported: config.supportsPresentation("theme_state") && ThemeState(rawValue: state) != nil,
+                                                    editable: editable) { draft, revision in
+                                        guard let state = ThemeState(rawValue: state),
+                                              await model.setPresentation(.themeState(theme: themeName, state: state, treatment: draft), expectedRevision: revision),
+                                              let saved = model.configuration,
+                                              let treatment = saved.display.themes[themeName]?[state.rawValue],
+                                              let revision = saved.revision else { return nil }
+                                        return (treatment, revision)
+                                    }.id(state)
                                 }
-                            }.id("\(config.revision ?? "legacy")-\(config.display.theme)-\(state)-\(treatment)")
+                            }
                         }
                     }
                 }
@@ -196,25 +203,34 @@ private struct DeviceView: View {
                             else { Text("\(state): normal binding/base rendering").foregroundStyle(.secondary) }
                         }
                         DisclosureGroup("Edit feedback \(name)") {
-                            EffectEditor(effects: effect, label: "\(device.id) \(name)",
-                                         supported: config.supportsPresentation("device_effect"), editable: editable) { draft in
-                                if let revision = config.revision {
-                                    Task { await model.setPresentation(.deviceEffect(device: device.id, effect: name, effects: draft), expectedRevision: revision) }
-                                }
-                            }.id("\(config.revision ?? "legacy")-\(device.id)-\(name)")
+                            EffectEditor(effects: effect, revision: config.revision, label: "\(device.id) \(name)",
+                                         supported: config.supportsPresentation("device_effect"), editable: editable) { draft, revision in
+                                guard await model.setPresentation(.deviceEffect(device: device.id, effect: name, effects: draft), expectedRevision: revision),
+                                      let saved = model.configuration,
+                                      let effects = saved.devices.first(where: { $0.id == device.id })?.definition.effects[name],
+                                      let revision = saved.revision else { return nil }
+                                return (effects, revision)
+                            }.id("\(device.id)-\(name)")
                         }
                     }
                 }
                 ForEach(config.capabilities?.device_channels[device.id] ?? [], id: \.self) { channel in
                     if let treatment = device.definition.channelTreatment(channel) {
                         TreatmentView(label: channel, treatment: treatment)
+                        if device.definition.adapter == "creator-micro", channel == "ring",
+                           device.definition.options["ring_follows_state_color"] == .bool(true) {
+                            Text("Ring follows agent state colour; this saved colour is its fallback. Brightness and motion remain channel treatments.")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
                         DisclosureGroup("Edit \(channel) channel") {
-                            TreatmentEditor(treatment: treatment, label: "\(device.id) \(channel)",
-                                            supported: config.supportsPresentation("device_channel"), editable: editable) { draft in
-                                if let revision = config.revision {
-                                    Task { await model.setPresentation(.deviceChannel(device: device.id, channel: channel, treatment: draft), expectedRevision: revision) }
-                                }
-                            }.id("\(config.revision ?? "legacy")-\(device.id)-\(channel)")
+                            TreatmentEditor(treatment: treatment, revision: config.revision, label: "\(device.id) \(channel)",
+                                            supported: config.supportsPresentation("device_channel"), editable: editable) { draft, revision in
+                                guard await model.setPresentation(.deviceChannel(device: device.id, channel: channel, treatment: draft), expectedRevision: revision),
+                                      let saved = model.configuration,
+                                      let treatment = saved.devices.first(where: { $0.id == device.id })?.definition.channelTreatment(channel),
+                                      let revision = saved.revision else { return nil }
+                                return (treatment, revision)
+                            }.id("\(device.id)-\(channel)")
                         }
                     } else { Text("\(channel): effective treatment unavailable; editing disabled.").foregroundStyle(.secondary) }
                 }

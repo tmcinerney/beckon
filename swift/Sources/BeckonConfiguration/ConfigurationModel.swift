@@ -116,17 +116,18 @@ import Combine
         guard configuration?.display.themes[name] != nil else { error = "Select a configured theme."; return }
         await mutate(.setTheme(name))
     }
-    public func setPresentation(_ change: PresentationChange, expectedRevision: String) async {
+    @discardableResult public func setPresentation(_ change: PresentationChange, expectedRevision: String) async -> Bool {
         guard canMutate, let path = connectedEndpoint else {
-            error = "Connect and refresh this endpoint before making changes."; return
+            error = "Connect and refresh this endpoint before making changes."; return false
         }
         guard !expectedRevision.isEmpty, configuration?.revision == expectedRevision else {
-            error = "Appearance draft is stale. Refresh and review it before saving."; return
+            error = "Appearance draft is stale. Refresh and review it before saving."; return false
         }
         guard configuration?.supports(change) == true else {
-            error = "This presentation change is not supported by the current configuration and capabilities."; return
+            error = "This presentation change is not supported by the current configuration and capabilities."; return false
         }
-        do { try change.validate() } catch { self.error = error.localizedDescription; return }
+        do { try change.validate() } catch { self.error = error.localizedDescription; return false }
+        var saved = false
         await perform(path: path) { model, generation in
             let updated: Configuration
             do {
@@ -145,8 +146,10 @@ import Combine
             // AIDEV-NOTE: Use the daemon's canonical response, not the draft. This does not
             // refresh agent status, so preserve the binding snapshot's freshness deadline.
             model.configuration = updated
-            model.notice = "Presentation saved; canonical configuration received."
+            model.notice = "Presentation saved on host; physical LED output is not confirmed."
+            saved = true
         }
+        return saved
     }
     public func bind(key: String, agent: AgentIdentity) async {
         guard configuration?.bindings.contains(key) == true,

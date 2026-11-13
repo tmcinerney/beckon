@@ -44,7 +44,7 @@ pickers, text fields, sliders, colour pickers, disclosure groups and buttons.
   transaction and do not establish hardware or source-cache freshness.
 - Basic mutations at core `88a2a2f`: `set_theme` and explicit source-qualified
   `bind`. Guarded presentation/release use the contract from parent's `391f2ba`,
-  inspected read-only without merging Rust into this Swift branch.
+  subsequently cherry-picked by explicit parent authorization (`78589fe` here).
   Typed acknowledgements are checked before readback.
   Failure never changes the displayed model optimistically. A transport failure
   after sending a write reports an unknown outcome; failed readback reports an
@@ -87,8 +87,11 @@ All appearance writes send exactly:
 explicit JSON nulls for disabled states. `device_channel` addresses an advertised
 device channel. Native colour pickers, hex fields, brightness sliders and animation
 pickers edit local drafts; only Save sends IPC. Discard restores the original values.
-The UI captures the draft's revision and resets unsaved drafts when the effective
-revision changes. The model rejects stale drafts, invalid treatments and unavailable
+The UI captures the draft's revision and retains unsaved drafts when the effective
+revision changes. It displays the new saved value alongside the draft and requires
+an explicit “Keep draft against current revision” or “Discard draft / use current”
+choice. A conflict never silently refreshes/retries a write or adopts a new revision.
+The model rejects stale drafts, invalid treatments and unavailable
 targets before dispatch. The daemon rejects revision conflicts and persistence errors.
 Failed writes retain the old displayed model and never announce success or retry.
 
@@ -96,11 +99,14 @@ Successful `set_presentation` returns the full canonical model; the client publi
 that response directly rather than its draft. This does not refresh agent status's
 timestamp. Old daemons continue to support basic reads/theme selection/bind while
 appearance Save and guarded Release stay unavailable.
+The ring editor explains when state-following makes its colour a fallback.
+Success notices explicitly confirm host state, not physical LED observation.
 
 ## Current integration gaps
 
-1. Parent must integrate the Swift commits with core `391f2ba` or its successor
-   before new appearance/release operations are available. These operations have
+1. This branch includes core `391f2ba` via authorized cherry-pick. The parent still
+   owns integration/release/deployment and production remains v2 until coordinated
+   migration. These operations have
    been checked using isolated fixtures; the live service was not touched.
 2. `status.bindings` reports live bindings, not the entire ledger. Missing rows
    are labelled “No live owner reported”, not “free”. A dormant owner can still

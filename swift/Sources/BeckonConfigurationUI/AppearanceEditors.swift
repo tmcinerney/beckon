@@ -2,30 +2,51 @@ import SwiftUI
 import BeckonConfiguration
 
 struct TreatmentEditor: View {
-    @State private var draft: Treatment
-    let original: Treatment
+    @State private var draft: AppearanceDraft<Treatment>
+    @State private var saving = false
+    let current: Treatment
+    let revision: String?
     let label: String
     let supported: Bool
     let editable: Bool
-    let save: (Treatment) -> Void
+    let save: (Treatment, String) async -> (Treatment, String)?
 
-    init(treatment: Treatment, label: String, supported: Bool, editable: Bool, save: @escaping (Treatment) -> Void) {
-        _draft = State(initialValue: treatment); original = treatment
+    init(treatment: Treatment, revision: String?, label: String, supported: Bool, editable: Bool,
+         save: @escaping (Treatment, String) async -> (Treatment, String)?) {
+        _draft = State(initialValue: AppearanceDraft(treatment, revision: revision)); current = treatment; self.revision = revision
         self.label = label; self.supported = supported; self.editable = editable; self.save = save
     }
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text(supported ? "Draft · changes reach the daemon only when saved" : "Local preview only · daemon does not advertise this capability")
                 .font(.caption).foregroundStyle(.secondary)
-            TreatmentFields(draft: $draft, label: label)
+            TreatmentFields(draft: $draft.value, label: label)
+            if !draft.matches(revision) {
+                Text("Configuration changed. Your draft is retained. Review the current saved value before reconciling.")
+                    .foregroundStyle(.orange)
+                TreatmentView(label: "Current", treatment: current)
+                Button("Keep draft against current revision") { draft.reconcile(using: current, revision: revision) }
+                    .disabled(!editable).accessibilityLabel("Reconcile \(label) draft")
+            }
             HStack {
-                Button("Save appearance") { save(draft) }
-                    .disabled(!supported || !editable || draft == original || (try? draft.validate()) == nil)
+                Button("Save appearance") {
+                    guard let expectedRevision = draft.revision else { return }
+                    let value = draft.value
+                    saving = true
+                    Task {
+                        defer { saving = false }
+                        if let (canonical, revision) = await save(value, expectedRevision) {
+                            draft.discard(using: canonical, revision: revision)
+                        }
+                    }
+                }
+                    .disabled(!supported || !editable || !draft.hasChanges || !draft.matches(revision) || (try? draft.value.validate()) == nil)
                     .accessibilityLabel("Save \(label)")
-                Button("Discard draft") { draft = original }.disabled(draft == original)
+                Button("Discard draft / use current") { draft.discard(using: current, revision: revision) }
+                    .disabled(!draft.hasChanges && draft.matches(revision))
                     .accessibilityLabel("Discard \(label) draft")
             }
-        }
+        }.disabled(saving)
     }
 }
 
@@ -59,17 +80,20 @@ struct TreatmentFields: View {
 }
 
 struct EffectEditor: View {
-    @State private var draft: Feedback
-    let original: Feedback
+    @State private var draft: AppearanceDraft<Feedback>
+    @State private var saving = false
+    let current: Feedback
+    let revision: String?
     let label: String
     let supported: Bool
     let editable: Bool
-    let save: (Feedback) -> Void
+    let save: (Feedback, String) async -> (Feedback, String)?
     // Visible draft seed when an absent state is explicitly enabled; never sent until Save.
     private let seed = Treatment(color: "#FFFFFF", brightness: 1, motion: .steady)
 
-    init(effects: Feedback, label: String, supported: Bool, editable: Bool, save: @escaping (Feedback) -> Void) {
-        _draft = State(initialValue: effects); original = effects
+    init(effects: Feedback, revision: String?, label: String, supported: Bool, editable: Bool,
+         save: @escaping (Feedback, String) async -> (Feedback, String)?) {
+        _draft = State(initialValue: AppearanceDraft(effects, revision: revision)); current = effects; self.revision = revision
         self.label = label; self.supported = supported; self.editable = editable; self.save = save
     }
     var body: some View {
@@ -79,21 +103,42 @@ struct EffectEditor: View {
             if !supported { Text("Local preview only · daemon does not advertise effect editing.").font(.caption) }
             ForEach(FeedbackState.allCases, id: \.self) { state in
                 Toggle("\(state.rawValue) treatment", isOn: Binding(
-                    get: { draft[state] != nil }, set: { draft[state] = $0 ? (draft[state] ?? seed) : nil }
+                    get: { draft.value[state] != nil }, set: { draft.value[state] = $0 ? (draft.value[state] ?? seed) : nil }
                 )).accessibilityLabel("\(label) \(state.rawValue) treatment enabled")
-                if draft[state] != nil {
-                    TreatmentFields(draft: Binding(get: { draft[state] ?? seed }, set: { draft[state] = $0 }),
+                if draft.value[state] != nil {
+                    TreatmentFields(draft: Binding(get: { draft.value[state] ?? seed }, set: { draft.value[state] = $0 }),
                                     label: "\(label) \(state.rawValue)")
                 }
             }
-            if (try? draft.validate()) == nil { Text("Keep at least one valid feedback treatment.").foregroundStyle(.red) }
+            if (try? draft.value.validate()) == nil { Text("Keep at least one valid feedback treatment.").foregroundStyle(.red) }
+            if !draft.matches(revision) {
+                Text("Configuration changed. Your draft is retained; review all current feedback states before reconciling.")
+                    .foregroundStyle(.orange)
+                ForEach(FeedbackState.allCases, id: \.self) { state in
+                    if let treatment = current[state] { TreatmentView(label: "Current \(state.rawValue)", treatment: treatment) }
+                    else { Text("Current \(state.rawValue): normal binding/base rendering") }
+                }
+                Button("Keep draft against current revision") { draft.reconcile(using: current, revision: revision) }
+                    .disabled(!editable).accessibilityLabel("Reconcile \(label) feedback draft")
+            }
             HStack {
-                Button("Save feedback") { save(draft) }
-                    .disabled(!supported || !editable || draft == original || (try? draft.validate()) == nil)
+                Button("Save feedback") {
+                    guard let expectedRevision = draft.revision else { return }
+                    let value = draft.value
+                    saving = true
+                    Task {
+                        defer { saving = false }
+                        if let (canonical, revision) = await save(value, expectedRevision) {
+                            draft.discard(using: canonical, revision: revision)
+                        }
+                    }
+                }
+                    .disabled(!supported || !editable || !draft.hasChanges || !draft.matches(revision) || (try? draft.value.validate()) == nil)
                     .accessibilityLabel("Save \(label) feedback")
-                Button("Discard draft") { draft = original }.disabled(draft == original)
+                Button("Discard draft / use current") { draft.discard(using: current, revision: revision) }
+                    .disabled(!draft.hasChanges && draft.matches(revision))
                     .accessibilityLabel("Discard \(label) feedback draft")
             }
-        }
+        }.disabled(saving)
     }
 }
