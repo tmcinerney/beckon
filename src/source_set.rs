@@ -50,6 +50,12 @@ impl AgentSource for SourceSet {
         "sources"
     }
 
+    fn refresh(&self) {
+        for source in &self.sources {
+            source.refresh();
+        }
+    }
+
     fn panes(&self) -> Result<Vec<Agent>> {
         let mut agents = Vec::new();
         for source in &self.sources {
@@ -99,5 +105,64 @@ impl AgentSource for SourceSet {
 
     fn send_keys(&self, pane: &AgentRef, keys: &[&str]) -> Result<()> {
         self.route(&pane.source)?.send_keys(pane, keys)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{cell::Cell, collections::BTreeSet, rc::Rc};
+
+    use anyhow::Result;
+
+    use crate::core::{Agent, AgentRef, AgentSource};
+
+    use super::SourceSet;
+
+    struct CountingSource {
+        id: String,
+        refreshes: Rc<Cell<usize>>,
+    }
+
+    impl AgentSource for CountingSource {
+        fn id(&self) -> &str {
+            &self.id
+        }
+
+        fn panes(&self) -> Result<Vec<Agent>> {
+            Ok(Vec::new())
+        }
+
+        fn observed_sessions(&self) -> Result<BTreeSet<String>> {
+            Ok(BTreeSet::new())
+        }
+
+        fn focus_pane(&self, _pane: &AgentRef) -> Result<()> {
+            Ok(())
+        }
+
+        fn refresh(&self) {
+            self.refreshes.set(self.refreshes.get() + 1);
+        }
+    }
+
+    #[test]
+    fn refresh_fans_out_to_every_source() {
+        let first = Rc::new(Cell::new(0));
+        let second = Rc::new(Cell::new(0));
+        let sources = SourceSet::new(vec![
+            Box::new(CountingSource {
+                id: "first".into(),
+                refreshes: first.clone(),
+            }),
+            Box::new(CountingSource {
+                id: "second".into(),
+                refreshes: second.clone(),
+            }),
+        ]);
+
+        sources.refresh();
+
+        assert_eq!(first.get(), 1);
+        assert_eq!(second.get(), 1);
     }
 }

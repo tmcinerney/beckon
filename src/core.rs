@@ -256,6 +256,13 @@ pub trait AgentSource {
     fn current_identity(&self) -> Option<AgentRef> {
         None
     }
+
+    /// Drop any cached agent snapshot so the next [`Self::panes`] observes
+    /// current state. Sources backed by a short-lived cache (for example a
+    /// command source with a snapshot TTL) override this; stateless sources
+    /// keep the no-op default.
+    fn refresh(&self) {}
+
     fn focus_pane(&self, pane: &AgentRef) -> Result<()>;
 
     /// Record the Beckon key on the agent, when the source has writable
@@ -527,14 +534,22 @@ impl<'a> BindingService<'a> {
     }
 }
 
-/// Preserve the original single-session error text for the default session, and
-/// name the session otherwise so multi-session mistakes stay diagnosable.
+/// A resolved identity can be stale (for example a recycled terminal still
+/// exporting old identity environment variables). Give an actionable recovery
+/// without hardcoding any integration's vocabulary: only the configured source
+/// id, the opaque pane id, generic wording, and the CLI command are used.
 fn pane_missing_message(pane: &AgentRef) -> String {
-    if pane.session == DEFAULT_SESSION {
-        "pane no longer exists".into()
+    let scope = if pane.session == DEFAULT_SESSION {
+        format!("source {}", pane.source)
     } else {
-        format!("pane no longer exists in session {}", pane.session)
-    }
+        format!("source {} in session {}", pane.source, pane.session)
+    };
+    format!(
+        "no live agent matches pane {} in {}; the identity may be stale. \
+         Retry with `beckon bind --pane <id>` using an explicit pane, or unset \
+         the identity environment variables for this source.",
+        pane.pane_id, scope
+    )
 }
 
 #[derive(Debug, Serialize)]
@@ -776,20 +791,38 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_pane_names_its_session_outside_the_default() {
+    fn a_missing_pane_flags_a_stale_identity_without_product_vocabulary() {
         let store = MemoryStore::default();
         let panes = FakePanes::new(vec![pane("p1")]);
         let service = BindingService::new(&store, &panes);
 
-        let default_error = service.bind(&reference("gone"), None).unwrap_err();
-        assert_eq!(default_error.to_string(), "pane no longer exists");
+        let default_error = service
+            .bind(&reference("gone"), None)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            default_error.contains("identity may be stale"),
+            "{default_error}"
+        );
+        assert!(
+            default_error.contains("beckon bind --pane <id>"),
+            "{default_error}"
+        );
+        assert!(default_error.contains("unset"), "{default_error}");
+        assert!(
+            default_error.contains("environment variables"),
+            "{default_error}"
+        );
+
         let named_error = service
             .bind(&AgentRef::new("agent-workspace", "gone"), None)
-            .unwrap_err();
-        assert_eq!(
-            named_error.to_string(),
-            "pane no longer exists in session agent-workspace"
-        );
+            .unwrap_err()
+            .to_string();
+        assert!(named_error.contains("agent-workspace"), "{named_error}");
+        // The message must not hardcode any integration's env var or product name.
+        for forbidden in ["REX_SESSION", "REX_BLOCK", "Rex", "Herdr"] {
+            assert!(!named_error.contains(forbidden), "{named_error}");
+        }
     }
 
     #[test]

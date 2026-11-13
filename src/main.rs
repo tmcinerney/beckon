@@ -113,6 +113,8 @@ does not close a pane or control an agent."
     Release(ReleaseArgs),
     /// Print every live Herdr pane with its resolved title and Beckon binding.
     Status,
+    /// Force the daemon to refresh its agent snapshots and republish the display.
+    Refresh,
     /// List the terminal surfaces the configured backend can see.
     #[command(
         long_about = "List the terminal surfaces the configured [terminal] backend can see, marking
@@ -315,6 +317,7 @@ enum Request {
     },
     ReleaseAll,
     Status,
+    Refresh,
     FocusKey {
         key: String,
     },
@@ -341,14 +344,7 @@ fn main() -> Result<()> {
         CommandLine::Daemon => daemon(),
         CommandLine::Bind(args) => {
             let config = config::load()?;
-            let (source, session, pane_id) = match bind_identity(&config) {
-                Some(identity) => (
-                    Some(identity.source),
-                    Some(identity.session),
-                    identity.pane_id,
-                ),
-                None => (None, args.pane.session, current_pane(args.pane.pane)?),
-            };
+            let (source, session, pane_id) = bind_target(bind_identity(&config), &args.pane)?;
             client(Request::Bind {
                 pane_id,
                 session,
@@ -366,14 +362,7 @@ fn main() -> Result<()> {
             }
             None => {
                 let config = config::load()?;
-                let (source, session, pane_id) = match bind_identity(&config) {
-                    Some(identity) => (
-                        Some(identity.source),
-                        Some(identity.session),
-                        identity.pane_id,
-                    ),
-                    None => (None, args.pane.session, current_pane(args.pane.pane)?),
-                };
+                let (source, session, pane_id) = bind_target(bind_identity(&config), &args.pane)?;
                 client(Request::ReleasePane {
                     pane_id,
                     session,
@@ -382,6 +371,7 @@ fn main() -> Result<()> {
             }
         },
         CommandLine::Status => client(Request::Status),
+        CommandLine::Refresh => client(Request::Refresh),
         CommandLine::Terminals(args) => terminals_command(args),
         CommandLine::Adopt(args) => adopt_command(args),
         CommandLine::Forget(args) => forget_command(args),
@@ -888,6 +878,41 @@ fn bind_identity(config: &config::Config) -> Option<AgentRef> {
         .find_map(|source| AgentSource::current_identity(&source))
 }
 
+/// Resolve the pane a `bind`/`release` request targets.
+///
+/// An explicit `--pane` or `--session` always wins over a source's identity
+/// session and id, which can be stale when a terminal is recycled into a new
+/// session or block. The identity's source is a stable config id, so it is
+/// preserved on that path. With no identity None is the genuine Herdr fallback.
+/// Only when no explicit target is given do we fall back to the identity's
+/// whole reference, and then to `current_pane()` (HERDR_PANE_ID) as the last
+/// resort.
+///
+/// Returns `(source, session, pane_id)` for the daemon request.
+fn bind_target(
+    identity: Option<AgentRef>,
+    pane: &PaneArgs,
+) -> Result<(Option<String>, Option<String>, String)> {
+    if pane.pane.is_some() || pane.session.is_some() {
+        // Keep the identity's source (a config id) valid even when its session
+        // and pane id are stale. Without an identity, None is intentional.
+        let source = identity.as_ref().map(|identity| identity.source.clone());
+        return Ok((
+            source,
+            pane.session.clone(),
+            current_pane(pane.pane.clone())?,
+        ));
+    }
+    if let Some(identity) = identity {
+        return Ok((
+            Some(identity.source),
+            Some(identity.session),
+            identity.pane_id,
+        ));
+    }
+    Ok((None, None, current_pane(None)?))
+}
+
 fn socket_path() -> PathBuf {
     env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
@@ -1208,6 +1233,9 @@ fn dispatch<D: AgentSource>(request: Request, panes: &D) -> Result<Value> {
             key,
             source,
         } => {
+            // A brand-new session or block may be missing from a source's TTL
+            // snapshot. Clear caches before validating the resolved pane.
+            panes.refresh();
             let pane = resolve_pane(panes, session, &pane_id, source.as_deref())?;
             Ok(serde_json::to_value(bindings.bind(&pane, key.as_deref())?)?)
         }
@@ -1216,6 +1244,7 @@ fn dispatch<D: AgentSource>(request: Request, panes: &D) -> Result<Value> {
             session,
             source,
         } => {
+            panes.refresh();
             let pane = resolve_pane(panes, session, &pane_id, source.as_deref())?;
             Ok(json!({
                 "session": pane.session,
@@ -1235,6 +1264,14 @@ fn dispatch<D: AgentSource>(request: Request, panes: &D) -> Result<Value> {
         Request::ReleaseAll => {
             let released = bindings.release_all()?;
             Ok(json!({"released": released.len(), "bindings": released}))
+        }
+        Request::Refresh => {
+            // Clearing the caches makes the daemon's render tick (which runs
+            // again in this same event-loop iteration) re-list every source and
+            // republish the display from current state instead of a stale
+            // snapshot.
+            panes.refresh();
+            Ok(json!({ "refreshed": true }))
         }
         Request::FocusKey { key } => {
             let pane = bindings.pane_for_key(&key)?;
@@ -1258,23 +1295,28 @@ fn dispatch<D: AgentSource>(request: Request, panes: &D) -> Result<Value> {
     }
 }
 
-/// Resolve a client-supplied pane reference. Without an explicit `--session`,
-/// the pane ID must exist in exactly one managed session; ambiguity asks for
-/// `--session` instead of guessing.
+/// Resolve a client-supplied pane reference. With an explicit `--session`, the
+/// source-qualified reference is built directly. Without both a session and a
+/// source, the pane ID is looked up across every live source, so a pane from a
+/// non-default integration is still found; the matched pane's own reference
+/// carries its real source. An ambiguous ID still asks for `--session`.
 fn resolve_pane<D: AgentSource>(
     panes: &D,
     session: Option<String>,
     pane_id: &str,
     source: Option<&str>,
 ) -> Result<AgentRef> {
-    let source = source.unwrap_or(beckon::core::DEFAULT_SOURCE);
     if let Some(session) = session {
-        return Ok(AgentRef::for_source(source, session, pane_id));
+        return Ok(AgentRef::for_source(
+            source.unwrap_or(beckon::core::DEFAULT_SOURCE),
+            session,
+            pane_id,
+        ));
     }
     let matches = panes
         .panes()?
         .into_iter()
-        .filter(|pane| pane.source == source && pane.pane_id == pane_id)
+        .filter(|pane| pane.pane_id == pane_id && source.is_none_or(|source| pane.source == source))
         .collect::<Vec<_>>();
     match matches.as_slice() {
         [] => bail!("pane {pane_id} no longer exists in any managed session"),
@@ -1519,7 +1561,12 @@ fn pane_is_focused<D: AgentSource>(panes: &D, pane: &AgentRef) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::{cell::RefCell, thread};
+    use std::{
+        cell::{Cell, RefCell},
+        ffi::OsString,
+        sync::{Mutex, MutexGuard},
+        thread,
+    };
 
     use super::*;
     use clap::CommandFactory;
@@ -1589,11 +1636,16 @@ mod tests {
         writes: RefCell<Vec<(String, String)>>,
         pane_gone: bool,
         panes: Vec<beckon::core::Agent>,
+        refreshes: Cell<usize>,
     }
 
     impl AgentSource for RecordingDirectory {
         fn id(&self) -> &str {
             beckon::core::DEFAULT_SOURCE
+        }
+
+        fn refresh(&self) {
+            self.refreshes.set(self.refreshes.get() + 1);
         }
 
         fn panes(&self) -> Result<Vec<beckon::core::Agent>> {
@@ -1830,5 +1882,171 @@ mod tests {
             serde_json::from_str::<Response>(&line).unwrap(),
             Response::Ok { .. }
         ));
+    }
+
+    #[test]
+    fn explicit_pane_beats_a_stale_env_identity() {
+        let cli = Cli::try_parse_from(["beckon", "bind", "--pane", "block:good"]).unwrap();
+        let CommandLine::Bind(args) = cli.command else {
+            panic!("expected bind command");
+        };
+        // A resolved identity can be stale (e.g. identity env vars left over
+        // from a recycled terminal). An explicit --pane must win over its
+        // session/id, but the stable source id is preserved.
+        let stale_identity = AgentRef::for_source("rex", "session:X", "block:stale");
+        let (source, session, pane_id) = bind_target(Some(stale_identity), &args.pane).unwrap();
+        assert_eq!(pane_id, "block:good");
+        assert_eq!(source.as_deref(), Some("rex"));
+        assert_eq!(session, None);
+    }
+
+    #[test]
+    fn env_identity_is_used_only_without_an_explicit_target() {
+        let cli = Cli::try_parse_from(["beckon", "bind"]).unwrap();
+        let CommandLine::Bind(args) = cli.command else {
+            panic!("expected bind command");
+        };
+        let identity = AgentRef::for_source("rex", "session:X", "block:current");
+        let (source, session, pane_id) = bind_target(Some(identity), &args.pane).unwrap();
+        assert_eq!(pane_id, "block:current");
+        assert_eq!(source.as_deref(), Some("rex"));
+        assert_eq!(session.as_deref(), Some("session:X"));
+    }
+
+    #[test]
+    fn parses_the_refresh_subcommand() {
+        assert!(matches!(
+            Cli::try_parse_from(["beckon", "refresh"]).unwrap().command,
+            CommandLine::Refresh
+        ));
+    }
+
+    #[test]
+    fn refresh_request_clears_source_caches() {
+        let directory = RecordingDirectory {
+            panes: vec![pane("default", "p1", false)],
+            ..Default::default()
+        };
+        let data = dispatch(Request::Refresh, &directory).unwrap();
+        assert_eq!(directory.refreshes.get(), 1);
+        assert_eq!(data, json!({ "refreshed": true }));
+    }
+
+    static DISPATCH_STATE_LOCK: Mutex<()> = Mutex::new(());
+
+    /// `dispatch` resolves its binding store from `XDG_STATE_HOME`. Redirect it
+    /// to a private temp dir and serialize these tests so a full-path bind
+    /// never reads or overwrites the user's real bindings file.
+    struct IsolatedState {
+        _lock: MutexGuard<'static, ()>,
+        path: std::path::PathBuf,
+        previous: Option<OsString>,
+    }
+
+    impl IsolatedState {
+        fn new() -> Self {
+            let _lock = DISPATCH_STATE_LOCK
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let path = std::env::temp_dir().join(format!(
+                "beckon-bind-test-state-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            let previous = std::env::var_os("XDG_STATE_HOME");
+            // SAFETY: the lock serializes the only tests that touch this
+            // variable; it is restored before the lock is released on drop.
+            unsafe { std::env::set_var("XDG_STATE_HOME", &path) };
+            Self {
+                _lock,
+                path,
+                previous,
+            }
+        }
+    }
+
+    impl Drop for IsolatedState {
+        fn drop(&mut self) {
+            // SAFETY: see `new`; the lock is still held during the restore.
+            unsafe {
+                match &self.previous {
+                    Some(value) => std::env::set_var("XDG_STATE_HOME", value),
+                    None => std::env::remove_var("XDG_STATE_HOME"),
+                }
+            }
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+
+    fn rex_pane(session: &str, id: &str) -> beckon::core::Agent {
+        let mut agent = pane(session, id, false);
+        agent.source = "rex".into();
+        agent
+    }
+
+    #[test]
+    fn bind_full_path_resolves_non_default_source_with_no_identity() {
+        let _state = IsolatedState::new();
+        let directory = RecordingDirectory {
+            panes: vec![rex_pane("session:1", "block:x")],
+            ..Default::default()
+        };
+        // No identity env: bind_target keeps source = None, session = None.
+        // resolve_pane must still find the "rex" pane across all sources.
+        let pane_args = PaneArgs {
+            pane: Some("block:x".into()),
+            session: None,
+        };
+        let (source, session, pane_id) = bind_target(None, &pane_args).unwrap();
+        assert_eq!(source, None);
+        assert_eq!(session, None);
+
+        let data = dispatch(
+            Request::Bind {
+                pane_id,
+                session,
+                key: None,
+                source,
+            },
+            &directory,
+        )
+        .unwrap();
+        assert_eq!(data["changed"], json!(true));
+        assert_eq!(data["key"], json!("f1"));
+    }
+
+    #[test]
+    fn bind_full_path_resolves_non_default_source_with_identity_and_session() {
+        let _state = IsolatedState::new();
+        let directory = RecordingDirectory {
+            panes: vec![rex_pane("session:1", "block:x")],
+            ..Default::default()
+        };
+        // A stale identity still contributes its stable source id, and an
+        // explicit --session is honoured on the source-qualified path.
+        let identity = AgentRef::for_source("rex", "stale-scope", "block:old");
+        let pane_args = PaneArgs {
+            pane: Some("block:x".into()),
+            session: Some("session:1".into()),
+        };
+        let (source, session, pane_id) = bind_target(Some(identity), &pane_args).unwrap();
+        assert_eq!(source.as_deref(), Some("rex"));
+        assert_eq!(session.as_deref(), Some("session:1"));
+
+        let data = dispatch(
+            Request::Bind {
+                pane_id,
+                session,
+                key: None,
+                source,
+            },
+            &directory,
+        )
+        .unwrap();
+        assert_eq!(data["changed"], json!(true));
+        assert_eq!(data["key"], json!("f1"));
     }
 }
