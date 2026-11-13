@@ -39,6 +39,9 @@ Ids and counts are data. Do not label all controls agents, assume F1–F10, hard
 six slots, or derive AG addresses in UI code. Adapter options are read-only in
 this API. In particular, a ring configured to follow state colour uses its
 configured ring colour only as a fallback; communicate that distinction.
+Creator Micro's per-layer `zone_lighting` is structural: base/ring edits apply
+only on layers declaring `"beckon"`; `"firmware"` layers retain their native
+zone lighting and still receive configured per-key feedback.
 
 ## Mutate presentation
 

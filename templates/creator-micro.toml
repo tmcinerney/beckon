@@ -11,14 +11,18 @@ ring = { color = "#FF4975", brightness = 0.5, motion = "breathe" }
 
 # Profile selector and 1-based layer position reported by device.status/kb.pl.
 # Do not declare the ChatGPT layer: Beckon leaves unowned layers alone.
+# zone_lighting is required: "beckon" manages base/ring, "firmware" leaves
+# those zones alone while still applying configured per-key feedback.
 [options.layers.rex]
 profile = 1
 position = 3
 source = "rex"
+zone_lighting = "beckon"
 
 [options.layers.test]
 profile = 1
 position = 6
+zone_lighting = "beckon"
 
 [keys.key1]
 members = ["creator-micro:rex/6", "creator-micro:test/6"]
@@ -71,10 +75,8 @@ effects = "dictation"
 [actions.dictate]
 kind = "chord"
 keys = ["ctrl", "opt", "d"]
-mode = "tap-hold"
-tap_ms = 300
+mode = "hold"
 
 [effects.dictation]
-held = { color = "#FF0000", brightness = 1.0, motion = "steady" }
-latched = { color = "#FF0000", brightness = 1.0, motion = "breathe" }
+held = { color = "#FF0000", brightness = 1.0, motion = "breathe" }
 # Absent idle treatment restores the configured binding/base rendering.

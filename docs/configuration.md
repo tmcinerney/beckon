@@ -37,12 +37,10 @@ effects = "dictation"
 [actions.dictate]
 kind = "chord"
 keys = ["ctrl", "opt", "d"]
-mode = "tap-hold"
-tap_ms = 300
+mode = "hold"
 
 [effects.dictation]
-held = { color = "#FF0000", brightness = 1.0, motion = "steady" }
-latched = { color = "#FF0000", brightness = 1.0, motion = "breathe" }
+held = { color = "#FF0000", brightness = 1.0, motion = "breathe" }
 ```
 
 `key11`, `dictate` and `dictation` are arbitrary names. Only `kind`, `mode`,
@@ -77,8 +75,13 @@ position or assignment order.
 
 For `tap-hold`, `tap_ms` is required and positive. It is forbidden for the other
 modes. A duration strictly below the threshold is a tap; exactly at it is a hold.
-The example's 300 ms is a configurable starting value, **not a measured VoiceInk
-constant**. Firmware events contain no timestamp, so timing uses host receipt.
+The example above uses hold-only output and has no tap threshold or latch.
+Configure the receiving shortcut as Push to Talk as well. If using `tap-hold`,
+its threshold must match the receiver's rules; matching thresholds alone cannot
+observe receiver startup, ignored events or external stops. The
+[VoiceInk source audit](voiceink-integration-research.md) records its 500 ms
+Hybrid boundary and version-specific caveats. Firmware events contain no timestamp,
+so Beckon timing uses host receipt.
 
 These are output gestures, not a receiving-application API. `toggle` sends a pulse
 for an app that toggles on its shortcut; it does not leave an OS key held between
@@ -118,6 +121,23 @@ layer selectors. The adapter seeds selectors from `device.status`, follows order
 `kb.pl` events and translates input before it reaches core. A layer's optional
 `source` filters both agent lighting and navigation, not chord-only controls.
 Unknown layers receive no normal lighting publications. AG00–AG05 are never claimed.
+
+Each declared layer must also choose `zone_lighting = "beckon"` or `"firmware"`.
+There is no implicit owner. `beckon` publishes the device's configured base/ring
+treatments; `firmware` emits no `v.oai.rgbcfg` command for that layer, preserving
+its native zone lighting while still publishing configured AG-key feedback.
+For example, a microphone-only Home layer can declare:
+
+```toml
+[options.layers.home]
+profile = 1
+position = 1
+zone_lighting = "firmware"
+```
+
+This ownership covers the base/ring zones, not the entire layer. Per-key feedback
+and release/cleanup still apply. Changing layer ownership is structural and needs
+a daemon restart; presentation channel edits only affect `beckon`-owned layers.
 
 Ordinary `KC_ENT`/macro keys do not emit the AG events consumed by this adapter.
 Leaving bottom-right as `KC_ENT` preserves Enter without host synthesis. The

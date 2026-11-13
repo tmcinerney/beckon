@@ -267,6 +267,14 @@ pub struct Layer {
     pub profile: u16,
     pub position: u16,
     pub source: Option<String>,
+    pub zone_lighting: ZoneLighting,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ZoneLighting {
+    Beckon,
+    Firmware,
 }
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
@@ -419,6 +427,22 @@ fn frame(id: u8, treatment: Option<Treatment>, speed: f32) -> Value {
     }
 }
 
+#[derive(Clone, Debug, PartialEq)]
+struct LightingFrame {
+    zones: Option<Value>,
+    entries: Value,
+}
+
+impl LightingFrame {
+    fn commands(&self) -> impl Iterator<Item = (&'static str, Value)> + '_ {
+        self.zones
+            .iter()
+            .cloned()
+            .map(|zones| ("v.oai.rgbcfg", zones))
+            .chain(std::iter::once(("v.oai.thstatus", self.entries.clone())))
+    }
+}
+
 /// One handle owns both input and lighting. The adapter tracks layers, then
 /// emits device-neutral addresses; the daemon never interprets a layer number.
 pub struct CreatorMicroDisplay {
@@ -427,7 +451,7 @@ pub struct CreatorMicroDisplay {
     pad: Option<Pad>,
     active: Option<String>,
     selector: Option<(u16, u16)>,
-    last_frame: Option<(Value, Value)>,
+    last_frame: Option<LightingFrame>,
     last_write: Option<Instant>,
     last_try: Option<Instant>,
     reset_pending: bool,
@@ -456,20 +480,20 @@ impl CreatorMicroDisplay {
     fn layer(&mut self, profile: u16, position: u16) {
         let selector = Some((profile, position));
         if self.selector != selector {
-            if let Some((_, entries)) = &self.last_frame {
-                self.clear_pending
-                    .extend(
-                        entries
-                            .as_array()
-                            .into_iter()
-                            .flatten()
-                            .filter_map(|entry| {
-                                entry
-                                    .get("id")
-                                    .and_then(Value::as_u64)
-                                    .and_then(|id| u8::try_from(id).ok())
-                            }),
-                    );
+            if let Some(frame) = &self.last_frame {
+                self.clear_pending.extend(
+                    frame
+                        .entries
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|entry| {
+                            entry
+                                .get("id")
+                                .and_then(Value::as_u64)
+                                .and_then(|id| u8::try_from(id).ok())
+                        }),
+                );
             }
             self.reset_pending = true;
             self.last_frame = None;
@@ -590,7 +614,7 @@ impl CreatorMicroDisplay {
         &self,
         plan: &RenderPlan,
         feedback: &BTreeMap<Address, Treatment>,
-    ) -> Result<Option<(Value, Value)>> {
+    ) -> Result<Option<LightingFrame>> {
         let Some(active) = &self.active else {
             return Ok(None);
         };
@@ -637,10 +661,13 @@ impl CreatorMicroDisplay {
             ring.color = treatment.color;
         }
         let zone = |t: Treatment| json!({"e":effect(t.motion),"b":t.brightness,"s":self.options.effect_speed,"m":1,"c":rgb_u32(t.color)});
-        Ok(Some((
-            json!({"keys":zone(self.options.base),"ambient":zone(ring)}),
-            Value::Array(entries),
-        )))
+        // AIDEV-NOTE: firmware-owned layers still get per-key feedback, never
+        // Rex's device-level base/ring palette or an empty RGB-zone command.
+        Ok(Some(LightingFrame {
+            zones: (layer.zone_lighting == ZoneLighting::Beckon)
+                .then(|| json!({"keys":zone(self.options.base),"ambient":zone(ring)})),
+            entries: Value::Array(entries),
+        }))
     }
 }
 
@@ -738,12 +765,11 @@ impl DisplaySink for CreatorMicroDisplay {
             return Ok(PublishOutcome::Unchanged);
         }
         let pad = self.pad.as_mut().unwrap();
-        if let Err(error) = pad
-            .send_only("v.oai.rgbcfg", frame.0.clone())
-            .and_then(|()| pad.send_only("v.oai.thstatus", frame.1.clone()))
-        {
-            self.lost();
-            return Err(error);
+        for (method, payload) in frame.commands() {
+            if let Err(error) = pad.send_only(method, payload) {
+                self.lost();
+                return Err(error);
+            }
         }
         self.last_frame = Some(frame);
         self.last_write = Some(Instant::now());
@@ -774,6 +800,38 @@ mod tests {
         assert_eq!(
             parse_address(&display.options, "rex/16").unwrap(),
             ("rex", 16)
+        );
+    }
+
+    #[test]
+    fn layer_zone_lighting_ownership_is_typed_and_required() {
+        let mut device = configured().device;
+        let layers = device.definition.options["layers"].as_table_mut().unwrap();
+        for (_, layer) in layers.iter_mut() {
+            layer.as_table_mut().unwrap().insert(
+                "zone_lighting".into(),
+                toml::Value::String("firmware".into()),
+            );
+        }
+        assert!(
+            options(&device).is_ok(),
+            "firmware-owned zone lighting must be configurable"
+        );
+        device.definition.options["layers"]["rex"]
+            .as_table_mut()
+            .unwrap()
+            .remove("zone_lighting");
+        assert!(
+            options(&device).is_err(),
+            "ownership must not have a hidden default"
+        );
+        device.definition.options["layers"]["rex"]
+            .as_table_mut()
+            .unwrap()
+            .insert("zone_lighting".into(), toml::Value::String("both".into()));
+        assert!(
+            options(&device).is_err(),
+            "two competing zone owners must be rejected"
         );
     }
 
@@ -812,10 +870,18 @@ mod tests {
         let mut plan = crate::render::demo_plan(&crate::render::DisplayConfig::default()).unwrap();
         plan.keys[0].key = "key1".into();
         plan.keys[0].source = Some("other".into());
-        let (_, entries) = display.lighting(&plan, &BTreeMap::new()).unwrap().unwrap();
+        let entries = display
+            .lighting(&plan, &BTreeMap::new())
+            .unwrap()
+            .unwrap()
+            .entries;
         assert_eq!(entries[0]["e"], 0);
         plan.keys[0].source = Some("rex".into());
-        let (_, entries) = display.lighting(&plan, &BTreeMap::new()).unwrap().unwrap();
+        let entries = display
+            .lighting(&plan, &BTreeMap::new())
+            .unwrap()
+            .unwrap()
+            .entries;
         assert_eq!(entries[0]["e"], 1);
     }
 
@@ -845,7 +911,7 @@ mod tests {
             })
             .collect();
         let plan = crate::render::render(&crate::render::DisplayConfig::default(), &[]).unwrap();
-        let (_, entries) = display.lighting(&plan, &feedback).unwrap().unwrap();
+        let entries = display.lighting(&plan, &feedback).unwrap().unwrap().entries;
         let entries = entries.as_array().unwrap();
         assert!(
             entries
@@ -855,6 +921,196 @@ mod tests {
         assert_eq!(entries.iter().filter(|entry| entry["e"] == 4).count(), 2);
         display.layer(1, 2);
         assert!(display.lighting(&plan, &feedback).unwrap().is_none());
+    }
+
+    fn with_microphone_layers() -> DeviceConfig {
+        let mut device = configured().device;
+        for (name, position) in [("home", 1), ("herdr", 4), ("delta", 5)] {
+            let layer = Layer {
+                profile: 1,
+                position,
+                source: None,
+                zone_lighting: ZoneLighting::Firmware,
+            };
+            device.definition.options["layers"]
+                .as_table_mut()
+                .unwrap()
+                .insert(name.into(), toml::Value::try_from(layer).unwrap());
+            for id in [16, 17] {
+                device
+                    .definition
+                    .keys
+                    .get_mut("key11")
+                    .unwrap()
+                    .members
+                    .push(Address::try_from(format!("creator-micro:{name}/{id}")).unwrap());
+            }
+        }
+        device
+    }
+
+    #[test]
+    fn firmware_owned_layers_receive_only_joined_microphone_feedback() {
+        let mut display = CreatorMicroDisplay::new(with_microphone_layers()).unwrap();
+        let treatment = Treatment {
+            color: "#FF0000".parse().unwrap(),
+            brightness: 1.0,
+            motion: Motion::Breathe,
+        };
+        let plan = crate::render::render(&crate::render::DisplayConfig::default(), &[]).unwrap();
+        for (name, position) in [("home", 1), ("herdr", 4), ("delta", 5)] {
+            display.layer(1, position);
+            let feedback = [16, 17]
+                .into_iter()
+                .map(|id| {
+                    (
+                        Address::try_from(format!("creator-micro:{name}/{id}")).unwrap(),
+                        treatment,
+                    )
+                })
+                .collect();
+            let frame = display.lighting(&plan, &feedback).unwrap().unwrap();
+            assert!(
+                frame.zones.is_none(),
+                "{name} must preserve its firmware zone lighting"
+            );
+            let commands = frame.commands().collect::<Vec<_>>();
+            assert_eq!(commands.len(), 1);
+            assert_eq!(commands[0].0, "v.oai.thstatus");
+            assert_eq!(commands[0].1.as_array().unwrap().len(), 2);
+            for (entry, id) in commands[0].1.as_array().unwrap().iter().zip([16, 17]) {
+                assert_eq!(entry["id"], id);
+                assert_eq!(entry["e"], EFFECT_BREATH);
+            }
+            let released = display.lighting(&plan, &BTreeMap::new()).unwrap().unwrap();
+            assert!(released.zones.is_none());
+            assert!(
+                released
+                    .entries
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|entry| entry["e"] == EFFECT_OFF)
+            );
+        }
+    }
+
+    #[test]
+    fn beckon_owned_layers_keep_zone_and_key_commands() {
+        let mut display = configured();
+        display.layer(1, 3);
+        let plan = crate::render::render(&crate::render::DisplayConfig::default(), &[]).unwrap();
+        let frame = display.lighting(&plan, &BTreeMap::new()).unwrap().unwrap();
+        let methods = frame
+            .commands()
+            .map(|(method, _)| method)
+            .collect::<Vec<_>>();
+        assert_eq!(methods, ["v.oai.rgbcfg", "v.oai.thstatus"]);
+        assert!(frame.zones.unwrap().get("keys").is_some());
+    }
+
+    #[test]
+    fn four_layer_hold_control_releases_on_layer_changes_and_excludes_scratch() {
+        use crate::switches::{Emitter, Switches};
+        use std::{cell::RefCell, rc::Rc};
+        struct Recording(Rc<RefCell<Vec<bool>>>);
+        impl Emitter for Recording {
+            fn emit(&mut self, _: &crate::chord::Chord, down: bool) -> Result<()> {
+                self.0.borrow_mut().push(down);
+                Ok(())
+            }
+        }
+        fn route<E: Emitter>(event: DeviceEvent, switches: &mut Switches<E>) {
+            match event {
+                DeviceEvent::Reset { device } => switches.reset_device(&device).unwrap(),
+                DeviceEvent::Key { address, pressed } => {
+                    switches.event(&address, pressed, Instant::now()).unwrap()
+                }
+            }
+        }
+
+        let mut device = with_microphone_layers();
+        device.definition.options["layers"]
+            .as_table_mut()
+            .unwrap()
+            .remove("test");
+        for key in device.definition.keys.values_mut() {
+            key.members
+                .retain(|member| !member.address.starts_with("test/"));
+        }
+        device
+            .definition
+            .keys
+            .retain(|_, key| !key.members.is_empty());
+        let crate::device::Action::Chord { mode, tap_ms, .. } =
+            device.definition.actions.get_mut("dictate").unwrap();
+        *mode = crate::device::Mode::Hold;
+        *tap_ms = None;
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let mut switches = Switches::new(&[device.clone()], Recording(calls.clone())).unwrap();
+        let mut display = CreatorMicroDisplay::new(device).unwrap();
+        let plan = crate::render::render(&crate::render::DisplayConfig::default(), &[]).unwrap();
+        for position in [1, 3, 4, 5] {
+            route(
+                display
+                    .decode(&json!({"m":"kb.pl","p":{"p":1,"l":position}}))
+                    .unwrap(),
+                &mut switches,
+            );
+            for id in [16, 17] {
+                route(
+                    display
+                        .decode(&json!({"m":"v.oai.hid","p":{"act":1,"k":format!("AG{id}")}}))
+                        .unwrap(),
+                    &mut switches,
+                );
+            }
+            assert!(switches.output_down());
+            route(
+                display
+                    .decode(&json!({"m":"v.oai.hid","p":{"act":0,"k":"AG16"}}))
+                    .unwrap(),
+                &mut switches,
+            );
+            assert!(
+                switches.output_down(),
+                "rolling to the other half must keep the chord down"
+            );
+            route(
+                display
+                    .decode(&json!({"m":"kb.pl","p":{"p":1,"l":2}}))
+                    .unwrap(),
+                &mut switches,
+            );
+            assert!(!switches.output_down());
+            assert!(
+                display
+                    .lighting(&plan, &switches.treatments())
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        assert_eq!(
+            *calls.borrow(),
+            [true, false, true, false, true, false, true, false]
+        );
+        route(
+            display
+                .decode(&json!({"m":"kb.pl","p":{"p":1,"l":6}}))
+                .unwrap(),
+            &mut switches,
+        );
+        assert!(
+            display
+                .decode(&json!({"m":"v.oai.hid","p":{"act":1,"k":"AG16"}}))
+                .is_none()
+        );
+        assert!(
+            display
+                .lighting(&plan, &switches.treatments())
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
