@@ -94,6 +94,9 @@ choice. A conflict never silently refreshes/retries a write or adopts a new revi
 The model rejects stale drafts, invalid treatments and unavailable
 targets before dispatch. The daemon rejects revision conflicts and persistence errors.
 Failed writes retain the old displayed model and never announce success or retry.
+If the daemon explicitly reports that settings were saved but display refresh failed,
+that message is preserved, the snapshot becomes stale and edits remain blocked until
+an explicit refresh retrieves the authoritative saved model. The draft is retained.
 
 Successful `set_presentation` returns the full canonical model; the client publishes
 that response directly rather than its draft. This does not refresh agent status's

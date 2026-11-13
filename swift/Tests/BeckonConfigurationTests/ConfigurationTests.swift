@@ -1,12 +1,50 @@
 import XCTest
 @testable import BeckonConfiguration
 
-let configJSON = ##"{"config_version":3,"bindings":["key1","review","key11"],"devices":[{"id":"desk","path":"/fixture/config.d/desk.toml","definition":{"adapter":"creator-micro","options":{"layers":{"work":{"source":"rex"}}},"keys":{"joined":{"members":["desk:work/16","desk:work/17"],"action":"dictate","effects":"red"}},"actions":{"dictate":{"kind":"chord","keys":["ctrl","d"],"mode":"tap-hold","tap_ms":300}},"effects":{"red":{"held":{"color":"#FF0000","brightness":1,"motion":"steady"}}}}}],"display":{"theme":"night","themes":{"night":{"idle":{"color":"#123456","brightness":0.4,"motion":"steady"}},"day":{"idle":{"color":"#FFFFFF","brightness":1,"motion":"breathe"}}}}}"##
+let configJSON = ##"""
+{
+  "config_version":3, "bindings":["key1","review","key11"], "sources":["rex","herdr"],
+  "devices":[{"id":"desk","path":"/fixture/config.d/desk.toml","definition":{
+    "adapter":"creator-micro",
+    "options":{
+      "refresh_ms":400,"effect_speed":0.5,"ring_follows_state_color":true,
+      "base":{"color":"#112233","brightness":0.2,"motion":"steady"},
+      "ring":{"color":"#112233","brightness":0.2,"motion":"steady"},
+      "layers":{"work":{"profile":1,"position":3,"source":"rex"}}
+    },
+    "keys":{"joined":{"members":["desk:work/16","desk:work/17"],"binding":null,"action":"dictate","effects":"red"}},
+    "actions":{"dictate":{"kind":"chord","keys":["ctrl","d"],"mode":"tap-hold","tap_ms":300}},
+    "effects":{"red":{"idle":null,"held":{"color":"#FF0000","brightness":1,"motion":"steady"},"latched":null}}
+  }}],
+  "display":{"theme":"night","themes":{
+    "night":{
+      "idle":{"color":"#123456","brightness":0.4,"motion":"steady"},
+      "working":{"color":"#3B82F6","brightness":0.45,"motion":"breathe"},
+      "blocked":{"color":"#FFB020","brightness":0.6,"motion":"breathe"},
+      "done":{"color":"#22C55E","brightness":0.45,"motion":"steady"},
+      "unknown":{"color":"#EF4444","brightness":0.8,"motion":"pulse"}
+    },
+    "day":{
+      "idle":{"color":"#FFFFFF","brightness":1,"motion":"breathe"},
+      "working":{"color":"#3B82F6","brightness":0.45,"motion":"breathe"},
+      "blocked":{"color":"#FFB020","brightness":0.6,"motion":"breathe"},
+      "done":{"color":"#22C55E","brightness":0.45,"motion":"steady"},
+      "unknown":{"color":"#EF4444","brightness":0.8,"motion":"pulse"}
+    }
+  }}
+}
+"""##
 let statusJSON = #"{"bindings":[],"panes":[{"source":"rex","session":"work","pane_id":"same","title":"Review","binding":"","agent_status":"working","focused":false},{"source":"herdr","session":"work","pane_id":"same","title":"Other","binding":"","agent_status":"idle","focused":false}]}"#
 let identity = AgentIdentity(source: "rex", session: "work", pane_id: "same")
 // Shape verified against parent's committed Rust model at 391f2ba.
 let capabilitiesJSON = #"{"presentation_changes":["theme_state","device_effect","device_channel"],"binding_release_guard":true,"device_channels":{"desk":["base","ring"]}}"#
-func ok(_ json: String) -> Data { Data("{\"type\":\"ok\",\"data\":\(json)}\n".utf8) }
+func ok(_ json: String) -> Data {
+    // Fixtures may be readable multiline JSON, but wire frames are always one line.
+    let value = try! JSONSerialization.jsonObject(with: Data(json.utf8), options: [.fragmentsAllowed])
+    var line = try! JSONSerialization.data(withJSONObject: ["type": "ok", "data": value], options: [.sortedKeys])
+    line.append(10)
+    return line
+}
 
 actor MockTransport: Transport {
     var requests: [Request] = []

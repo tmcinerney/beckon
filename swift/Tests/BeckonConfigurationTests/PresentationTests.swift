@@ -40,7 +40,7 @@ final class PresentationTests: XCTestCase {
 }
 
 private actor PresentationFixture: Transport {
-    enum Outcome { case success, conflict, persistenceFailure, disconnected, malformed, missingRevision }
+    enum Outcome { case success, conflict, persistenceFailure, disconnected, malformed, missingRevision, savedButAdapterFailed }
     var config: Configuration
     var requests: [Request] = []
     var outcome: Outcome = .success
@@ -70,6 +70,12 @@ private actor PresentationFixture: Transport {
             case .disconnected: throw ClientError.unavailable("fixture disconnected")
             case .malformed: return ok("{}")
             case .missingRevision: config.revision = nil; return try encodedConfig()
+            case .savedButAdapterFailed:
+                if case .themeState(let theme, let state, let treatment) = change {
+                    config.display.themes[theme]?[state.rawValue] = treatment
+                }
+                config.revision = "saved-revision"
+                return Data(#"{"type":"error","message":"settings saved, but display refresh failed; refresh the model before retrying"}"#.utf8)
             case .success:
                 if case .themeState(let theme, let state, var treatment) = change {
                     // Canonicalization proves the model uses the reply rather than its draft.
@@ -203,5 +209,31 @@ final class PresentationModelTests: XCTestCase {
         draft.discard(using: latest, revision: "new")
         XCTAssertEqual(draft.value, latest); XCTAssertEqual(draft.revision, "new")
         XCTAssertFalse(draft.hasChanges)
+    }
+    @MainActor func testPostSaveAdapterFailureRequiresRefreshWithoutRetry() async throws {
+        let fixture = try PresentationFixture()
+        let model = ConfigurationModel(endpoint: "/fixture.sock", transport: fixture)
+        await model.connect(); await fixture.setOutcome(.savedButAdapterFailed)
+        let previous = model.configuration
+        let result = await model.setPresentation(change, expectedRevision: "r1")
+        XCTAssertFalse(result); XCTAssertNil(model.notice); XCTAssertTrue(model.stale)
+        XCTAssertEqual(model.configuration, previous)
+        XCTAssertTrue(model.error?.contains("settings saved") == true)
+        let requests = await fixture.requests
+        XCTAssertEqual(requests.count, 3)
+        await model.refresh()
+        XCTAssertEqual(model.configuration?.revision, "saved-revision")
+        XCTAssertEqual(model.configuration?.display.themes["night"]?["idle"]?.color, "#abcdef")
+        XCTAssertNil(model.notice)
+    }
+    func testCompleteFiveStateThemesAndConfiguredSources() throws {
+        var config = try JSONDecoder().decode(Configuration.self, from: Data(configJSON.utf8))
+        try config.validate()
+        XCTAssertEqual(config.sources, ["rex", "herdr"])
+        for theme in config.display.themes.values {
+            XCTAssertEqual(Set(theme.keys), Set(ThemeState.allCases.map(\.rawValue)))
+        }
+        config.display.themes["night"]?.removeValue(forKey: "blocked")
+        XCTAssertThrowsError(try config.validate())
     }
 }

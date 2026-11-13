@@ -154,7 +154,13 @@ public struct Configuration: Codable, Equatable, Sendable {
         guard config_version == 3, Set(bindings).count == bindings.count,
               Set(devices.map(\.id)).count == devices.count,
               display.themes[display.theme] != nil else { throw ClientError.invalid("Invalid or unsupported configuration model.") }
-        for theme in display.themes.values { for treatment in theme.values { try treatment.validate() } }
+        let requiredStates = Set(ThemeState.allCases.map(\.rawValue))
+        for theme in display.themes.values {
+            guard Set(theme.keys).isSuperset(of: requiredStates) else {
+                throw ClientError.invalid("Configuration theme is missing required state treatments.")
+            }
+            for treatment in theme.values { try treatment.validate() }
+        }
     }
 }
 public enum PresentationChange: Equatable, Sendable, Encodable {
