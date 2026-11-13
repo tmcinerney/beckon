@@ -133,6 +133,10 @@ impl AgentSource for CommandSource {
         Some(AgentRef::for_source(self.config.id.clone(), scope, id))
     }
 
+    fn refresh(&self) {
+        *self.cache.borrow_mut() = None;
+    }
+
     fn panes(&self) -> Result<Vec<Agent>> {
         self.snapshot()
     }
@@ -213,6 +217,11 @@ fn expand(argument: &str, vars: &BTreeMap<String, String>) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        fs,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
     use super::*;
 
     #[test]
@@ -257,5 +266,38 @@ mod tests {
         assert_eq!(record.id, "session:abc");
         assert_eq!(record.state, "working");
         assert!(record.title.is_empty());
+    }
+
+    #[test]
+    fn refresh_drops_the_cached_snapshot_so_a_new_agent_is_seen() {
+        let path = std::env::temp_dir().join(format!(
+            "beckon-command-source-refresh-{}-{}.json",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::write(&path, r#"[{"id":"a1","state":"working"}]"#).unwrap();
+        let config = AgentSourceConfig {
+            id: "example".into(),
+            list: vec!["/bin/cat".into(), path.to_string_lossy().into_owned()],
+            focus: Vec::new(),
+            activate: Vec::new(),
+            identity: None,
+            refresh_ms: 60_000, // keep the first snapshot cached for the whole test
+        };
+        let source = CommandSource::new(config);
+
+        assert_eq!(source.panes().unwrap()[0].pane_id, "a1");
+        fs::write(&path, r#"[{"id":"a2","state":"working"}]"#).unwrap();
+        // Within the TTL the cached snapshot is still served, even though the
+        // list command now reports a different (brand-new) agent.
+        assert_eq!(source.panes().unwrap()[0].pane_id, "a1");
+
+        source.refresh();
+        assert_eq!(source.panes().unwrap()[0].pane_id, "a2");
+
+        fs::remove_file(&path).unwrap();
     }
 }
