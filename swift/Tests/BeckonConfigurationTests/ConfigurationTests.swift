@@ -4,6 +4,8 @@ import XCTest
 let configJSON = ##"{"config_version":3,"bindings":["key1","review","key11"],"devices":[{"id":"desk","path":"/fixture/config.d/desk.toml","definition":{"adapter":"creator-micro","options":{"layers":{"work":{"source":"rex"}}},"keys":{"joined":{"members":["desk:work/16","desk:work/17"],"action":"dictate","effects":"red"}},"actions":{"dictate":{"kind":"chord","keys":["ctrl","d"],"mode":"tap-hold","tap_ms":300}},"effects":{"red":{"held":{"color":"#FF0000","brightness":1,"motion":"steady"}}}}}],"display":{"theme":"night","themes":{"night":{"idle":{"color":"#123456","brightness":0.4,"motion":"steady"}},"day":{"idle":{"color":"#FFFFFF","brightness":1,"motion":"breathe"}}}}}"##
 let statusJSON = #"{"bindings":[],"panes":[{"source":"rex","session":"work","pane_id":"same","title":"Review","binding":"","agent_status":"working","focused":false},{"source":"herdr","session":"work","pane_id":"same","title":"Other","binding":"","agent_status":"idle","focused":false}]}"#
 let identity = AgentIdentity(source: "rex", session: "work", pane_id: "same")
+// Shape verified against parent's committed Rust model at 391f2ba.
+let capabilitiesJSON = #"{"presentation_changes":["theme_state","device_effect","device_channel"],"binding_release_guard":true,"device_channels":{"desk":["base","ring"]}}"#
 func ok(_ json: String) -> Data { Data("{\"type\":\"ok\",\"data\":\(json)}\n".utf8) }
 
 actor MockTransport: Transport {
@@ -12,22 +14,31 @@ actor MockTransport: Transport {
     var readError = false
     var theme = "night"
     var occupied = false
+    var ownedKey = "key1"
     var failAfterMutation = false
     var malformedReceipt = false
+    var advertiseCapabilities = true
     func setMutationError() { mutationError = true }
     func setReadError() { readError = true }
     func setOccupied() { occupied = true }
     func setFailAfterMutation() { failAfterMutation = true }
     func setMalformedReceipt() { malformedReceipt = true }
+    func setLegacy() { advertiseCapabilities = false }
     func send(_ request: Request, to endpoint: String) async throws -> Data {
         requests.append(request)
         switch request {
         case .configModel:
             if readError { throw ClientError.timeout }
-            return ok(configJSON.replacingOccurrences(of: #""theme":"night""#, with: "\"theme\":\"\(theme)\""))
+            var config = try JSONDecoder().decode(Configuration.self, from: Data(configJSON.utf8))
+            config.display.theme = theme
+            if advertiseCapabilities {
+                config.revision = "r1"
+                config.capabilities = try JSONDecoder().decode(Capabilities.self, from: Data(capabilitiesJSON.utf8))
+            }
+            return ok(String(decoding: try JSONEncoder().encode(config), as: UTF8.self))
         case .status:
             if occupied {
-                return ok(statusJSON.replacingOccurrences(of: #""bindings":[]"#, with: #""bindings":[{"key":"key1","source":"rex","session":"work","pane":{"source":"rex","session":"work","pane_id":"same","agent_status":"working"}}]"#))
+                return ok(statusJSON.replacingOccurrences(of: #""bindings":[]"#, with: #""bindings":[{"key":"KEY","source":"rex","session":"work","pane":{"source":"rex","session":"work","pane_id":"same","agent_status":"working"}}]"#.replacingOccurrences(of: "KEY", with: ownedKey)))
             }
             return ok(statusJSON)
         default:
@@ -37,8 +48,11 @@ actor MockTransport: Transport {
             switch request {
             case .setTheme(let name): theme = name; return ok("{\"theme\":\"\(name)\"}")
             case .bind(let key, let agent):
+                occupied = true; ownedKey = key
                 return ok("{\"key\":\"\(key)\",\"session\":\"\(agent.session)\",\"pane_id\":\"\(agent.pane_id)\",\"changed\":true}")
-            case .releaseKey(let key): return ok("{\"key\":\"\(key)\",\"session\":null,\"pane_id\":null,\"changed\":false}")
+            case .releaseBinding(let key, _):
+                occupied = false
+                return ok("{\"key\":\"\(key)\",\"changed\":true}")
             default: return ok("{}")
             }
         }
@@ -147,7 +161,7 @@ final class ConfigurationTests: XCTestCase {
         await model.connect()
         await model.bind(key: "not-configured", agent: identity)
         await model.bind(key: "review", agent: AgentIdentity(source: "missing", session: "work", pane_id: "same"))
-        await model.release(key: "not-configured")
+        await model.release(key: "not-configured", reference: identity, endpoint: "/fixture.sock")
         let before = await mock.requests
         XCTAssertEqual(before, [.configModel, .status])
         await mock.setMalformedReceipt(); await model.setTheme("day")
@@ -159,10 +173,36 @@ final class ConfigurationTests: XCTestCase {
         let client = ConfigurationModel(endpoint: "/fixture.sock", transport: mock)
         await client.connect(); await client.bind(key: "review", agent: identity)
         XCTAssertNotNil(client.notice)
-        await client.release(key: "review")
+        await client.release(key: "review", reference: identity, endpoint: "/fixture.sock")
         let requests = await mock.requests
         XCTAssertEqual(requests, [.configModel, .status, .bind(key: "review", agent: identity), .configModel, .status,
-                                  .releaseKey("review"), .configModel, .status])
+                                  .releaseBinding(key: "review", reference: identity), .configModel, .status])
+    }
+    @MainActor func testReleaseRejectsChangedOwnerOrEndpointWithoutDispatch() async {
+        let mock = MockTransport(); await mock.setOccupied()
+        let model = ConfigurationModel(endpoint: "/fixture.sock", transport: mock)
+        await model.connect()
+        await model.release(key: "key1", reference: identity, endpoint: "/other.sock")
+        XCTAssertTrue(model.error?.contains("different endpoint") == true)
+        await model.release(key: "key1", reference: AgentIdentity(source: "herdr", session: "work", pane_id: "same"), endpoint: "/fixture.sock")
+        XCTAssertTrue(model.error?.contains("owner changed") == true)
+        let requests = await mock.requests
+        XCTAssertEqual(requests, [.configModel, .status])
+    }
+    @MainActor func testReleaseConflictNeverFallsBackAndLegacyDaemonDisablesRelease() async {
+        let mock = MockTransport(); await mock.setOccupied()
+        let model = ConfigurationModel(endpoint: "/fixture.sock", transport: mock)
+        await model.connect(); await mock.setMutationError()
+        await model.release(key: "key1", reference: identity, endpoint: "/fixture.sock")
+        XCTAssertNil(model.notice); XCTAssertEqual(model.status?.bindings.first?.key, "key1")
+        let requests = await mock.requests
+        XCTAssertEqual(requests, [.configModel, .status, .releaseBinding(key: "key1", reference: identity)])
+        let legacy = MockTransport(); await legacy.setOccupied(); await legacy.setLegacy()
+        let oldModel = ConfigurationModel(endpoint: "/fixture.sock", transport: legacy)
+        await oldModel.connect(); XCTAssertFalse(oldModel.canRelease)
+        await oldModel.release(key: "key1", reference: identity, endpoint: "/fixture.sock")
+        let legacyRequests = await legacy.requests
+        XCTAssertEqual(legacyRequests, [.configModel, .status])
     }
 }
 

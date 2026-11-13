@@ -13,6 +13,8 @@ public enum ClientError: Error, LocalizedError, Equatable {
 }
 
 public enum Motion: String, Codable, CaseIterable, Sendable { case steady, breathe, pulse, flicker }
+public enum ThemeState: String, Codable, CaseIterable, Sendable { case idle, working, blocked, done, unknown }
+public enum FeedbackState: String, Codable, CaseIterable, Sendable { case idle, held, latched }
 public struct Treatment: Codable, Equatable, Sendable {
     public var color: String
     public var brightness: Double
@@ -47,6 +49,29 @@ public struct Feedback: Codable, Equatable, Sendable {
     public var idle: Treatment?
     public var held: Treatment?
     public var latched: Treatment?
+    public init(idle: Treatment? = nil, held: Treatment? = nil, latched: Treatment? = nil) {
+        self.idle = idle; self.held = held; self.latched = latched
+    }
+    private enum CodingKeys: String, CodingKey { case idle, held, latched }
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        // AIDEV-NOTE: The daemon replaces the effect; explicit null clears an override.
+        try c.encode(idle, forKey: .idle)
+        try c.encode(held, forKey: .held)
+        try c.encode(latched, forKey: .latched)
+    }
+    public func validate() throws {
+        guard idle != nil || held != nil || latched != nil else {
+            throw ClientError.invalid("Keep at least one feedback treatment.")
+        }
+        for treatment in [idle, held, latched].compactMap({ $0 }) { try treatment.validate() }
+    }
+    public subscript(state: FeedbackState) -> Treatment? {
+        get { self[state.rawValue] }
+        set {
+            switch state { case .idle: idle = newValue; case .held: held = newValue; case .latched: latched = newValue }
+        }
+    }
     public subscript(state: String) -> Treatment? {
         switch state { case "idle": return idle; case "held": return held; case "latched": return latched; default: return nil }
     }
@@ -86,22 +111,76 @@ public struct DeviceDefinition: Codable, Equatable, Sendable {
     public var keys: [String: Control]
     public var actions: [String: ActionDefinition]
     public var effects: [String: Feedback]
+    public func channelTreatment(_ channel: String) -> Treatment? {
+        guard let value = options[channel], let bytes = try? JSONEncoder().encode(value),
+              let treatment = try? JSONDecoder().decode(Treatment.self, from: bytes),
+              (try? treatment.validate()) != nil else { return nil }
+        return treatment
+    }
 }
 public struct Device: Codable, Equatable, Identifiable, Sendable {
     public var id: String
     public var path: String
     public var definition: DeviceDefinition
 }
+public struct Capabilities: Codable, Equatable, Sendable {
+    public var presentation_changes: [String]
+    public var binding_release_guard: Bool
+    public var device_channels: [String: [String]]
+}
 public struct Configuration: Codable, Equatable, Sendable {
     public var config_version: Int
+    public var revision: String?
+    public var capabilities: Capabilities?
+    public var sources: [String]?
     public var bindings: [String]
     public var devices: [Device]
     public var display: Display
+    public func supportsPresentation(_ kind: String) -> Bool {
+        revision?.isEmpty == false && capabilities?.presentation_changes.contains(kind) == true
+    }
+    public func supports(_ change: PresentationChange) -> Bool {
+        switch change {
+        case .themeState(let theme, let state, _):
+            return supportsPresentation("theme_state") && display.themes[theme]?[state.rawValue] != nil
+        case .deviceEffect(let device, let effect, _):
+            return supportsPresentation("device_effect") && devices.first(where: { $0.id == device })?.definition.effects[effect] != nil
+        case .deviceChannel(let device, let channel, _):
+            return supportsPresentation("device_channel") && capabilities?.device_channels[device]?.contains(channel) == true
+                && devices.first(where: { $0.id == device })?.definition.channelTreatment(channel) != nil
+        }
+    }
     public func validate() throws {
         guard config_version == 3, Set(bindings).count == bindings.count,
               Set(devices.map(\.id)).count == devices.count,
               display.themes[display.theme] != nil else { throw ClientError.invalid("Invalid or unsupported configuration model.") }
         for theme in display.themes.values { for treatment in theme.values { try treatment.validate() } }
+    }
+}
+public enum PresentationChange: Equatable, Sendable, Encodable {
+    case themeState(theme: String, state: ThemeState, treatment: Treatment)
+    case deviceEffect(device: String, effect: String, effects: Feedback)
+    case deviceChannel(device: String, channel: String, treatment: Treatment)
+    private enum Key: String, CodingKey { case kind, theme, state, treatment, device, effect, effects, channel }
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: Key.self)
+        switch self {
+        case .themeState(let theme, let state, let treatment):
+            try c.encode("theme_state", forKey: .kind); try c.encode(theme, forKey: .theme)
+            try c.encode(state, forKey: .state); try c.encode(treatment, forKey: .treatment)
+        case .deviceEffect(let device, let effect, let effects):
+            try c.encode("device_effect", forKey: .kind); try c.encode(device, forKey: .device)
+            try c.encode(effect, forKey: .effect); try c.encode(effects, forKey: .effects)
+        case .deviceChannel(let device, let channel, let treatment):
+            try c.encode("device_channel", forKey: .kind); try c.encode(device, forKey: .device)
+            try c.encode(channel, forKey: .channel); try c.encode(treatment, forKey: .treatment)
+        }
+    }
+    public func validate() throws {
+        switch self {
+        case .themeState(_, _, let treatment), .deviceChannel(_, _, let treatment): try treatment.validate()
+        case .deviceEffect(_, _, let effects): try effects.validate()
+        }
     }
 }
 public struct AgentIdentity: Hashable, Codable, Sendable {
@@ -134,6 +213,7 @@ public struct BindingRecord: Codable, Equatable, Sendable {
     public var source: String
     public var session: String
     public var pane: BoundPane
+    public var reference: AgentIdentity { AgentIdentity(source: source, session: session, pane_id: pane.pane_id) }
 }
 public struct Status: Codable, Equatable, Sendable {
     public var bindings: [BindingRecord]
@@ -148,24 +228,30 @@ public struct Status: Codable, Equatable, Sendable {
 }
 struct ThemeReceipt: Decodable { let theme: String }
 struct BindReceipt: Decodable { let key: String; let session: String; let pane_id: String; let changed: Bool }
-struct ReleaseReceipt: Decodable { let key: String; let session: String?; let pane_id: String?; let changed: Bool }
+struct ReleaseReceipt: Decodable { let key: String; let changed: Bool }
 
 public enum Request: Equatable, Sendable, Encodable {
-    case configModel, status, setTheme(String), bind(key: String, agent: AgentIdentity), releaseKey(String)
+    case configModel, status, setTheme(String), bind(key: String, agent: AgentIdentity)
+    case setPresentation(expectedRevision: String, change: PresentationChange)
+    case releaseBinding(key: String, reference: AgentIdentity)
     public func encode(to encoder: Encoder) throws {
-        enum Key: String, CodingKey { case op, name, key, pane_id, session, source }
+        enum Key: String, CodingKey { case op, name, key, pane_id, session, source, expected_revision, change, reference }
         var c = encoder.container(keyedBy: Key.self)
         switch self {
         case .configModel: try c.encode("config_model", forKey: .op)
         case .status: try c.encode("status", forKey: .op)
         case .setTheme(let name):
             try c.encode("set_theme", forKey: .op); try c.encode(name, forKey: .name)
-        case .releaseKey(let key):
-            try c.encode("release_key", forKey: .op); try c.encode(key, forKey: .key)
         case .bind(let key, let agent):
             try c.encode("bind", forKey: .op); try c.encode(key, forKey: .key)
             try c.encode(agent.source, forKey: .source); try c.encode(agent.session, forKey: .session)
             try c.encode(agent.pane_id, forKey: .pane_id)
+        case .setPresentation(let revision, let change):
+            try c.encode("set_presentation", forKey: .op)
+            try c.encode(revision, forKey: .expected_revision); try c.encode(change, forKey: .change)
+        case .releaseBinding(let key, let reference):
+            try c.encode("release_binding", forKey: .op)
+            try c.encode(key, forKey: .key); try c.encode(reference, forKey: .reference)
         }
     }
 }

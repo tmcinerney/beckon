@@ -42,8 +42,10 @@ pickers, text fields, sliders, colour pickers, disclosure groups and buttons.
   Last-known data stays visibly stale on failure or disconnect. Reads are manual;
   after 15 seconds edits require a refresh. These two reads are not a daemon-side
   transaction and do not establish hardware or source-cache freshness.
-- Supported mutations at core `88a2a2f`: `set_theme`, explicit source-qualified
-  `bind`, and `release_key`. Typed acknowledgements are checked before readback.
+- Basic mutations at core `88a2a2f`: `set_theme` and explicit source-qualified
+  `bind`. Guarded presentation/release use the contract from parent's `391f2ba`,
+  inspected read-only without merging Rust into this Swift branch.
+  Typed acknowledgements are checked before readback.
   Failure never changes the displayed model optimistically. A transport failure
   after sending a write reports an unknown outcome; failed readback reports an
   acknowledged but unverified change.
@@ -52,26 +54,63 @@ pickers, text fields, sliders, colour pickers, disclosure groups and buttons.
   assumed. Adapter options remain typed JSON extension data for read-only inspection.
 - The UI refuses occupied keys and refuses silently moving an already-bound agent.
   Selection identifies source + session/scope + pane ID, never a title alone.
+- Release captures key + exact reference + endpoint when confirmation opens.
+  `release_binding` sends `{key,reference:{source,session,pane_id}}`; the reply is
+  `{key,changed}`. The model checks the captured selection locally and the daemon
+  checks the owner atomically. The Swift client has no `release_key` request.
+
+## Guarded appearance editing
+
+The daemon's `config_model` advertises an opaque `revision` and typed capabilities:
+
+```json
+{
+  "presentation_changes": ["theme_state", "device_effect", "device_channel"],
+  "binding_release_guard": true,
+  "device_channels": {"configured-device-id": ["base", "ring"]}
+}
+```
+
+The values above are an example, not a fixed list of instances or channels.
+Controls are enabled only for advertised changes and existing targets; an absent
+capability disables writes. Channel treatment values are decoded from
+`devices[].definition.options[channel]` (verified against the current adapter).
+Unknown/unreadable channels remain unavailable instead of receiving invented defaults.
+
+All appearance writes send exactly:
+
+```json
+{"op":"set_presentation","expected_revision":"opaque-value","change":{"kind":"theme_state","theme":"configured-theme","state":"working","treatment":{"color":"#123456","brightness":0.6,"motion":"breathe"}}}
+```
+
+`device_effect` replaces the named effect's three states together, including
+explicit JSON nulls for disabled states. `device_channel` addresses an advertised
+device channel. Native colour pickers, hex fields, brightness sliders and animation
+pickers edit local drafts; only Save sends IPC. Discard restores the original values.
+The UI captures the draft's revision and resets unsaved drafts when the effective
+revision changes. The model rejects stale drafts, invalid treatments and unavailable
+targets before dispatch. The daemon rejects revision conflicts and persistence errors.
+Failed writes retain the old displayed model and never announce success or retry.
+
+Successful `set_presentation` returns the full canonical model; the client publishes
+that response directly rather than its draft. This does not refresh agent status's
+timestamp. Old daemons continue to support basic reads/theme selection/bind while
+appearance Save and guarded Release stay unavailable.
 
 ## Current integration gaps
 
-1. Colour/brightness/motion mutation endpoints are absent at `88a2a2f`. Native
-   treatment draft controls are explicitly local preview only; Save is unavailable.
-   Device presentation and idle/held/latched treatments are read-only. No invented
-   appearance requests are emitted. Parent owns the eventual capability/schema.
+1. Parent must integrate the Swift commits with core `391f2ba` or its successor
+   before new appearance/release operations are available. These operations have
+   been checked using isolated fixtures; the live service was not touched.
 2. `status.bindings` reports live bindings, not the entire ledger. Missing rows
    are labelled “No live owner reported”, not “free”. A dormant owner can still
-   cause the daemon to reject a bind. Explicit release remains available for every
-   configured key so the user can release a known dormant binding.
-3. `release_key` has no expected-owner/revision parameter. Confirmation describes
-   releasing the current owner; another client can change ownership between the
-   displayed snapshot and dispatch. An atomic conditional-release endpoint is
-   needed to eliminate this race.
-4. There is no live device connectivity/interaction-state endpoint. The UI shows
+   cause the daemon to reject a bind. UI release requires an observed owner; dormant
+   release remains a separate explicit CLI operation until status exposes the ledger.
+3. There is no live device connectivity/interaction-state endpoint. The UI shows
    configured mappings and feedback definitions only. Held/latched lights describe
    inferred state, not proof of a receiver's state. `reset_controls` exists but is
    intentionally not exposed here because it releases output, beyond configuration.
-5. Runtime UI/accessibility inspection and integration with a deployed daemon are
+4. Runtime UI/accessibility inspection and integration with a deployed daemon are
    not part of isolated verification. Build/tests do not claim physical LED success.
 
 ## Reuse audit

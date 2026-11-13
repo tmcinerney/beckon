@@ -25,6 +25,7 @@ import Combine
         connectedEndpoint != nil && !stale && lastUpdated.map { now.timeIntervalSince($0) < Self.freshnessInterval } == true
     }
     public var canMutate: Bool { !busy && isFresh(at: clock()) && endpoint == connectedEndpoint }
+    public var canRelease: Bool { canMutate && configuration?.capabilities?.binding_release_guard == true }
     public func health(at now: Date) -> String {
         guard connectedEndpoint != nil else { return configuration == nil ? "Disconnected" : "Disconnected · retained snapshot" }
         if busy { return "Contacting Beckon…" }
@@ -94,7 +95,7 @@ import Combine
                     guard receipt.key == key, receipt.session == agent.session, receipt.pane_id == agent.pane_id else {
                         throw ClientError.invalid("Binding acknowledgement mismatch.")
                     }
-                case .releaseKey(let key):
+                case .releaseBinding(let key, _):
                     let receipt: ReleaseReceipt = try await model.read(request, path: path)
                     guard receipt.key == key else { throw ClientError.invalid("Release acknowledgement mismatch.") }
                 default: throw ClientError.invalid("Not a configuration mutation.")
@@ -115,6 +116,38 @@ import Combine
         guard configuration?.display.themes[name] != nil else { error = "Select a configured theme."; return }
         await mutate(.setTheme(name))
     }
+    public func setPresentation(_ change: PresentationChange, expectedRevision: String) async {
+        guard canMutate, let path = connectedEndpoint else {
+            error = "Connect and refresh this endpoint before making changes."; return
+        }
+        guard !expectedRevision.isEmpty, configuration?.revision == expectedRevision else {
+            error = "Appearance draft is stale. Refresh and review it before saving."; return
+        }
+        guard configuration?.supports(change) == true else {
+            error = "This presentation change is not supported by the current configuration and capabilities."; return
+        }
+        do { try change.validate() } catch { self.error = error.localizedDescription; return }
+        await perform(path: path) { model, generation in
+            let updated: Configuration
+            do {
+                updated = try await model.read(.setPresentation(expectedRevision: expectedRevision, change: change), path: path)
+                try updated.validate()
+                guard let revision = updated.revision, !revision.isEmpty else {
+                    throw ClientError.invalid("Presentation acknowledgement is missing its revision.")
+                }
+            } catch let error as ClientError {
+                if case .daemon = error { throw error }
+                throw ClientError.unavailable("Presentation outcome unknown. Refresh before retrying. \(error.localizedDescription)")
+            } catch {
+                throw ClientError.unavailable("Presentation outcome unknown. Refresh before retrying. \(error.localizedDescription)")
+            }
+            guard model.generation == generation else { return }
+            // AIDEV-NOTE: Use the daemon's canonical response, not the draft. This does not
+            // refresh agent status, so preserve the binding snapshot's freshness deadline.
+            model.configuration = updated
+            model.notice = "Presentation saved; canonical configuration received."
+        }
+    }
     public func bind(key: String, agent: AgentIdentity) async {
         guard configuration?.bindings.contains(key) == true,
               status?.panes.contains(where: { $0.id == agent }) == true else {
@@ -130,8 +163,15 @@ import Combine
         }
         await mutate(.bind(key: key, agent: agent))
     }
-    public func release(key: String) async {
-        guard configuration?.bindings.contains(key) == true else { error = "Select a configured key."; return }
-        await mutate(.releaseKey(key))
+    public func release(key: String, reference: AgentIdentity, endpoint: String) async {
+        guard canRelease else { error = "Guarded release is unavailable. Connect to a supporting daemon and refresh."; return }
+        guard endpoint == connectedEndpoint, endpoint == self.endpoint else {
+            error = "Release selection belongs to a different endpoint. Select its owner again."; return
+        }
+        guard configuration?.bindings.contains(key) == true,
+              status?.bindings.contains(where: { $0.key == key && $0.reference == reference }) == true else {
+            error = "Binding owner changed or is not observed. Refresh and select its owner again."; return
+        }
+        await mutate(.releaseBinding(key: key, reference: reference))
     }
 }

@@ -51,6 +51,28 @@ private final class UnixFixture: @unchecked Sendable {
 }
 
 final class SocketTests: XCTestCase {
+    func testPresentationAndFencedReleaseOverSocket() async throws {
+        var updated = try JSONDecoder().decode(Configuration.self, from: Data(configJSON.utf8))
+        updated.revision = "new-revision"
+        updated.capabilities = try JSONDecoder().decode(Capabilities.self, from: Data(capabilitiesJSON.utf8))
+        let server = try UnixFixture(reply: ok(String(decoding: try JSONEncoder().encode(updated), as: UTF8.self)))
+        let request = Request.setPresentation(expectedRevision: "old-revision", change: .themeState(theme: "night", state: .idle,
+            treatment: Treatment(color: "#123456", brightness: 0.4, motion: .steady)))
+        let data = try await SocketTransport().send(request, to: server.path)
+        let canonical = try JSONDecoder().decode(Reply<Configuration>.self, from: data).value()
+        XCTAssertEqual(canonical.revision, "new-revision")
+        let received = await server.worker.value
+        XCTAssertEqual(try JSONDecoder().decode(JSONValue.self, from: received),
+                       try JSONDecoder().decode(JSONValue.self, from: JSONEncoder().encode(request)))
+        let release = try UnixFixture(reply: ok(#"{"key":"review","changed":true}"#))
+        let releaseRequest = Request.releaseBinding(key: "review", reference: identity)
+        let result = try await SocketTransport().send(releaseRequest, to: release.path)
+        let receipt = try JSONDecoder().decode(Reply<ReleaseReceipt>.self, from: result).value()
+        XCTAssertTrue(receipt.changed)
+        let released = await release.worker.value
+        XCTAssertEqual(try JSONDecoder().decode(JSONValue.self, from: released),
+                       try JSONDecoder().decode(JSONValue.self, from: JSONEncoder().encode(releaseRequest)))
+    }
     func testFragmentedSuccessAndExactQualifiedBindRequest() async throws {
         let server = try UnixFixture(reply: ok(configJSON))
         let data = try await SocketTransport().send(.configModel, to: server.path)
@@ -66,7 +88,7 @@ final class SocketTests: XCTestCase {
     }
     func testDaemonErrorsAreNotSuccess() async throws {
         let server = try UnixFixture(reply: Data("{\"type\":\"error\",\"message\":\"occupied\"}\n".utf8))
-        let data = try await SocketTransport().send(.releaseKey("review"), to: server.path)
+        let data = try await SocketTransport().send(.releaseBinding(key: "review", reference: identity), to: server.path)
         XCTAssertThrowsError(try JSONDecoder().decode(Reply<JSONValue>.self, from: data).value()) {
             XCTAssertEqual($0 as? ClientError, .daemon("occupied"))
         }

@@ -6,7 +6,12 @@ import BeckonConfiguration
     @State private var theme = ""
     @State private var key = ""
     @State private var agent: AgentIdentity?
-    @State private var releaseKey: String?
+    private struct ReleaseSelection {
+        let key: String
+        let reference: AgentIdentity
+        let endpoint: String
+    }
+    @State private var releaseSelection: ReleaseSelection?
     public init(model: ConfigurationModel) { self.model = model }
 
     public var body: some View {
@@ -20,7 +25,10 @@ import BeckonConfiguration
                         Text("Configured definitions, not live hardware observations. Held and latched feedback is inferred by the daemon, not receiver state.")
                             .foregroundStyle(.secondary)
                         if configuration.devices.isEmpty { Text("No devices configured.") }
-                        ForEach(configuration.devices) { device in DeviceView(device: device) }
+                        ForEach(configuration.devices) { device in
+                            DeviceView(device: device, config: configuration, model: model,
+                                       editable: model.canMutate && model.isFresh(at: timeline.date))
+                        }
                     }
                 } else {
                     Section { Text("Connect to load the daemon’s configuration and agents.") }
@@ -28,15 +36,18 @@ import BeckonConfiguration
             }
             .formStyle(.grouped)
         }
-        .confirmationDialog("Release binding \(releaseKey ?? "")?", isPresented: Binding(
-            get: { releaseKey != nil }, set: { if !$0 { releaseKey = nil } }
+        .confirmationDialog("Release binding \(releaseSelection?.key ?? "")?", isPresented: Binding(
+            get: { releaseSelection != nil }, set: { if !$0 { releaseSelection = nil } }
         )) {
-            if let selected = releaseKey {
-                Button("Release \(selected)", role: .destructive) { Task { await model.release(key: selected) }; releaseKey = nil }
+            if let selected = releaseSelection {
+                Button("Release \(selected.key)", role: .destructive) {
+                    Task { await model.release(key: selected.key, reference: selected.reference, endpoint: selected.endpoint) }
+                    releaseSelection = nil
+                }
             }
-            Button("Cancel", role: .cancel) { releaseKey = nil }
+            Button("Cancel", role: .cancel) { releaseSelection = nil }
         } message: {
-            Text("Releases the current owner of this key. The daemon’s release_key API does not support an expected-owner check.")
+            Text("Release only \(releaseSelection?.reference.description ?? "the selected owner"). A changed owner will be rejected by the daemon.")
         }
     }
     private func connection(now: Date) -> some View {
@@ -70,15 +81,22 @@ import BeckonConfiguration
             }.accessibilityLabel("Configured theme")
             Button("Apply theme") { Task { await model.setTheme(theme) } }
                 .disabled(!editable || config.display.themes[theme] == nil || theme == config.display.theme)
-            Text("Colour, brightness and animation editing requires daemon appearance mutation support. Current values are read-only.")
+            Text(config.supportsPresentation("theme_state")
+                 ? "Edit a treatment, then Save. Unsaved drafts reset when the configuration revision changes."
+                 : "This daemon does not advertise theme treatment editing. Local previews cannot be saved.")
                 .font(.caption).foregroundStyle(.secondary)
             if let treatments = config.display.themes[config.display.theme] {
                 ForEach(treatments.keys.sorted(), id: \.self) { state in
                     if let treatment = treatments[state] {
                         TreatmentView(label: state, treatment: treatment)
-                        DisclosureGroup("Preview \(state) appearance") {
-                            TreatmentEditor(treatment: treatment)
-                                .id("\(config.display.theme)-\(state)-\(treatment)")
+                        DisclosureGroup("Edit \(state) appearance") {
+                            TreatmentEditor(treatment: treatment, label: "\(state) appearance",
+                                            supported: config.supportsPresentation("theme_state") && ThemeState(rawValue: state) != nil,
+                                            editable: editable) { draft in
+                                if let revision = config.revision, let state = ThemeState(rawValue: state) {
+                                    Task { await model.setPresentation(.themeState(theme: config.display.theme, state: state, treatment: draft), expectedRevision: revision) }
+                                }
+                            }.id("\(config.revision ?? "legacy")-\(config.display.theme)-\(state)-\(treatment)")
                         }
                     }
                 }
@@ -118,50 +136,23 @@ import BeckonConfiguration
                         Text("No live owner reported").foregroundStyle(.secondary)
                     }
                     Spacer()
-                    Button("Release…") { releaseKey = bindingKey }
-                        .disabled(!editable).accessibilityLabel("Release binding \(bindingKey)")
+                    if let binding = model.status?.bindings.first(where: { $0.key == bindingKey }), let endpoint = model.connectedEndpoint {
+                        Button("Release…") {
+                            releaseSelection = ReleaseSelection(key: bindingKey, reference: binding.reference, endpoint: endpoint)
+                        }.disabled(!editable || !model.canRelease).accessibilityLabel("Release binding \(bindingKey)")
+                    }
                 }
             }
-            Text("Status lists live bindings only. A missing owner can be dormant; the daemon remains authoritative and rejects occupied keys.")
+            Text("Status lists live bindings only. A missing owner can be dormant; the daemon remains authoritative and rejects occupied keys. UI release requires an observed exact owner and never falls back to release_key.")
                 .font(.caption).foregroundStyle(.secondary)
+            if config.capabilities?.binding_release_guard != true {
+                Text("Guarded release is unavailable on this daemon.").font(.caption).foregroundStyle(.secondary)
+            }
         }
     }
 }
 
-// Local draft only until the daemon advertises typed appearance mutation capabilities.
-private struct TreatmentEditor: View {
-    @State private var draft: Treatment
-    init(treatment: Treatment) { _draft = State(initialValue: treatment) }
-    private var color: Binding<Color> {
-        Binding(get: {
-            let value = UInt32(draft.color.dropFirst(), radix: 16) ?? 0
-            return Color(.sRGB, red: Double((value >> 16) & 255) / 255,
-                         green: Double((value >> 8) & 255) / 255, blue: Double(value & 255) / 255, opacity: 1)
-        }, set: { value in
-            guard let rgb = NSColor(value).usingColorSpace(.sRGB) else { return }
-            draft.color = String(format: "#%02X%02X%02X", Int((rgb.redComponent * 255).rounded()),
-                                 Int((rgb.greenComponent * 255).rounded()), Int((rgb.blueComponent * 255).rounded()))
-        })
-    }
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("Local preview only · not saved or sent to a device").font(.caption).foregroundStyle(.secondary)
-            ColorPicker("Colour", selection: color, supportsOpacity: false).accessibilityLabel("Preview colour")
-            TextField("Hex colour", text: $draft.color).accessibilityLabel("Preview hex colour")
-            Slider(value: $draft.brightness, in: 0...1) { Text("Brightness") }
-                .accessibilityLabel("Preview brightness")
-            Picker("Animation", selection: $draft.motion) {
-                ForEach(Motion.allCases, id: \.self) { Text($0.rawValue).tag($0) }
-            }.accessibilityLabel("Preview animation")
-            TreatmentView(label: "Draft", treatment: draft)
-            if (try? draft.validate()) == nil { Text("Enter a valid #RRGGBB colour.").foregroundStyle(.red) }
-            Button("Save appearance (unavailable)") {}.disabled(true)
-                .help("The connected protocol has no typed treatment mutation endpoint yet.")
-        }
-    }
-}
-
-private struct TreatmentView: View {
+struct TreatmentView: View {
     let label: String
     let treatment: Treatment
     var body: some View {
@@ -176,6 +167,9 @@ private struct TreatmentView: View {
 }
 private struct DeviceView: View {
     let device: Device
+    let config: Configuration
+    @ObservedObject var model: ConfigurationModel
+    let editable: Bool
     var body: some View {
         DisclosureGroup("\(device.id) · \(device.definition.adapter)") {
             VStack(alignment: .leading, spacing: 12) {
@@ -201,7 +195,28 @@ private struct DeviceView: View {
                             if let treatment = effect[state] { TreatmentView(label: state, treatment: treatment) }
                             else { Text("\(state): normal binding/base rendering").foregroundStyle(.secondary) }
                         }
+                        DisclosureGroup("Edit feedback \(name)") {
+                            EffectEditor(effects: effect, label: "\(device.id) \(name)",
+                                         supported: config.supportsPresentation("device_effect"), editable: editable) { draft in
+                                if let revision = config.revision {
+                                    Task { await model.setPresentation(.deviceEffect(device: device.id, effect: name, effects: draft), expectedRevision: revision) }
+                                }
+                            }.id("\(config.revision ?? "legacy")-\(device.id)-\(name)")
+                        }
                     }
+                }
+                ForEach(config.capabilities?.device_channels[device.id] ?? [], id: \.self) { channel in
+                    if let treatment = device.definition.channelTreatment(channel) {
+                        TreatmentView(label: channel, treatment: treatment)
+                        DisclosureGroup("Edit \(channel) channel") {
+                            TreatmentEditor(treatment: treatment, label: "\(device.id) \(channel)",
+                                            supported: config.supportsPresentation("device_channel"), editable: editable) { draft in
+                                if let revision = config.revision {
+                                    Task { await model.setPresentation(.deviceChannel(device: device.id, channel: channel, treatment: draft), expectedRevision: revision) }
+                                }
+                            }.id("\(config.revision ?? "legacy")-\(device.id)-\(channel)")
+                        }
+                    } else { Text("\(channel): effective treatment unavailable; editing disabled.").foregroundStyle(.secondary) }
                 }
                 DisclosureGroup("Adapter presentation and layer options (read-only)") {
                     Text(JSONValue.object(device.definition.options).formatted)
