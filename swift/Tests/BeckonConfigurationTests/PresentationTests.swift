@@ -158,7 +158,7 @@ final class PresentationModelTests: XCTestCase {
         await fixture.setCapabilities(nil); await model.refresh()
         await model.setPresentation(change, expectedRevision: "r1")
         let after = await fixture.requests
-        XCTAssertEqual(after, [.configModel, .status, .configModel, .status])
+        XCTAssertEqual(after, [.configModel, .status, .configModel])
         XCTAssertFalse(model.canRelease)
     }
     @MainActor func testEffectAndChannelUseConfiguredNamesAndCanonicalModels() async throws {

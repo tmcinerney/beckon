@@ -87,29 +87,43 @@ struct EffectEditor: View {
     let label: String
     let supported: Bool
     let editable: Bool
+    let extended: Bool
     let save: (Feedback, String) async -> (Feedback, String)?
     // Visible draft seed when an absent state is explicitly enabled; never sent until Save.
     private let seed = Treatment(color: "#FFFFFF", brightness: 1, motion: .steady)
 
-    init(effects: Feedback, revision: String?, label: String, supported: Bool, editable: Bool,
+    init(effects: Feedback, revision: String?, label: String, supported: Bool, editable: Bool, extended: Bool = false,
          save: @escaping (Feedback, String) async -> (Feedback, String)?) {
         _draft = State(initialValue: AppearanceDraft(effects, revision: revision)); current = effects; self.revision = revision
         self.label = label; self.supported = supported; self.editable = editable; self.save = save
+        self.extended = extended
     }
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Save replaces all three feedback states together. Disabled states return to normal binding/base rendering.")
+            Text("Save replaces all \(extended ? "six" : "three legacy") feedback states together. Disabled states return to normal binding/base rendering.")
                 .font(.caption).foregroundStyle(.secondary)
             if !supported { Text("Local preview only · daemon does not advertise effect editing.").font(.caption) }
-            ForEach(FeedbackState.allCases, id: \.self) { state in
+            ForEach(FeedbackState.allCases.filter { extended || [.idle, .held, .latched].contains($0) }, id: \.self) { state in
                 Toggle("\(state.rawValue) treatment", isOn: Binding(
-                    get: { draft.value[state] != nil }, set: { draft.value[state] = $0 ? (draft.value[state] ?? seed) : nil }
+                    get: { draft.value[state] != nil }, set: { enabled in
+                        if state == .error, enabled, draft.value.error == nil {
+                            // Explicit visible presentation draft seed, never a hidden action-timing default.
+                            draft.value.error = TimedFeedback(treatment: seed, duration_ms: 650)
+                        } else { draft.value[state] = enabled ? (draft.value[state] ?? seed) : nil }
+                    }
                 )).accessibilityLabel("\(label) \(state.rawValue) treatment enabled")
                 if draft.value[state] != nil {
                     TreatmentFields(draft: Binding(get: { draft.value[state] ?? seed }, set: { draft.value[state] = $0 }),
                                     label: "\(label) \(state.rawValue)")
                 }
+                if state == .error, draft.value.error != nil {
+                    TextField("Error cue duration (ms; presentation only)", value: Binding(
+                        get: { draft.value.error?.duration_ms ?? 0 },
+                        set: { draft.value.error?.duration_ms = $0 }
+                    ), format: .number).accessibilityLabel("\(label) error cue duration in milliseconds, presentation only")
+                }
             }
+            if !current.unknownStates.isEmpty { Text("Unsupported feedback states are inspect-only.\n\(JSONValue.object(current.unknownStates).formatted)") }
             if (try? draft.value.validate()) == nil { Text("Keep at least one valid feedback treatment.").foregroundStyle(.red) }
             if !draft.matches(revision) {
                 Text("Configuration changed. Your draft is retained; review all current feedback states before reconciling.")

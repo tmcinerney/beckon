@@ -14,6 +14,7 @@ let package = Package(
         .target(name: "BeckonConfiguration", dependencies: ["SocketSupport"]),
         .target(name: "BeckonConfigurationUI", dependencies: ["BeckonConfiguration"]),
         .executableTarget(name: "BeckonApp", dependencies: ["BeckonConfigurationUI"]),
-        .testTarget(name: "BeckonConfigurationTests", dependencies: ["BeckonConfiguration"]),
+        .testTarget(name: "BeckonConfigurationTests", dependencies: ["BeckonConfiguration"],
+                    resources: [.copy("Fixtures/RustProducerV3")]),
     ]
 )

@@ -37,7 +37,7 @@ let configJSON = ##"""
 let statusJSON = #"{"bindings":[],"panes":[{"source":"rex","session":"work","pane_id":"same","title":"Review","binding":"","agent_status":"working","focused":false},{"source":"herdr","session":"work","pane_id":"same","title":"Other","binding":"","agent_status":"idle","focused":false}]}"#
 let identity = AgentIdentity(source: "rex", session: "work", pane_id: "same")
 // Shape verified against parent's committed Rust model at 391f2ba.
-let capabilitiesJSON = #"{"presentation_changes":["theme_state","device_effect","device_channel"],"binding_release_guard":true,"device_channels":{"desk":["base","ring"]}}"#
+let capabilitiesJSON = #"{"presentation_changes":["theme_state","device_effect","device_channel"],"binding_release_guard":true,"device_channels":{"desk":["base","ring"]},"status_read_only":true}"#
 func ok(_ json: String) -> Data {
     // Fixtures may be readable multiline JSON, but wire frames are always one line.
     let value = try! JSONSerialization.jsonObject(with: Data(json.utf8), options: [.fragmentsAllowed])
@@ -240,7 +240,7 @@ final class ConfigurationTests: XCTestCase {
         await oldModel.connect(); XCTAssertFalse(oldModel.canRelease)
         await oldModel.release(key: "key1", reference: identity, endpoint: "/fixture.sock")
         let legacyRequests = await legacy.requests
-        XCTAssertEqual(legacyRequests, [.configModel, .status])
+        XCTAssertEqual(legacyRequests, [.configModel])
     }
 }
 

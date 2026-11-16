@@ -14,7 +14,7 @@ public enum ClientError: Error, LocalizedError, Equatable {
 
 public enum Motion: String, Codable, CaseIterable, Sendable { case steady, breathe, pulse, flicker }
 public enum ThemeState: String, Codable, CaseIterable, Sendable { case idle, working, blocked, done, unknown }
-public enum FeedbackState: String, Codable, CaseIterable, Sendable { case idle, held, latched }
+public enum FeedbackState: String, Codable, CaseIterable, Sendable { case idle, held, latched, pending, hold_fired, error }
 public struct Treatment: Codable, Equatable, Sendable {
     public var color: String
     public var brightness: Double
@@ -39,41 +39,127 @@ public struct Control: Codable, Equatable, Sendable {
     public var action: String?
     public var effects: String?
 }
-public struct ActionDefinition: Codable, Equatable, Sendable {
-    public var kind: String
-    public var keys: [String]
-    public var mode: String
-    public var tap_ms: UInt64?
+public enum ActionDefinition: Codable, Equatable, Sendable {
+    case chord(keys: [String], mode: String, tapMilliseconds: UInt64?)
+    case tapHoldChords(tapKeys: [String], holdKeys: [String], holdMilliseconds: UInt64)
+    case unknown(kind: String, fields: [String: JSONValue])
+
+    private enum Key: String, CodingKey { case kind, keys, mode, tap_ms, tap_keys, hold_keys, hold_ms }
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: Key.self)
+        let kind = try c.decode(String.self, forKey: .kind)
+        switch kind {
+        case "chord":
+            self = .chord(keys: try c.decode([String].self, forKey: .keys), mode: try c.decode(String.self, forKey: .mode),
+                          tapMilliseconds: try c.decodeIfPresent(UInt64.self, forKey: .tap_ms))
+        case "tap-hold-chords":
+            let ms = try c.decode(UInt64.self, forKey: .hold_ms)
+            let tap = try c.decode([String].self, forKey: .tap_keys)
+            let hold = try c.decode([String].self, forKey: .hold_keys)
+            guard ms > 0, !tap.isEmpty, !hold.isEmpty else { throw ClientError.invalid("Invalid explicit tap/hold action.") }
+            self = .tapHoldChords(tapKeys: tap, holdKeys: hold, holdMilliseconds: ms)
+        default:
+            self = .unknown(kind: kind, fields: try decoder.singleValueContainer().decode([String: JSONValue].self))
+        }
+    }
+    public func encode(to encoder: Encoder) throws {
+        if case .unknown(_, let fields) = self {
+            var c = encoder.singleValueContainer(); try c.encode(fields); return
+        }
+        var c = encoder.container(keyedBy: Key.self)
+        try c.encode(kind, forKey: .kind)
+        switch self {
+        case .chord(let keys, let mode, let ms):
+            try c.encode(keys, forKey: .keys); try c.encode(mode, forKey: .mode); try c.encodeIfPresent(ms, forKey: .tap_ms)
+        case .tapHoldChords(let tap, let hold, let ms):
+            try c.encode(tap, forKey: .tap_keys); try c.encode(hold, forKey: .hold_keys); try c.encode(ms, forKey: .hold_ms)
+        case .unknown: break
+        }
+    }
+    public var kind: String {
+        switch self { case .chord: return "chord"; case .tapHoldChords: return "tap-hold-chords"; case .unknown(let kind, _): return kind }
+    }
+    public var keys: [String] { if case .chord(let keys, _, _) = self { return keys }; return [] }
+    public var mode: String { if case .chord(_, let mode, _) = self { return mode }; return "" }
+    public var tap_ms: UInt64? { if case .chord(_, _, let ms) = self { return ms }; return nil }
+}
+public struct TimedFeedback: Codable, Equatable, Sendable {
+    public var treatment: Treatment
+    public var duration_ms: UInt64
+    public init(treatment: Treatment, duration_ms: UInt64) { self.treatment = treatment; self.duration_ms = duration_ms }
 }
 public struct Feedback: Codable, Equatable, Sendable {
     public var idle: Treatment?
     public var held: Treatment?
     public var latched: Treatment?
-    public init(idle: Treatment? = nil, held: Treatment? = nil, latched: Treatment? = nil) {
+    public var pending: Treatment?
+    public var hold_fired: Treatment?
+    public var error: TimedFeedback?
+    public private(set) var unknownStates: [String: JSONValue] = [:]
+    public var isExtended: Bool { pending != nil || hold_fired != nil || error != nil || !unknownStates.isEmpty }
+    public init(idle: Treatment? = nil, held: Treatment? = nil, latched: Treatment? = nil,
+                pending: Treatment? = nil, hold_fired: Treatment? = nil, error: TimedFeedback? = nil) {
         self.idle = idle; self.held = held; self.latched = latched
+        self.pending = pending; self.hold_fired = hold_fired; self.error = error
     }
-    private enum CodingKeys: String, CodingKey { case idle, held, latched }
+    private enum CodingKeys: String, CodingKey { case idle, held, latched, pending, hold_fired, error }
+    private struct AnyKey: CodingKey {
+        var stringValue: String
+        var intValue: Int? { nil }
+        init?(stringValue: String) { self.stringValue = stringValue }
+        init?(intValue: Int) { return nil }
+    }
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        idle = try c.decodeIfPresent(Treatment.self, forKey: .idle)
+        held = try c.decodeIfPresent(Treatment.self, forKey: .held)
+        latched = try c.decodeIfPresent(Treatment.self, forKey: .latched)
+        pending = try c.decodeIfPresent(Treatment.self, forKey: .pending)
+        hold_fired = try c.decodeIfPresent(Treatment.self, forKey: .hold_fired)
+        error = try c.decodeIfPresent(TimedFeedback.self, forKey: .error)
+        let raw = try decoder.container(keyedBy: AnyKey.self)
+        for key in raw.allKeys where CodingKeys(rawValue: key.stringValue) == nil {
+            unknownStates[key.stringValue] = try raw.decode(JSONValue.self, forKey: key)
+        }
+    }
     public func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
         // AIDEV-NOTE: The daemon replaces the effect; explicit null clears an override.
         try c.encode(idle, forKey: .idle)
         try c.encode(held, forKey: .held)
         try c.encode(latched, forKey: .latched)
+        try c.encodeIfPresent(pending, forKey: .pending)
+        try c.encodeIfPresent(hold_fired, forKey: .hold_fired)
+        try c.encodeIfPresent(error, forKey: .error)
+        var raw = encoder.container(keyedBy: AnyKey.self)
+        for (name, value) in unknownStates { try raw.encode(value, forKey: AnyKey(stringValue: name)!) }
     }
     public func validate() throws {
-        guard idle != nil || held != nil || latched != nil else {
+        guard unknownStates.isEmpty else { throw ClientError.unavailable("Unsupported feedback states are inspect-only.") }
+        guard idle != nil || held != nil || latched != nil || isExtended else {
             throw ClientError.invalid("Keep at least one feedback treatment.")
         }
-        for treatment in [idle, held, latched].compactMap({ $0 }) { try treatment.validate() }
+        for treatment in [idle, held, latched, pending, hold_fired, error?.treatment].compactMap({ $0 }) { try treatment.validate() }
+        if let error, error.duration_ms == 0 { throw ClientError.invalid("Error feedback duration must be positive.") }
     }
     public subscript(state: FeedbackState) -> Treatment? {
         get { self[state.rawValue] }
         set {
-            switch state { case .idle: idle = newValue; case .held: held = newValue; case .latched: latched = newValue }
+            switch state {
+            case .idle: idle = newValue; case .held: held = newValue; case .latched: latched = newValue
+            case .pending: pending = newValue; case .hold_fired: hold_fired = newValue
+            case .error:
+                if let newValue, let duration = error?.duration_ms { error = TimedFeedback(treatment: newValue, duration_ms: duration) }
+                else if newValue == nil { error = nil }
+            }
         }
     }
     public subscript(state: String) -> Treatment? {
-        switch state { case "idle": return idle; case "held": return held; case "latched": return latched; default: return nil }
+        switch state {
+        case "idle": return idle; case "held": return held; case "latched": return latched
+        case "pending": return pending; case "hold_fired": return hold_fired; case "error": return error?.treatment
+        default: return nil
+        }
     }
 }
 // AIDEV-NOTE: Adapter options are an extension point, not a second structural config parser.
@@ -127,6 +213,24 @@ public struct Capabilities: Codable, Equatable, Sendable {
     public var presentation_changes: [String]
     public var binding_release_guard: Bool
     public var device_channels: [String: [String]]
+    public var status_read_only: Bool?
+    public var runtime_snapshot_versions: [Int]?
+    public var action_kinds: [String]?
+    public var feedback_states: [String]?
+    private enum CodingKeys: String, CodingKey {
+        case presentation_changes, binding_release_guard, device_channels, status_read_only
+        case runtime_snapshot_versions, action_kinds, feedback_states
+    }
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        presentation_changes = try c.decodeIfPresent([String].self, forKey: .presentation_changes) ?? []
+        binding_release_guard = try c.decodeIfPresent(Bool.self, forKey: .binding_release_guard) ?? false
+        device_channels = try c.decodeIfPresent([String: [String]].self, forKey: .device_channels) ?? [:]
+        status_read_only = try c.decodeIfPresent(Bool.self, forKey: .status_read_only)
+        runtime_snapshot_versions = try c.decodeIfPresent([Int].self, forKey: .runtime_snapshot_versions)
+        action_kinds = try c.decodeIfPresent([String].self, forKey: .action_kinds)
+        feedback_states = try c.decodeIfPresent([String].self, forKey: .feedback_states)
+    }
 }
 public struct Configuration: Codable, Equatable, Sendable {
     public var config_version: Int
@@ -144,7 +248,10 @@ public struct Configuration: Codable, Equatable, Sendable {
         case .themeState(let theme, let state, _):
             return supportsPresentation("theme_state") && display.themes[theme]?[state.rawValue] != nil
         case .deviceEffect(let device, let effect, _):
-            return supportsPresentation("device_effect") && devices.first(where: { $0.id == device })?.definition.effects[effect] != nil
+            if case .deviceEffect(_, _, let effects) = change, effects.isExtended { return false }
+            return supportsPresentation("device_effect") && devices.first(where: { $0.id == device })?.definition.effects[effect]?.isExtended == false
+        case .deviceEffectV2(let device, let effect, _):
+            return supportsPresentation("device_effect_v2") && devices.first(where: { $0.id == device })?.definition.effects[effect]?.unknownStates.isEmpty == true
         case .deviceChannel(let device, let channel, _):
             return supportsPresentation("device_channel") && capabilities?.device_channels[device]?.contains(channel) == true
                 && devices.first(where: { $0.id == device })?.definition.channelTreatment(channel) != nil
@@ -166,6 +273,7 @@ public struct Configuration: Codable, Equatable, Sendable {
 public enum PresentationChange: Equatable, Sendable, Encodable {
     case themeState(theme: String, state: ThemeState, treatment: Treatment)
     case deviceEffect(device: String, effect: String, effects: Feedback)
+    case deviceEffectV2(device: String, effect: String, effects: Feedback)
     case deviceChannel(device: String, channel: String, treatment: Treatment)
     private enum Key: String, CodingKey { case kind, theme, state, treatment, device, effect, effects, channel }
     public func encode(to encoder: Encoder) throws {
@@ -177,6 +285,9 @@ public enum PresentationChange: Equatable, Sendable, Encodable {
         case .deviceEffect(let device, let effect, let effects):
             try c.encode("device_effect", forKey: .kind); try c.encode(device, forKey: .device)
             try c.encode(effect, forKey: .effect); try c.encode(effects, forKey: .effects)
+        case .deviceEffectV2(let device, let effect, let effects):
+            try c.encode("device_effect_v2", forKey: .kind); try c.encode(device, forKey: .device)
+            try c.encode(effect, forKey: .effect); try c.encode(CompleteFeedback(effects: effects), forKey: .effects)
         case .deviceChannel(let device, let channel, let treatment):
             try c.encode("device_channel", forKey: .kind); try c.encode(device, forKey: .device)
             try c.encode(channel, forKey: .channel); try c.encode(treatment, forKey: .treatment)
@@ -185,8 +296,18 @@ public enum PresentationChange: Equatable, Sendable, Encodable {
     public func validate() throws {
         switch self {
         case .themeState(_, _, let treatment), .deviceChannel(_, _, let treatment): try treatment.validate()
-        case .deviceEffect(_, _, let effects): try effects.validate()
+        case .deviceEffect(_, _, let effects), .deviceEffectV2(_, _, let effects): try effects.validate()
         }
+    }
+}
+private struct CompleteFeedback: Encodable {
+    let effects: Feedback
+    private enum Key: String, CodingKey { case idle, held, latched, pending, hold_fired, error }
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: Key.self)
+        try c.encode(effects.idle, forKey: .idle); try c.encode(effects.held, forKey: .held)
+        try c.encode(effects.latched, forKey: .latched); try c.encode(effects.pending, forKey: .pending)
+        try c.encode(effects.hold_fired, forKey: .hold_fired); try c.encode(effects.error, forKey: .error)
     }
 }
 public struct AgentIdentity: Hashable, Codable, Sendable {
@@ -238,14 +359,16 @@ struct ReleaseReceipt: Decodable { let key: String; let changed: Bool }
 
 public enum Request: Equatable, Sendable, Encodable {
     case configModel, status, setTheme(String), bind(key: String, agent: AgentIdentity)
+    case runtimeSnapshot
     case setPresentation(expectedRevision: String, change: PresentationChange)
     case releaseBinding(key: String, reference: AgentIdentity)
     public func encode(to encoder: Encoder) throws {
-        enum Key: String, CodingKey { case op, name, key, pane_id, session, source, expected_revision, change, reference }
+        enum Key: String, CodingKey { case op, name, key, pane_id, session, source, expected_revision, change, reference, version }
         var c = encoder.container(keyedBy: Key.self)
         switch self {
         case .configModel: try c.encode("config_model", forKey: .op)
         case .status: try c.encode("status", forKey: .op)
+        case .runtimeSnapshot: try c.encode("runtime_snapshot", forKey: .op); try c.encode(1, forKey: .version)
         case .setTheme(let name):
             try c.encode("set_theme", forKey: .op); try c.encode(name, forKey: .name)
         case .bind(let key, let agent):

@@ -20,9 +20,9 @@ import BeckonConfiguration
                 connection(now: timeline.date)
                 if let configuration = model.configuration {
                     appearance(configuration, editable: model.canMutate && model.isFresh(at: timeline.date))
-                    bindings(configuration, editable: model.canMutate && model.isFresh(at: timeline.date))
+                    bindings(configuration, editable: model.canMutate && model.isFresh(at: timeline.date), now: timeline.date)
                     Section("Devices and interaction feedback") {
-                        Text("Configured definitions, not live hardware observations. Held and latched feedback is inferred by the daemon, not receiver state.")
+                        Text("Configured definitions and appearance drafts. The Devices tab shows observations; feedback never proves receiver acceptance.")
                             .foregroundStyle(.secondary)
                         if configuration.devices.isEmpty { Text("No devices configured.") }
                         ForEach(configuration.devices) { device in
@@ -65,6 +65,10 @@ import BeckonConfiguration
             Text(model.health(at: now)).accessibilityLabel("Connection state: \(model.health(at: now))")
             if let path = model.connectedEndpoint { Text("Active endpoint: \(path)").font(.caption).textSelection(.enabled) }
             if let date = model.lastUpdated { Text("Last complete snapshot: \(date.formatted())").font(.caption) }
+            if model.connectedEndpoint != nil, !model.isFresh(at: now) {
+                Text("Changes require an explicit Refresh and a fresh coherent sample. Background sampling does not renew the editing deadline or resolve write outcomes.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
             if model.endpoint != model.connectedEndpoint, model.connectedEndpoint != nil {
                 Text("Endpoint edited. Reconnect to apply it; changes are disabled.").foregroundStyle(.orange)
             }
@@ -110,7 +114,7 @@ import BeckonConfiguration
             }
         }
     }
-    private func bindings(_ config: Configuration, editable: Bool) -> some View {
+    private func bindings(_ config: Configuration, editable: Bool, now: Date) -> some View {
         Section("Agent bindings") {
             Text("Choose an exact source, scope and agent, then bind explicitly. Existing owners are never replaced automatically.")
                 .foregroundStyle(.secondary)
@@ -120,7 +124,7 @@ import BeckonConfiguration
             }.accessibilityLabel("Configured binding key")
             Picker("Agent", selection: $agent) {
                 Text("Choose an agent").tag(nil as AgentIdentity?)
-                ForEach(model.status?.panes ?? []) { pane in
+                ForEach(model.bindCandidates(at: now)) { pane in
                     Text("\(pane.title) — \(pane.id.description)").tag(Optional(pane.id))
                 }
             }.accessibilityLabel("Source-qualified agent")
@@ -128,7 +132,19 @@ import BeckonConfiguration
             Button("Bind selected agent") {
                 if let agent { Task { await model.bind(key: key, agent: agent) } }
             }.disabled(!editable || !config.bindings.contains(key) || agent == nil)
-            ForEach(config.bindings, id: \.self) { bindingKey in
+            if model.runtime != nil {
+                ForEach(model.bindingLegend(at: now)) { row in
+                    HStack {
+                        VStack(alignment: .leading) { Text(row.key).font(.headline); Text(row.summary).textSelection(.enabled) }
+                        Spacer()
+                        if let owner = row.owner, let endpoint = model.connectedEndpoint {
+                            Button("Release…") { releaseSelection = ReleaseSelection(key: row.key, reference: owner, endpoint: endpoint) }
+                                .disabled(!editable || !model.canRelease || !row.configured || model.runtime?.ledger_available != true)
+                                .accessibilityLabel("Release binding \(row.key) from \(owner.description)")
+                        }
+                    }
+                }
+            } else { ForEach(config.bindings, id: \.self) { bindingKey in
                 HStack {
                     Text(bindingKey).font(.headline)
                     if let binding = model.status?.bindings.first(where: { $0.key == bindingKey }) {
@@ -149,8 +165,8 @@ import BeckonConfiguration
                         }.disabled(!editable || !model.canRelease).accessibilityLabel("Release binding \(bindingKey)")
                     }
                 }
-            }
-            Text("Status lists live bindings only. A missing owner can be dormant; the daemon remains authoritative and rejects occupied keys. UI release requires an observed exact owner and never falls back to release_key.")
+            } }
+            Text(model.runtime == nil ? "Complete ledger unavailable. Legacy status is read only only when explicitly advertised; missing owners can be dormant, never assumed free. Guarded release requires an exact owner." : "Complete ledger snapshot. Dormant owners remain occupied; release captures the exact source-qualified owner and endpoint for daemon validation.")
                 .font(.caption).foregroundStyle(.secondary)
             if config.capabilities?.binding_release_guard != true {
                 Text("Guarded release is unavailable on this daemon.").font(.caption).foregroundStyle(.secondary)
@@ -188,8 +204,8 @@ private struct DeviceView: View {
                             Text(key.members.joined(separator: ", ")).textSelection(.enabled)
                             if let binding = key.binding { Text("Agent binding: \(binding)") }
                             if let action = key.action, let definition = device.definition.actions[action] {
-                                Text("Action \(action): \(definition.keys.joined(separator: " + ")) · \(definition.mode)")
-                                if let ms = definition.tap_ms { Text("Tap threshold: \(ms) ms") }
+                                Text("Action \(action): \(definition.legend)")
+                                Text("Behavioral timing is read-only device action configuration, not appearance settings.").font(.caption)
                             }
                             if let effect = key.effects { Text("Feedback: \(effect)") }
                         }
@@ -198,14 +214,17 @@ private struct DeviceView: View {
                 ForEach(device.definition.effects.keys.sorted(), id: \.self) { name in
                     if let effect = device.definition.effects[name] {
                         Text("Feedback \(name)").font(.headline)
-                        ForEach(["idle", "held", "latched"], id: \.self) { state in
-                            if let treatment = effect[state] { TreatmentView(label: state, treatment: treatment) }
-                            else { Text("\(state): normal binding/base rendering").foregroundStyle(.secondary) }
+                        ForEach(FeedbackState.allCases, id: \.self) { state in
+                            if let treatment = effect[state] { TreatmentView(label: state.rawValue, treatment: treatment) }
+                            else { Text("\(state.rawValue): normal binding/base rendering").foregroundStyle(.secondary) }
                         }
                         DisclosureGroup("Edit feedback \(name)") {
+                            let useV2 = config.supportsPresentation("device_effect_v2")
                             EffectEditor(effects: effect, revision: config.revision, label: "\(device.id) \(name)",
-                                         supported: config.supportsPresentation("device_effect"), editable: editable) { draft, revision in
-                                guard await model.setPresentation(.deviceEffect(device: device.id, effect: name, effects: draft), expectedRevision: revision),
+                                         supported: config.supports(useV2 ? .deviceEffectV2(device: device.id, effect: name, effects: effect) : .deviceEffect(device: device.id, effect: name, effects: effect)),
+                                         editable: editable, extended: useV2) { draft, revision in
+                                let change: PresentationChange = useV2 ? .deviceEffectV2(device: device.id, effect: name, effects: draft) : .deviceEffect(device: device.id, effect: name, effects: draft)
+                                guard await model.setPresentation(change, expectedRevision: revision),
                                       let saved = model.configuration,
                                       let effects = saved.devices.first(where: { $0.id == device.id })?.definition.effects[name],
                                       let revision = saved.revision else { return nil }

@@ -1,7 +1,8 @@
-# Native Configuration tab
+# Native Beckon companion
 
 macOS 13+ SwiftUI client for Beckon's newline-delimited Unix-socket protocol.
-Launch is disconnected. Connecting is an explicit user action. The client never
+Launch is disconnected. Connecting is an explicit user action. Devices,
+Configuration and the accessible menu-bar summary share one model. The client never
 opens HID, executes source commands, writes TOML, or focuses an agent.
 
 ## Build and isolated checks
@@ -25,8 +26,9 @@ For an explicitly authorized interactive session:
 ./swift/run-swift run beckon-configuration
 ```
 
-`BeckonConfigurationUI.ConfigurationView(model:)` is also a reusable tab body.
-The standalone app hosts it in a native `TabView`. Views use labelled native
+`ConfigurationView(model:)`, `DeviceStatusView(model:)`, and `MenuHealthView(model:)`
+are reusable views. The standalone app hosts native tabs and a window-style
+`MenuBarExtra` (macOS 13+, unchanged minimum OS). Views use labelled native
 pickers, text fields, sliders, colour pickers, disclosure groups and buttons.
 
 ## Ownership and protocol
@@ -38,10 +40,33 @@ pickers, text fields, sliders, colour pickers, disclosure groups and buttons.
 - Each exchange uses one socket, a bounded deadline and one newline-terminated
   JSON response. Disconnect cancels the owned request; generation fencing prevents
   late responses from replacing the current snapshot. Mutations are never retried.
-- `config_model` and `status` must both decode before a new snapshot is published.
-  Last-known data stays visibly stale on failure or disconnect. Reads are manual;
-  after 15 seconds edits require a refresh. These two reads are not a daemon-side
-  transaction and do not establish hardware or source-cache freshness.
+- Explicit Connect bootstraps `config_model` capability discovery. With
+  `runtime_snapshot_versions:[1]`, `{"op":"runtime_snapshot","version":1}`
+  returns one cached sample containing the complete configuration, ledger, source
+  and device observations. Its configuration revision must match the embedded
+  model. It is coherent per sample, not a filesystem or multi-source transaction.
+- **Old daemon safety:** old `status` can reconcile/write. Automatic fallback is
+  `config_model` only; legacy status is read only when `status_read_only:true` is
+  explicitly advertised, and is never polled. Missing capability disables health
+  and complete-ledger claims rather than calling old status or inferring defaults.
+  A runtime protocol error latches runtime unavailable until explicit Reconnect;
+  config-only display/sampling remains available. No error-string parsing.
+- One model-owned cancellable loop starts only after explicit Connect. Named
+  `clientRefreshInterval` is 2 seconds **between completed attempts**, not a device
+  hold threshold. No overlapping reads/writes, catch-up bursts, automatic reconnect,
+  startup polling, or second loop from opening a tab/window/menu. A user mutation
+  or Refresh cancels/drains the owned poll before dispatch. Disconnect invalidates
+  generation; Reconnect drains old requests before contacting the new endpoint.
+- Last-known data remains visibly stale on failure/disconnect. Instance changes,
+  lower sequences and mismatched configuration revisions fence publication or
+  editing. Receiving the same cached sequence never refreshes its evidence age.
+  Device/source/layer/label freshness adds producer observation age, sample age
+  and client elapsed time; null evidence stays unknown (v1 upper bound 15000ms).
+- Background sampling does not renew the 15-second explicit editing-verification
+  deadline, reconcile drafts, clear unknown write outcomes or retry mutations.
+  Use explicit Refresh before editing. A pre-write cached sample cannot verify
+  an acknowledged change; a newer sample is required. Appearance acknowledgements
+  remain authoritative while a cached runtime sample catches up to that revision.
 - Basic mutations at core `88a2a2f`: `set_theme` and explicit source-qualified
   `bind`. Guarded presentation/release use the contract from parent's `391f2ba`,
   subsequently cherry-picked by explicit parent authorization (`78589fe` here).
@@ -58,6 +83,34 @@ pickers, text fields, sliders, colour pickers, disclosure groups and buttons.
   `release_binding` sends `{key,reference:{source,session,pane_id}}`; the reply is
   `{key,changed}`. The model checks the captured selection locally and the daemon
   checks the owner atomically. The Swift client has no `release_key` request.
+
+## Devices, legend and health
+
+- Device rows show observed connectivity/layer only when supplied, with independent
+  freshness, configured control/member names or exact-address fallbacks, action
+  legends, feedback and recent typed diagnostics. No fixed key/layer/source count.
+- The complete legend shows configured keys plus orphaned ledger keys, exact
+  source + scope/session + pane/block identity, actual workspace/task labels and
+  live/dormant/unknown/free status. Cached labels are visibly stale. Missing
+  structured labels say unavailable alongside exact IDs; no title parsing,
+  renaming, native badge writes, or invented Delta agent source.
+- Only an authoritative ledger can report a key free. Dormant owners stay occupied;
+  only fresh live pane/source observations are bind candidates. Legacy live-only
+  status never establishes complete ledger ownership or hardware health.
+- Menu-bar symbols have accessible text/value and a summary distinguishing
+  disconnected, stale, unavailable/degraded, observed availability and scoped active
+  errors. Neutral device counts do not assume all configured devices are required.
+  An unavailable device does not turn another device's connected row into a fault.
+  Resolved error history is distinct from active errors; unknown diagnostics are
+  unsupported, never green. Socket reachability alone is not device/permission health.
+- `tap-hold-chords` decodes `tap_keys`, `hold_keys`, explicit positive `hold_ms`
+  without mandatory legacy `keys`/`mode`. Its legend explains one-shot tap/hold
+  output and no tap on held release. Unknown action/feedback variants are
+  inspect-only. Behavioral timing/output stays read-only device action TOML;
+  no structural-edit or presentation-settings timing writer was introduced.
+- Diagnostics use closed typed code/recovery values and fixed client text, not
+  external stderr/argv. Permission/cleanup guidance requires attended action;
+  the client never requests permission or retries key cleanup itself.
 
 ## Guarded appearance editing
 
@@ -83,8 +136,12 @@ All appearance writes send exactly:
 {"op":"set_presentation","expected_revision":"opaque-value","change":{"kind":"theme_state","theme":"configured-theme","state":"working","treatment":{"color":"#123456","brightness":0.6,"motion":"breathe"}}}
 ```
 
-`device_effect` replaces the named effect's three states together, including
-explicit JSON nulls for disabled states. `device_channel` addresses an advertised
+Legacy `device_effect` replaces only three-state targets and is blocked on extended
+targets. Advertised `device_effect_v2` replaces all six states (`idle`, `held`,
+`latched`, `pending`, `hold_fired`, `error`) with explicit null clearing. Error
+feedback includes its treatment and positive `duration_ms` (presentation only).
+Unsupported fields remain inspect-only, never silently dropped by a legacy Save.
+`device_channel` addresses an advertised
 device channel. Native colour pickers, hex fields, brightness sliders and animation
 pickers edit local drafts; only Save sends IPC. Discard restores the original values.
 The UI captures the draft's revision and retains unsaved drafts when the effective
@@ -99,9 +156,10 @@ that message is preserved, the snapshot becomes stale and edits remain blocked u
 an explicit refresh retrieves the authoritative saved model. The draft is retained.
 
 Successful `set_presentation` returns the full canonical model; the client publishes
-that response directly rather than its draft. This does not refresh agent status's
-timestamp. Old daemons continue to support basic reads/theme selection/bind while
-appearance Save and guarded Release stay unavailable.
+that response directly rather than its draft. This does not renew the explicit
+editing-verification deadline. Old daemons support config-only display/theme
+selection; binding requires safe observed candidates. Appearance Save and guarded
+Release stay capability-gated.
 The ring editor explains when state-following makes its colour a fallback.
 Success notices explicitly confirm host state, not physical LED observation.
 
@@ -111,16 +169,22 @@ Success notices explicitly confirm host state, not physical LED observation.
    owns integration/release/deployment and production remains v2 until coordinated
    migration. These operations have
    been checked using isolated fixtures; the live service was not touched.
-2. `status.bindings` reports live bindings, not the entire ledger. Missing rows
-   are labelled “No live owner reported”, not “free”. A dormant owner can still
-   cause the daemon to reject a bind. UI release requires an observed owner; dormant
-   release remains a separate explicit CLI operation until status exposes the ledger.
-3. There is no live device connectivity/interaction-state endpoint. The UI shows
-   configured mappings and feedback definitions only. Held/latched lights describe
-   inferred state, not proof of a receiver's state. `reset_controls` exists but is
-   intentionally not exposed here because it releases output, beyond configuration.
-4. Runtime UI/accessibility inspection and integration with a deployed daemon are
-   not part of isolated verification. Build/tests do not claim physical LED success.
+2. `Fixtures/RustProducerV3/` now contains ten byte-identical actual Rust serializer
+   envelopes, with original manifest/source provenance. Dedicated producer tests
+   verify bundled SHA-256 identities and exercise typed decoding, model/projections,
+   read-only polling and fragmented isolated sockets. The config_model bootstrap
+   adapter is derived from the actual configuration, not claimed as an exact Rust
+   bootstrap wire fixture. Existing `SyntheticRuntimeFixture.swift` / synthetic
+   transports remain separately labelled consumer scenarios, not producer evidence.
+   This software replay does not replace deployed-daemon or physical acceptance.
+3. Old daemons lack complete ledger/device diagnostics; display is honestly
+   unavailable or stale. `reset_controls` is intentionally not exposed: it
+   releases output, beyond read-only inspection/configuration.
+4. Native visual/VoiceOver inspection, deployed-daemon compatibility, actual device
+   layers/LEDs, receiver behavior and permission/hardware acceptance are NOT RUN.
+   Build/tests do not prove physical behavior, signed/portable packaging, or issue
+   completion. No app/daemon launch, live socket or hardware access is needed for
+   isolated verification. Packaging/rpath work remains separate.
 
 ## Reuse audit
 

@@ -51,6 +51,36 @@ private final class UnixFixture: @unchecked Sendable {
 }
 
 final class SocketTests: XCTestCase {
+    func testAllActualRustProducerEnvelopesReplayByteIdenticallyOverIsolatedFragmentedSockets() async throws {
+        for name in RustProducerFixture.names {
+            let bytes = try RustProducerFixture.bytes(name)
+            let server = try UnixFixture(reply: bytes, fragment: 3)
+            let response = try await SocketTransport().send(.runtimeSnapshot, to: server.path)
+            XCTAssertEqual(response, bytes, name)
+            if name == "runtime-unsupported" {
+                XCTAssertThrowsError(try JSONDecoder().decode(Reply<RuntimeSnapshot>.self, from: response).value())
+            } else {
+                let sample = try JSONDecoder().decode(Reply<RuntimeSnapshot>.self, from: response).value()
+                XCTAssertNoThrow(try sample.validate(), name)
+            }
+            let received = await server.worker.value
+            XCTAssertEqual(try JSONDecoder().decode(JSONValue.self, from: received),
+                           .object(["op": .string("runtime_snapshot"), "version": .number(1)]), name)
+        }
+    }
+
+    func testSyntheticRuntimeV1UsesExactVersionedFrameOverFragmentedFixtureSocket() async throws {
+        // SYNTHETIC consumer integration only; not proof of Rust serializer compatibility.
+        let server = try UnixFixture(reply: syntheticReply(syntheticSnapshot()), fragment: 3)
+        let response = try await SocketTransport().send(.runtimeSnapshot, to: server.path)
+        let sample = try JSONDecoder().decode(Reply<RuntimeSnapshot>.self, from: response).value()
+        XCTAssertNoThrow(try sample.validate())
+        XCTAssertEqual(sample.configuration_revision, "atomic-r2")
+        let received = await server.worker.value
+        XCTAssertEqual(try JSONDecoder().decode(JSONValue.self, from: received),
+                       .object(["op": .string("runtime_snapshot"), "version": .number(1)]))
+    }
+
     func testPresentationAndFencedReleaseOverSocket() async throws {
         var updated = try JSONDecoder().decode(Configuration.self, from: Data(configJSON.utf8))
         updated.revision = "new-revision"
