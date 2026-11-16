@@ -253,6 +253,7 @@ impl<E: Emitter, S: BindingStore> State<E, S> {
         None
     }
     fn sample(&mut self, now: Instant) -> Result<()> {
+        let observations = self.sources.observations();
         let ledger = match self.store.load() {
             Ok(Some(state)) => LedgerRead::Available(state),
             Ok(None) => LedgerRead::Unavailable,
@@ -272,12 +273,23 @@ impl<E: Emitter, S: BindingStore> State<E, S> {
                 .collect::<Vec<_>>();
             self.plan = beckon::render::render(&self.config.display, &bound)?;
         }
+        // AIDEV-NOTE: source attention is independent of ledger readability and
+        // shares the same immutable sample as runtime; publication rechecks age.
+        self.plan.source_attention = observations
+            .iter()
+            .map(|source| {
+                (
+                    source.id.clone(),
+                    beckon::render::attention::SourceAttention::from_observation(source, now),
+                )
+            })
+            .collect();
         self.snapshot = Some(
             self.runtime.capture(
                 RuntimeInputs {
                     configuration: self.config.model()?,
                     ledger,
-                    sources: self.sources.observations(),
+                    sources: observations,
                     devices: self.displays.diagnostics(),
                     controls: self.switches.snapshot(now),
                     posting: self.switches.posting_observation(),

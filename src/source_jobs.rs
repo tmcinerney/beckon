@@ -50,6 +50,7 @@ impl CachedSources {
                 .find(|source| source.id == id)
                 .unwrap();
             source.availability = SourceAvailability::Unavailable;
+            source.complete_since = None;
             source.observed_at = Some(at);
             source.observed_sessions.clear();
             source.last_failure = Some(TypedFailure {
@@ -202,9 +203,18 @@ impl SourceExecutor {
                 deadline,
                 config.sources.len() - index + usize::from(config.herdr.enabled),
             );
-            let _ = crate::process_job::with_deadline(end, || source.panes());
+            let query_started_at = Instant::now();
+            let result = crate::process_job::with_deadline(end, || source.panes());
             let mut observation = source.observation();
-            if observation.agents.len() > 256 {
+            let mut identities = BTreeSet::new();
+            if observation.agents.len() > 256
+                || observation.agents.iter().any(|row| {
+                    row.agent.source != spec.id
+                        || row.agent.session.is_empty()
+                        || row.agent.pane_id.is_empty()
+                        || !identities.insert(row.agent.reference())
+                })
+            {
                 observation.agents.clear();
                 observation.observed_sessions.clear();
                 observation.availability = SourceAvailability::Unavailable;
@@ -218,6 +228,23 @@ impl SourceExecutor {
                 observation.last_failure = Some(failure(DiagnosticCode::SourceSnapshotInvalid));
             } else {
                 captured += bytes;
+            }
+            let validated_at = Instant::now();
+            if result.is_ok()
+                && observation.availability == SourceAvailability::Available
+                && validated_at < end
+                && observation.last_success.is_some_and(|at| {
+                    query_started_at <= at
+                        && at <= validated_at
+                        && observation.observed_at == Some(at)
+                })
+                && observation.agents.iter().all(|row| {
+                    row.available
+                        && query_started_at <= row.observed_at
+                        && row.observed_at <= validated_at
+                })
+            {
+                observation.complete_since = Some(query_started_at);
             }
             observations.push(observation);
         }

@@ -31,6 +31,9 @@ pub struct SourceObservation {
     pub last_failure: Option<TypedFailure>,
     pub observed_sessions: BTreeSet<String>,
     pub agents: Vec<AgentObservation>,
+    /// Only a validated full command-list cohort can establish this proof.
+    /// Other producers retain None; this is not serialized runtime health.
+    pub complete_since: Option<Instant>,
 }
 impl SourceObservation {
     pub fn unknown(id: impl Into<String>) -> Self {
@@ -42,6 +45,7 @@ impl SourceObservation {
             last_failure: None,
             observed_sessions: BTreeSet::new(),
             agents: Vec::new(),
+            complete_since: None,
         }
     }
 }

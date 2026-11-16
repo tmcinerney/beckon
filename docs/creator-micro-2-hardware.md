@@ -208,6 +208,32 @@ across every reconnect case have not been established.
   firmware release contract. The separate OAI zone configuration uses `keys`
   and `ambient`. Neither is a per-key addressing API.
 
+### Optional source-scoped ring color
+
+`ring_follows_state_color = true` follows visible bound keys by default. On a
+Beckon-owned layer, `ring_state_scope = "source"` instead follows all reported
+agents across the layer's explicitly declared configured `source`, including
+unbound/unfocused agents in other sessions. It changes only ring color, not key
+rendering, navigation, ring motion/brightness/speed or base lighting. This option
+requires a matching runtime; older strict parsers reject it. Omitting it (or
+using `"bound"`) preserves existing behavior. Setting `ring_follows_state_color`
+to false always uses the configured fixed ring color.
+
+Source mode retains Blocked > Unknown > Working > Done > Idle. Only validated
+full command-list results prove complete membership. Missing, partial, failed
+or 15-second-old evidence is Unknown; fresh Blocked can still outrank uncertainty.
+A proven fresh complete empty list uses the fixed configured ring color, not Idle.
+Herdr/event-derived evidence does not currently prove whole-source completeness.
+Sampling/publication does not renew source timestamps. Plugin-v2 and Glove80 wire
+formats do not carry this internal source evidence.
+
+This is not an instruction to enable the option on an installed configuration.
+Real rollout also requires a trustworthy list producer: the current Rex helper's
+failed/nil/invalid `program_status` fallback can report Idle without evidence,
+which Rust cannot recover from valid JSON. That producer fix and attended rollout
+are separate gates. Firmware-owned/unconfigured layers still receive no zone
+palette, and the restoration limitation below remains unresolved.
+
 ### Zone suppression is not release
 
 At backend revision `10e22d5`, `zone_lighting = "firmware"` suppresses future

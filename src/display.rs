@@ -205,6 +205,7 @@ impl DisplaySink for Glove80UsbDisplay {
                     })
                     .collect::<Result<Vec<_>>>()?,
                 treatments: plan.treatments.clone(),
+                source_attention: BTreeMap::new(),
             };
             &projected
         } else {

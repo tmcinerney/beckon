@@ -39,6 +39,8 @@ use crate::{
     render::{Motion, RenderPlan, Rgb},
 };
 
+#[cfg(test)]
+mod ring_tests;
 mod transport;
 #[cfg(test)]
 pub(crate) use transport::test_support;
@@ -537,6 +539,21 @@ pub struct Layer {
     pub position: u16,
     pub source: Option<String>,
     pub zone_lighting: ZoneLighting,
+    #[serde(default, skip_serializing_if = "RingStateScope::is_bound")]
+    pub ring_state_scope: RingStateScope,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RingStateScope {
+    #[default]
+    Bound,
+    Source,
+}
+impl RingStateScope {
+    fn is_bound(&self) -> bool {
+        *self == Self::Bound
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
@@ -629,6 +646,9 @@ pub fn validate_device(device: &DeviceConfig, sources: &BTreeSet<&str>) -> Resul
         }
         if let Some(source) = &layer.source {
             crate::device::require("source", source, sources.iter().copied())?;
+        }
+        if layer.ring_state_scope == RingStateScope::Source && layer.source.is_none() {
+            bail!("layer {name}: source ring scope requires a declared source");
         }
     }
     let mut addresses = BTreeSet::new();
@@ -1097,11 +1117,28 @@ impl CreatorMicroDisplay {
             }
         }
         let mut ring = self.options.ring;
-        if self.options.ring_follows_state_color
-            && let Some(state) = visible
+        let ring_state = match layer.ring_state_scope {
+            RingStateScope::Bound => visible
                 .into_iter()
                 .filter_map(|r| r.state)
-                .max_by_key(|s| s.attention_rank())
+                .max_by_key(|s| s.attention_rank()),
+            RingStateScope::Source => {
+                use crate::render::attention::AttentionState;
+                match layer
+                    .source
+                    .as_ref()
+                    .and_then(|id| plan.source_attention.get(id))
+                    .map_or(AttentionState::Unknown, |attention| {
+                        attention.at((self.clock)())
+                    }) {
+                    AttentionState::Observed(state) => Some(state),
+                    AttentionState::Empty => None,
+                    AttentionState::Unknown => Some(crate::render::AgentState::Unknown),
+                }
+            }
+        };
+        if self.options.ring_follows_state_color
+            && let Some(state) = ring_state
         {
             let treatment = plan.treatments.for_state(state);
             ring.color = treatment.color;
@@ -2424,6 +2461,43 @@ mod tests {
     }
 
     #[test]
+    fn ring_source_scope_is_opt_in_validated_and_survives_channel_roundtrip() {
+        let mut device = configured().device.clone();
+        let sources = BTreeSet::from(["rex", crate::core::DEFAULT_SOURCE]);
+        validate_device(&device, &sources).unwrap();
+        apply_channels(&mut device, &BTreeMap::new()).unwrap();
+        assert!(
+            device.definition.options["layers"]["rex"]
+                .get("ring_state_scope")
+                .is_none()
+        );
+        device.definition.options["layers"]["rex"]
+            .as_table_mut()
+            .unwrap()
+            .insert("ring_state_scope".into(), "source".into());
+        validate_device(&device, &sources).unwrap();
+        let ring = options(&device).unwrap().ring;
+        apply_channels(&mut device, &BTreeMap::from([("ring".into(), ring)])).unwrap();
+        assert_eq!(
+            device.definition.options["layers"]["rex"]["ring_state_scope"].as_str(),
+            Some("source")
+        );
+        let declared = device.definition.options["layers"]["rex"]
+            .as_table_mut()
+            .unwrap()
+            .remove("source")
+            .unwrap();
+        assert!(validate_device(&device, &sources).is_err());
+        device.definition.options["layers"]["rex"]
+            .as_table_mut()
+            .unwrap()
+            .insert("source".into(), declared);
+        assert!(validate_device(&device, &BTreeSet::from([crate::core::DEFAULT_SOURCE])).is_err());
+        device.definition.options["layers"]["rex"]["ring_state_scope"] = "global".into();
+        assert!(options(&device).is_err());
+    }
+
+    #[test]
     fn layer_notifications_translate_addresses_without_leaking_layers_into_core() {
         let mut display = configured();
         assert!(matches!(
@@ -2515,6 +2589,7 @@ mod tests {
         let mut device = configured().device.clone();
         for (name, position) in [("home", 1), ("herdr", 4), ("delta", 5)] {
             let layer = Layer {
+                ring_state_scope: RingStateScope::Bound,
                 profile: 1,
                 position,
                 source: None,

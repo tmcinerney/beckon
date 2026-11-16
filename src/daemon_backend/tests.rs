@@ -56,6 +56,147 @@ fn cleanup(root: std::path::PathBuf) {
 }
 
 #[test]
+fn ring_daemon_samples_real_command_attention_without_ledger_or_source_io_on_main() {
+    use beckon::{
+        core::{Binding, BindingState, STATE_VERSION},
+        render::{AgentState, attention::AttentionState},
+        source_jobs::SourceExecutor,
+    };
+    struct Ledger {
+        mode: Cell<u8>,
+        bindings: Vec<Binding>,
+    }
+    impl BindingStore for Ledger {
+        fn load(&self) -> Result<Option<BindingState>> {
+            match self.mode.get() {
+                0 => Ok(None),
+                1 => bail!("fixture read error"),
+                2 => Ok(Some(BindingState {
+                    state_version: 0,
+                    bindings: vec![],
+                })),
+                4 => Ok(Some(BindingState {
+                    state_version: STATE_VERSION,
+                    bindings: vec![],
+                })),
+                _ => Ok(Some(BindingState {
+                    state_version: STATE_VERSION,
+                    bindings: self.bindings.clone(),
+                })),
+            }
+        }
+        fn save(&self, _: &BindingState) -> Result<()> {
+            panic!("sampling must not save/reconcile")
+        }
+    }
+    let (root, mut config) = fixture_config("ring-ledger");
+    config.herdr.enabled = false;
+    config.bindings = (1..=6).map(|i| format!("key{i}")).collect();
+    config.display.keys = config
+        .bindings
+        .iter()
+        .map(|id| beckon::render::KeyDisplay {
+            id: id.clone(),
+            color: "#123456".parse().unwrap(),
+        })
+        .collect();
+    config.sources = vec![beckon::config::AgentSourceConfig {
+        id: "sample-source".into(),
+        list: vec![
+            "/bin/cat".into(),
+            root.join("rows.json").to_str().unwrap().into(),
+        ],
+        focus: vec![],
+        activate: vec![],
+        identity: None,
+        refresh_ms: 1000,
+    }];
+    let mut rows = (1..=6)
+        .map(
+            |i| serde_json::json!({"scope":"s","id":format!("p{i}"),"state":"idle","focused":true}),
+        )
+        .collect::<Vec<_>>();
+    rows.push(serde_json::json!({"scope":"other-session","id":"unbound","state":"blocked","focused":false}));
+    std::fs::write(root.join("rows.json"), serde_json::to_vec(&rows).unwrap()).unwrap();
+    let SourceResult::Refreshed(observations) = SourceExecutor::default()
+        .execute(
+            SourceWork::Refresh(config.clone()),
+            Instant::now() + Duration::from_secs(1),
+        )
+        .unwrap()
+    else {
+        panic!("refresh")
+    };
+    // Removing the producer input makes any accidental main-thread list fail.
+    std::fs::remove_file(root.join("rows.json")).unwrap();
+    let bindings = (1..=6)
+        .map(|i| Binding {
+            source: "sample-source".into(),
+            session: "s".into(),
+            pane_id: format!("p{i}"),
+            key: format!("key{i}"),
+        })
+        .collect();
+    let jobs = SourceJobs::spawn(|| {
+        move |_: SourceWork, _| panic!("sample must not dispatch source work")
+    })
+    .unwrap();
+    let mut state = State::new(
+        config,
+        Switches::new(&[], Poster).unwrap(),
+        DisplaySet::default(),
+        jobs,
+        Ledger {
+            mode: Cell::new(0),
+            bindings,
+        },
+    )
+    .unwrap();
+    state.sources.apply(observations);
+    for mode in [0, 1, 2, 4, 3] {
+        state.store.mode.set(mode);
+        let now = Instant::now();
+        state.sample(now).unwrap();
+        assert_eq!(
+            state
+                .plan
+                .source_attention
+                .get("sample-source")
+                .map(|a| a.at(now)),
+            Some(AttentionState::Observed(AgentState::Blocked)),
+            "ledger mode {mode}"
+        );
+        assert!(state.sources.take_commands().is_empty());
+    }
+    assert_eq!(
+        state
+            .plan
+            .keys
+            .iter()
+            .filter(|k| k.state == Some(AgentState::Idle))
+            .count(),
+        6
+    );
+    let keys = state.plan.keys.clone();
+    state.store.mode.set(1);
+    state
+        .sources
+        .mark_unavailable(["sample-source".into()], Instant::now());
+    let now = Instant::now();
+    state.sample(now).unwrap();
+    assert_eq!(
+        state.plan.source_attention["sample-source"].at(now),
+        AttentionState::Unknown
+    );
+    assert_eq!(
+        state.plan.keys, keys,
+        "unavailable ledger keeps the prior key plan"
+    );
+    drop(state);
+    cleanup(root);
+}
+
+#[test]
 fn fixture_socket_roots_fit_long_private_sandbox_parent_and_remain_unique() {
     use std::os::unix::{ffi::OsStrExt, fs::DirBuilderExt, net::SocketAddr};
     // Reserve a private parent atomically; never adopt/remove an existing path.

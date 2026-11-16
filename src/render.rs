@@ -4,6 +4,7 @@ use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::core::{Agent, Binding};
+pub mod attention;
 
 /// A host-independent LED instruction. Firmware transports this later; it is
 /// deliberately not coupled to HID reports or keyboard-specific coordinates.
@@ -248,6 +249,9 @@ pub struct KeyRender {
 pub struct RenderPlan {
     pub keys: Vec<KeyRender>,
     pub treatments: StateTreatments,
+    /// Cache-only evidence for built-in source-scoped attention, not plugin wire.
+    #[serde(skip)]
+    pub source_attention: BTreeMap<String, attention::SourceAttention>,
 }
 
 impl AgentState {
@@ -305,7 +309,11 @@ pub fn render(display: &DisplayConfig, bindings: &[(Binding, Agent)]) -> Result<
             },
         })
         .collect();
-    Ok(RenderPlan { keys, treatments })
+    Ok(RenderPlan {
+        keys,
+        treatments,
+        source_attention: BTreeMap::new(),
+    })
 }
 
 pub fn all_state_examples(display: &DisplayConfig) -> Result<RenderPlan> {
@@ -325,6 +333,7 @@ pub fn all_state_examples(display: &DisplayConfig) -> Result<RenderPlan> {
             .map(|(state, key)| render_state(&key.id, state, display))
             .collect(),
         treatments,
+        source_attention: BTreeMap::new(),
     })
 }
 
@@ -358,7 +367,11 @@ pub fn demo_plan(display: &DisplayConfig) -> Result<RenderPlan> {
             },
         })
         .collect();
-    Ok(RenderPlan { keys, treatments })
+    Ok(RenderPlan {
+        keys,
+        treatments,
+        source_attention: BTreeMap::new(),
+    })
 }
 
 fn render_state(key: &str, state: AgentState, display: &DisplayConfig) -> KeyRender {

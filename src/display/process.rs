@@ -87,7 +87,9 @@ impl ProcessDisplay {
     }
 
     fn queue(&mut self, plan: &RenderPlan) -> Result<()> {
-        if self.last_plan.as_ref() == Some(plan) {
+        if self.last_plan.as_ref().is_some_and(|previous| {
+            previous.keys == plan.keys && previous.treatments == plan.treatments
+        }) {
             return Ok(());
         }
 
@@ -270,6 +272,44 @@ mod tests {
 
     fn plan() -> RenderPlan {
         crate::render::render(&DisplayConfig::default(), &[]).unwrap()
+    }
+
+    #[test]
+    fn ring_metadata_does_not_change_plugin_v2_bytes_or_queue_sequence() {
+        let (updates, mut receiver) = watch::channel(None);
+        let (_status, statuses) = mpsc::channel();
+        let mut display = ProcessDisplay {
+            id: "fake".into(),
+            updates: Some(updates),
+            statuses,
+            worker: None,
+            last_plan: None,
+            next_sequence: 1,
+        };
+        let mut plan = plan();
+        let before = DisplayMessage::render(1, &plan).to_ndjson().unwrap();
+        display.publish(&plan).unwrap();
+        assert_eq!(receiver.borrow_and_update().as_ref().unwrap().sequence, 1);
+        plan.source_attention.insert(
+            "unbound".into(),
+            crate::render::attention::SourceAttention::from_observation(
+                &crate::source_observation::SourceObservation::unknown("unbound"),
+                Instant::now(),
+            ),
+        );
+        assert_eq!(
+            DisplayMessage::render(1, &plan).to_ndjson().unwrap(),
+            before,
+            "exact v2 wire bytes ignore internal evidence"
+        );
+        display.publish(&plan).unwrap();
+        assert!(
+            !receiver.has_changed().unwrap(),
+            "internal-only updates must not queue a plugin render"
+        );
+        plan.keys[0].brightness = 0.25;
+        display.publish(&plan).unwrap();
+        assert_eq!(receiver.borrow_and_update().as_ref().unwrap().sequence, 2);
     }
 
     #[test]

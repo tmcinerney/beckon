@@ -537,6 +537,7 @@ mod tests {
 
     fn plan(states: [Option<AgentState>; SLOT_COUNT]) -> RenderPlan {
         RenderPlan {
+            source_attention: Default::default(),
             keys: KEY_IDS
                 .into_iter()
                 .zip(states)
@@ -583,6 +584,27 @@ mod tests {
                 .iter()
                 .all(|status| *status == Status::Unbound)
         );
+    }
+
+    #[test]
+    fn ring_metadata_does_not_change_hid_payload_or_trigger_another_write() {
+        let mut sink = RenderSink::new(RecordingWriter::default());
+        let mut plan = plan([Some(AgentState::Idle); SLOT_COUNT]);
+        assert!(sink.publish(&plan).unwrap());
+        let signature = (slots_for_plan(&plan).unwrap(), treatments_for_plan(&plan));
+        plan.source_attention.insert(
+            "source".into(),
+            crate::render::attention::SourceAttention::from_observation(
+                &crate::source_observation::SourceObservation::unknown("source"),
+                Instant::now(),
+            ),
+        );
+        assert_eq!(
+            (slots_for_plan(&plan).unwrap(), treatments_for_plan(&plan)),
+            signature
+        );
+        assert!(!sink.publish(&plan).unwrap());
+        assert_eq!(sink.into_inner().writes.len(), 1);
     }
 
     #[test]
