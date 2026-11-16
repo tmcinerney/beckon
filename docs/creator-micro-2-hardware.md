@@ -2,8 +2,8 @@
 
 Hardware observations here were established against a live device. SDK-derived
 names and implementation choices are called out separately from measured facts.
-Work Louder publishes no protocol reference; the Input app ships only its own
-default templates, and the firmware enforces rules the app never expresses.
+Shipped SDK declarations describe host request shapes, not every firmware rule.
+Static source inspection and command acknowledgements are not physical acceptance.
 
 Record the **method** alongside each fact. `put` acceptance is not evidence of
 anything — see [Validation traps](#validation-traps).
@@ -88,6 +88,69 @@ press to a layer requires tracking the latest `kb.pl`, seeded from
 `device.status.layer_index` on connect. That logic belongs in the
 `creator-micro-usb` adapter; core still sees only logical slots.
 
+### Host observations and bounded-input limits
+
+The adapter's cached diagnostics distinguish configured member/layer associations
+from observed connection/layer state. Reading diagnostics performs no I/O and does
+not refresh timestamps. A newly observed selector survives its ordered engine
+Reset; transport loss invalidates the current layer while retaining historical
+success/failure evidence. Successful output means a host transport send, not a
+firmware acknowledgement, LED restoration or receiver acceptance. No physical
+key names/geometry or macOS permission state are inferred.
+
+The daemon adapter now has an explicit, lazy `start_transport` lifecycle. Its one
+Creator owner constructs, opens, probes, reads, writes and closes HID on the owner
+thread. Constructors, preview, diagnostics and polling never implicitly discover
+hardware. Direct CLI `Pad::open` remains an explicitly blocking, separate path;
+do not run it alongside the daemon. `reconnect_step` reads cached progress only:
+after explicit start, the owner performs real status acquisition and automatic
+same-owner reconnect rather than returning Deferred as a completed solution.
+
+The owner bounds each input slice to 128 raw/buffered work steps and 5 ms host
+work. Partial reports count as work; malformed consumed JSON establishes typed
+loss/reset, not exhaustion. Raw-read completion timestamps survive fragments,
+buffered JSON and pending messages. Main's `DrainOnly` now consumes only bounded
+mailbox records, preserving ordered releases before Reset. Overflow is visible
+before applying its retained prefix, suppresses ambiguous new downs, and reserves
+a sticky Reset/cleanup boundary; known-down controls need release evidence before
+rearm. Main remains the only switch/core/config/ledger mutator and host key poster.
+
+Actor-backed holds require the exact request/evidence/claim/consume/release API;
+the legacy pure `is_trusted_drain` predicate cannot authorize them. A fresh empty
+read after the requested hold deadline parks further HID operations for at most
+10 ms. Main nonwaitingly claims it, applies its complete ordered prefix, consumes
+it once, and releases/resumes. Expiry, stop or new relevant commands invalidate
+the lease without waiting for main. A >50 ms sampling gap cancels continuity;
+receipt time cannot freshen evidence. Timer admission must use the original
+observation cutoff, including when multiple controls have different deadlines.
+No physical event timestamp or guarantee under arbitrary OS jitter is implied.
+
+Both lighting methods retain complete-SEND semantics, including per-key clears:
+all reports must complete before output success is recorded. Enqueue is pending,
+not success. Correlated optional `result.ok=1` may confirm protocol acceptance
+internally, but a silent optional reply never adds a 700 ms hold barrier. Required
+`device.status` is distinct and correlated. Request ids never reuse within the
+process; late responses cannot satisfy newer work. Unsent clear debt, completed
+but unconfirmed sends and uncertain partial writes are separate states. Old-device
+debt is retained as unresolved rather than replayed onto a new connection.
+
+HIDAPI 2.6.6 still has synchronous OS open/write/close and reader-thread joins.
+The owner can remain stuck indefinitely; main never joins it or cancels a native
+call. A bounded off-main exit observer joins the owner, and its registry lease
+is released only after that join completes (not merely `is_finished`). Retirement
+attempts bounded owed owned-key clears where safe, never a global all-off/native
+restoration operation. An explicitly stopped frontend stays Retiring; a new
+frontend may start only after actual owner exit. No second Creator reader/handle
+is used as a recovery shortcut.
+
+**Integration is still pending:** backend must supply the separately reviewed
+Glove80/status publication worker and actual daemon lifecycle/claim-consume turn
+controller before activating this path. Moving Creator alone cannot prevent
+legacy main-thread HIDAPI calls from waiting on the library's global context.
+The Creator component's startup/reconnect/publication/retirement and handoff are
+fake-tested; this is not whole-daemon, physical LED, native-ring restoration,
+permission or receiver acceptance. No real hardware experiment was performed.
+
 ## Lighting
 
 Per-key colour is addressed by agent id:
@@ -96,10 +159,11 @@ Per-key colour is addressed by agent id:
 [{"id":6,"c":16711680,"b":1.0,"e":1,"s":0.5}]
 ```
 
-sent via `v.oai.thstatus`, and zone lighting via `v.oai.rgbcfg`. Both acknowledge
-with `{"ok":1}`, so a write can be confirmed rather than assumed. The payload is
-an **array**, so one RPC request can update several keys. A request may span
-multiple HID reports; atomic LED presentation has not been established.
+sent via `v.oai.thstatus`, and zone lighting via `v.oai.rgbcfg`. Both have been
+observed acknowledging with `{"ok":1}`; this confirms a protocol response, not
+visible effect or ownership release. The `thstatus` payload is an **array**, so
+one RPC request can update several keys. A request may span multiple HID reports;
+atomic LED presentation has not been established.
 
 | Field | Meaning |
 |---|---|
@@ -122,9 +186,10 @@ Effect ids in use, all confirmed by eye:
 order `off, solid, snake, rainbow, breath, gradient`, which is consistent with
 `3` = rainbow and `5` = gradient, but that ordering has not been confirmed.
 
-**Clearing an override** is `{"id":N,"c":0,"b":0.0,"e":0}`. The key drops back to
-the layer base colour rather than to black — there is no "unset" separate from
-"off".
+**Clearing a per-key override** is `{"id":N,"c":0,"b":0.0,"e":0}`. The key drops
+back to the layer base colour rather than to black — there is no separately
+established per-key "unset" operation. This observation does **not** establish
+how to release a `v.oai.rgbcfg` zone override.
 
 **Overrides are runtime state, not keymap data.** A competing host can overwrite
 them. Observed: a held override disappeared mid-press until the host began
@@ -134,8 +199,55 @@ across every reconnect case have not been established.
 - Only a key carrying an `AGnn` keycode has an id, and therefore a per-key colour.
   Keys carrying macros, `KC_*`, or `SA_*` sit on the global `keys` zone and can
   only take the layer base colour.
-- `lights.preview` / `WLDeviceLightingConfig` is zone-level only (`keyboard`,
-  `side`). It is not a per-key API.
+- `lights.preview` / `WLDeviceLightingConfig` is zone-level only, using
+  **`backlight` and `underglow`**, not `keyboard` / `side`. These names are
+  SDK-derived: offline inspection of Input 1.1.0's `@worklouder/wl-device-kit`
+  0.2.13 preview method and the declarations shipped with ChatGPT's
+  `@worklouder/device-kit-oai` 0.2.1. The preview SDK describes immediate,
+  non-flash-persisted configuration; this is not an independently observed
+  firmware release contract. The separate OAI zone configuration uses `keys`
+  and `ambient`. Neither is a per-key addressing API.
+
+### Zone suppression is not release
+
+At backend revision `10e22d5`, `zone_lighting = "firmware"` suppresses future
+Beckon `v.oai.rgbcfg` writes. Layer changes queue per-key `thstatus` clears, not
+a zone release. That command suppression must not be described as restoring
+saved layer lighting.
+
+Prior attended evidence on firmware **0.7.0-rc.16** reproduced the defect while
+Beckon was stopped: the user reported the yellow/blinking ring persisted across
+all five layers, including native ChatGPT. The raw capture recorded profile-1
+`kb.pl` positions **4→5→1→2→3→4→5→1**; a status response independently reported
+layer 5 and that firmware version. No `v.oai.rgbcfg` acknowledgement was observed
+in the selected capture. Persistent last runtime zone state is the leading
+explanation, not proof of firmware internals or of every other writer's behavior.
+
+The inspected canonical keymap has saved backlight/underglow objects for
+Home/Rex/Herdr/Delta but **no saved lighting object for native ChatGPT**
+(`lights` absent/null). Repainting custom presets would not establish safe native
+restoration. Do not invent a static native palette, write reserved AG00–AG05,
+or treat turning all zones off as returning ownership to firmware.
+
+No supported zone-release/reset operation was established by the inspected
+SDKs. Their exposed lighting methods do not document a nullable reset or release
+payload; accepting arbitrary JSON in a transport does not establish one.
+The [official InputKit v0.2.1 API][inputkit-api] documents per-Smart-Action key
+lighting, not an OAI zone-release request. The [official rc.16 release notes][rc16]
+do not specify a handoff contract. Firmware string inventory contains lighting
+method names, but strings alone do not establish their semantics. This was
+ordinary offline source/index/string inspection, **not** REA Evidence,
+firmware decompilation or a new runtime test; lack of a documented operation in
+these sources does not prove no hidden firmware operation exists.
+
+Whether a complete destination `lights.preview` supersedes an OAI override and
+releases it on subsequent layer changes remains **unverified on rc.16**. No such
+experiment or restoration fix is claimed here. A separately authorized attended
+experiment or a supported vendor release contract is needed before implementing
+handoff; suppression-only tests and successful writes cannot settle it.
+
+[inputkit-api]: https://github.com/worklouder/input-kit/blob/1d183d9d42bcc97b4e1b7dcc5d679f583d289219/docs/API.md
+[rc16]: https://github.com/worklouder/cm-v2-fw-releases/releases/tag/v0.7.0-rc.16
 
 ## Keymap constraints
 

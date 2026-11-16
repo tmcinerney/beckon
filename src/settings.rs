@@ -40,6 +40,11 @@ pub enum PresentationChange {
         effect: String,
         effects: Effects,
     },
+    DeviceEffectV2 {
+        device: String,
+        effect: String,
+        effects: Effects,
+    },
     DeviceChannel {
         device: String,
         channel: String,
@@ -117,23 +122,12 @@ impl Settings {
                 device,
                 effect,
                 effects,
-            } => {
-                let definition = config
-                    .devices
-                    .iter()
-                    .find(|value| value.id == device)
-                    .context("unknown device")?;
-                device::require(
-                    "effects",
-                    &effect,
-                    definition.definition.effects.keys().map(String::as_str),
-                )?;
-                self.devices
-                    .entry(device)
-                    .or_default()
-                    .effects
-                    .insert(effect, effects);
-            }
+            } => self.change_effect(config, device, effect, effects, false)?,
+            PresentationChange::DeviceEffectV2 {
+                device,
+                effect,
+                effects,
+            } => self.change_effect(config, device, effect, effects, true)?,
             PresentationChange::DeviceChannel {
                 device,
                 channel,
@@ -147,6 +141,38 @@ impl Settings {
                     .insert(channel, treatment);
             }
         }
+        Ok(())
+    }
+
+    fn change_effect(
+        &mut self,
+        config: &Config,
+        device: String,
+        effect: String,
+        effects: Effects,
+        extended: bool,
+    ) -> Result<()> {
+        let definition = config
+            .devices
+            .iter()
+            .find(|value| value.id == device)
+            .context("unknown device")?;
+        let current = definition
+            .definition
+            .effects
+            .get(&effect)
+            .context("unknown effects")?;
+        // AIDEV-NOTE: legacy clients re-encode only three states; reject rather
+        // than silently erase fields they could not decode.
+        if !extended && (current.has_extended_states() || effects.has_extended_states()) {
+            anyhow::bail!("upgrade required: extended effects require device_effect_v2");
+        }
+        effects.validate()?;
+        self.devices
+            .entry(device)
+            .or_default()
+            .effects
+            .insert(effect, effects);
         Ok(())
     }
 

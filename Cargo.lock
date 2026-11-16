@@ -106,6 +106,7 @@ dependencies = [
  "ctrlc",
  "global-hotkey",
  "hidapi",
+ "libc",
  "serde",
  "serde_json",
  "tao",

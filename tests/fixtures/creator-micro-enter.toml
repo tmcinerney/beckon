@@ -1,0 +1,86 @@
+# OFFLINE CANDIDATE ONLY — NOT INSTALLED. Requires the reviewed new backend schema.
+# Requires separately authorized attended AG18 migration and receiver/LED acceptance.
+# Host instance: preserve Rex's six navigation keys and all other device macros.
+adapter = "creator-micro"
+
+[options]
+refresh_ms = 400
+effect_speed = 0.5
+ring_follows_state_color = true
+base = { color = "#B366FF", brightness = 0.45, motion = "steady" }
+ring = { color = "#FF4975", brightness = 0.5, motion = "breathe" }
+
+# Positions were read back from this device; they are not stored layer ids.
+[options.layers.home]
+profile = 1
+position = 1
+zone_lighting = "firmware"
+
+[options.layers.rex]
+profile = 1
+position = 3
+source = "rex"
+zone_lighting = "beckon"
+
+[options.layers.herdr]
+profile = 1
+position = 4
+zone_lighting = "firmware"
+
+[options.layers.delta]
+profile = 1
+position = 5
+zone_lighting = "firmware"
+
+[keys.key1]
+members = ["creator-micro:rex/6"]
+binding = "key1"
+[keys.key2]
+members = ["creator-micro:rex/7"]
+binding = "key2"
+[keys.key3]
+members = ["creator-micro:rex/8"]
+binding = "key3"
+[keys.key4]
+members = ["creator-micro:rex/9"]
+binding = "key4"
+[keys.key5]
+members = ["creator-micro:rex/10"]
+binding = "key5"
+[keys.key6]
+members = ["creator-micro:rex/11"]
+binding = "key6"
+
+# One logical microphone control: either half operates both indicators.
+[keys.microphone]
+members = ["creator-micro:home/16", "creator-micro:home/17", "creator-micro:rex/16", "creator-micro:rex/17", "creator-micro:herdr/16", "creator-micro:herdr/17", "creator-micro:delta/16", "creator-micro:delta/17"]
+action = "dictate"
+effects = "dictation"
+
+[actions.dictate]
+kind = "chord"
+keys = ["ctrl", "opt", "d"]
+mode = "hold"
+
+[effects.dictation]
+held = { color = "#FF0000", brightness = 1.0, motion = "breathe" }
+
+# Source-independent Enter control on custom layers only; native ChatGPT is untouched.
+# Tap on release; trusted hold fires one Shift+Enter pulse, no repeats or extra Enter.
+# 300ms is an explicit proposal, not a measured receiver threshold.
+[keys.send-or-newline]
+members = ["creator-micro:home/18", "creator-micro:rex/18", "creator-micro:herdr/18", "creator-micro:delta/18"]
+action = "send-or-newline"
+effects = "enter-cue"
+
+[actions.send-or-newline]
+kind = "tap-hold-chords"
+tap_keys = ["enter"]
+hold_keys = ["shift", "enter"]
+hold_ms = 300
+
+# Amber is for actual typed output failures only, never pending or guessed app state.
+[effects.enter-cue]
+pending = { color = "#FFFFFF", brightness = 0.12, motion = "steady" }
+hold_fired = { color = "#3388FF", brightness = 0.45, motion = "steady" }
+error = { treatment = { color = "#FFB000", brightness = 0.5, motion = "steady" }, duration_ms = 650 }

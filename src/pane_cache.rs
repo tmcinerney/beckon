@@ -9,7 +9,7 @@
 use std::{
     sync::{Arc, RwLock},
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use anyhow::Result;
@@ -22,26 +22,39 @@ const RECONCILE_INTERVAL: Duration = Duration::from_secs(5);
 pub struct PaneCache {
     session: String,
     panes: Arc<RwLock<Vec<Agent>>>,
+    observation: Arc<RwLock<crate::source_observation::SourceObservation>>,
 }
 
 impl PaneCache {
     pub fn new(session: impl Into<String>, initial: Vec<Agent>) -> Self {
         let session = session.into();
-        let panes = initial
+        let panes: Vec<_> = initial
             .into_iter()
             .map(|pane| stamp_session(pane, &session))
             .collect();
-        Self {
+        let cache = Self {
             session,
             panes: Arc::new(RwLock::new(panes)),
-        }
+            observation: Arc::new(RwLock::new(
+                crate::source_observation::SourceObservation::unknown("herdr"),
+            )),
+        };
+        let rows = cache
+            .panes()
+            .into_iter()
+            .map(|agent| (agent, None))
+            .collect();
+        cache.replace_labelled(rows);
+        cache
     }
 
     /// Seed from a complete `pane.list` snapshot, then keep it current from
     /// Herdr's global pane events. A read-only periodic reconciliation is the
     /// correctness backstop for a lost or out-of-order event.
     pub fn start(socket: HerdrSocket, session: &str) -> Result<Self> {
-        let cache = Self::new(session, socket.panes()?);
+        let rows = socket.labelled_panes()?;
+        let cache = Self::new(session, Vec::new());
+        cache.replace_labelled(rows);
         let monitor = cache.clone();
         let reconcile = cache.clone();
         let reconcile_socket = socket.clone();
@@ -50,12 +63,16 @@ impl PaneCache {
             .spawn(move || {
                 loop {
                     if let Err(error) = socket.monitor(|event| monitor.apply(event)) {
+                        monitor.mark_unavailable();
                         eprintln!("Herdr event stream disconnected: {error:#}");
                     }
                     thread::sleep(Duration::from_secs(1));
-                    match socket.panes() {
-                        Ok(panes) => monitor.replace(panes),
-                        Err(error) => eprintln!("refresh Herdr pane snapshot: {error:#}"),
+                    match socket.labelled_panes() {
+                        Ok(panes) => monitor.replace_labelled(panes),
+                        Err(error) => {
+                            monitor.mark_unavailable();
+                            eprintln!("refresh Herdr pane snapshot: {error:#}");
+                        }
                     }
                 }
             })?;
@@ -64,9 +81,12 @@ impl PaneCache {
             .spawn(move || {
                 loop {
                     thread::sleep(RECONCILE_INTERVAL);
-                    match reconcile_socket.panes() {
-                        Ok(panes) => reconcile.replace(panes),
-                        Err(error) => eprintln!("refresh Herdr pane snapshot: {error:#}"),
+                    match reconcile_socket.labelled_panes() {
+                        Ok(panes) => reconcile.replace_labelled(panes),
+                        Err(error) => {
+                            reconcile.mark_unavailable();
+                            eprintln!("refresh Herdr pane snapshot: {error:#}");
+                        }
                     }
                 }
             })?;
@@ -82,11 +102,64 @@ impl PaneCache {
     }
 
     pub fn replace(&self, panes: Vec<Agent>) {
-        let panes = panes
+        self.replace_labelled(panes.into_iter().map(|pane| (pane, None)).collect());
+    }
+
+    pub fn observation(&self) -> crate::source_observation::SourceObservation {
+        self.observation
+            .read()
+            .expect("observation lock poisoned")
+            .clone()
+    }
+
+    pub fn mark_unavailable(&self) {
+        let mut observation = self.observation.write().expect("observation lock poisoned");
+        let now = Instant::now();
+        observation.availability = crate::source_observation::SourceAvailability::Unavailable;
+        observation.observed_at = Some(now);
+        observation.observed_sessions.clear();
+        observation.last_failure = Some(crate::display::TypedFailure {
+            code: crate::display::DiagnosticCode::SourceUnavailable,
+            at: now,
+            active: true,
+            recovery: crate::display::Recovery::CheckSource,
+        });
+        for agent in &mut observation.agents {
+            agent.available = false;
+        }
+    }
+
+    pub fn replace_labelled(&self, rows: Vec<(Agent, Option<String>)>) {
+        use crate::source_observation::{AgentObservation, SourceAvailability, real_title};
+        let now = Instant::now();
+        let mut panes = self.panes.write().expect("pane cache lock poisoned");
+        let mut observation = self.observation.write().expect("observation lock poisoned");
+        let agents: Vec<_> = rows
             .into_iter()
-            .map(|pane| stamp_session(pane, &self.session))
+            .map(|(agent, scope_title)| {
+                let agent = stamp_session(agent, &self.session);
+                let title = real_title(&agent);
+                AgentObservation {
+                    agent,
+                    available: true,
+                    observed_at: now,
+                    title_at: title.as_ref().map(|_| now),
+                    title,
+                    scope_title_at: scope_title.as_ref().map(|_| now),
+                    scope_title,
+                }
+            })
             .collect();
-        *self.panes.write().expect("pane cache lock poisoned") = panes;
+        *panes = agents.iter().map(|row| row.agent.clone()).collect();
+        observation.id = "herdr".into();
+        observation.availability = SourceAvailability::Available;
+        observation.last_success = Some(now);
+        observation.observed_at = Some(now);
+        observation.observed_sessions = std::collections::BTreeSet::from([self.session.clone()]);
+        if let Some(failure) = observation.last_failure.as_mut() {
+            failure.active = false;
+        }
+        observation.agents = agents;
     }
 
     pub fn apply(&self, event: PaneEvent) {
@@ -99,6 +172,8 @@ impl PaneCache {
                     // delayed event roll a current cached status backward.
                     if pane.revision == 0 || pane.revision >= existing.revision {
                         *existing = pane;
+                    } else {
+                        return;
                     }
                 } else {
                     panes.push(pane);
@@ -106,6 +181,39 @@ impl PaneCache {
             }
             PaneEvent::Remove(pane_id) => panes.retain(|pane| pane.pane_id != pane_id),
         }
+        use crate::source_observation::{AgentObservation, SourceAvailability, real_title};
+        let now = Instant::now();
+        let mut observation = self.observation.write().expect("observation lock poisoned");
+        let available = observation.availability == SourceAvailability::Available;
+        let previous: std::collections::BTreeMap<_, _> = observation
+            .agents
+            .iter()
+            .map(|row| (row.agent.reference(), row.clone()))
+            .collect();
+        observation.agents = panes
+            .iter()
+            .map(|agent| {
+                let title = real_title(agent);
+                let old = previous.get(&agent.reference());
+                // Only a changed pane revision/title refreshes its evidence; an event
+                // on another pane cannot freshen this pane or its workspace label.
+                if let Some(old) = old
+                    && old.agent == *agent
+                {
+                    return old.clone();
+                }
+                AgentObservation {
+                    agent: agent.clone(),
+                    available,
+                    observed_at: now,
+                    title_at: title.as_ref().map(|_| now),
+                    title,
+                    scope_title: old.and_then(|row| row.scope_title.clone()),
+                    scope_title_at: old.and_then(|row| row.scope_title_at),
+                }
+            })
+            .collect();
+        observation.observed_at = Some(now);
     }
 }
 

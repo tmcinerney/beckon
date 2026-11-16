@@ -89,21 +89,22 @@ impl ConfiguredInput {
         }
         for device in devices {
             for (name, action) in &device.definition.actions {
-                let crate::device::Action::Chord { keys, .. } = action;
-                let shortcut = keys
-                    .iter()
-                    .map(|key| if key == "opt" { "alt" } else { key.as_str() })
-                    .collect::<Vec<_>>()
-                    .join("+");
-                // The chord parser is stricter; every supported key also has a
-                // global-hotkey spelling. Fail closed instead of feeding our
-                // synthesized shortcut back into the input graph.
-                let shortcut: HotKey = shortcut.parse()?;
-                if bindings.contains_key(&shortcut.id()) {
-                    anyhow::bail!(
-                        "{}.actions.{name}: output chord is also a registered input (feedback loop)",
-                        device.id
-                    );
+                for keys in action.output_chords() {
+                    let shortcut = keys
+                        .iter()
+                        .map(|key| if key == "opt" { "alt" } else { key.as_str() })
+                        .collect::<Vec<_>>()
+                        .join("+");
+                    // The chord parser is stricter; every supported key also has a
+                    // global-hotkey spelling. Fail closed instead of feeding our
+                    // synthesized shortcut back into the input graph.
+                    let shortcut: HotKey = shortcut.parse()?;
+                    if bindings.contains_key(&shortcut.id()) {
+                        anyhow::bail!(
+                            "{}.actions.{name}: output chord is also a registered input (feedback loop)",
+                            device.id
+                        );
+                    }
                 }
             }
         }

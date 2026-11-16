@@ -52,6 +52,33 @@ impl<D> SessionRouter<D> {
 }
 
 impl<D: AgentSource> AgentSource for SessionRouter<D> {
+    fn observation(&self) -> crate::source_observation::SourceObservation {
+        use crate::source_observation::{SourceAvailability, SourceObservation};
+        let mut result = SourceObservation::unknown(self.id());
+        for directory in self.directories.values() {
+            let child = directory.observation();
+            if child.availability == SourceAvailability::Unavailable {
+                result.availability = SourceAvailability::Unavailable;
+            } else if child.availability == SourceAvailability::Available
+                && result.availability != SourceAvailability::Unavailable
+            {
+                result.availability = SourceAvailability::Available;
+            }
+            result.observed_at = result.observed_at.max(child.observed_at);
+            result.last_success = result.last_success.max(child.last_success);
+            if child.last_failure.as_ref().is_some_and(|failure| {
+                result
+                    .last_failure
+                    .as_ref()
+                    .is_none_or(|current| failure.at > current.at)
+            }) {
+                result.last_failure = child.last_failure;
+            }
+            result.observed_sessions.extend(child.observed_sessions);
+            result.agents.extend(child.agents);
+        }
+        result
+    }
     fn id(&self) -> &str {
         crate::core::DEFAULT_SOURCE
     }

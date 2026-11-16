@@ -17,6 +17,9 @@ use hidapi::{DeviceInfo, HidApi, HidDevice};
 
 use crate::render::{AgentState, Motion, RenderPlan, Rgb, StateTreatment};
 
+mod status_worker;
+pub(crate) use status_worker::StatusPublicationWorker;
+
 pub const VENDOR_USAGE_PAGE: u16 = 0xFF60;
 pub const STATUS_USAGE: u16 = 0x0061;
 pub const GLOVE80_VENDOR_ID: u16 = 0x16C0;
@@ -112,16 +115,37 @@ pub struct Treatment {
 /// state-to-transport policy be tested without a physical HID device.
 pub trait StatusWriter {
     fn write_snapshot(&mut self, snapshot: StatusSnapshot) -> Result<()>;
+    /// Original complete-send/failure evidence, captured before native teardown.
+    /// Fakes without a separate teardown can use the worker's completion clock.
+    fn last_attempt_at(&self) -> Option<Instant> {
+        None
+    }
 }
 
 /// The real USB writer. It opens the strict Glove80 endpoint for every state
 /// change, which makes unplug/replug recovery an ordinary subsequent write.
 #[derive(Default)]
-pub struct UsbStatusWriter;
+pub struct UsbStatusWriter {
+    last_attempt_at: Option<Instant>,
+}
 
 impl StatusWriter for UsbStatusWriter {
     fn write_snapshot(&mut self, snapshot: StatusSnapshot) -> Result<()> {
-        send(snapshot)
+        self.last_attempt_at = None;
+        let device = match open() {
+            Ok(device) => device,
+            Err(error) => {
+                self.last_attempt_at = Some(Instant::now());
+                return Err(error);
+            }
+        };
+        let result = write_exact(&device, &snapshot.encode());
+        self.last_attempt_at = Some(Instant::now());
+        // Device close may block; keep original write evidence, not close time.
+        result
+    }
+    fn last_attempt_at(&self) -> Option<Instant> {
+        self.last_attempt_at
     }
 }
 

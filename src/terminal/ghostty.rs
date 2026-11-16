@@ -8,8 +8,7 @@
 //! and focuses the surface as one dictionary command; the workspace-manager
 //! crossing observed in testing comes from that activation.
 
-use std::io::Write;
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
@@ -30,20 +29,11 @@ pub struct OsascriptRunner;
 
 impl ScriptRunner for OsascriptRunner {
     fn run(&self, script: &str) -> Result<String> {
-        let mut child = Command::new("osascript")
-            .args(["-l", "JavaScript"])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .context("run osascript")?;
-        child
-            .stdin
-            .as_mut()
-            .context("open osascript stdin")?
-            .write_all(script.as_bytes())
-            .context("write osascript program")?;
-        let output = child.wait_with_output().context("wait for osascript")?;
+        let output = crate::process_job::output_with_input(
+            Command::new("osascript").args(["-l", "JavaScript"]),
+            script.as_bytes(),
+        )
+        .context("run osascript")?;
         if !output.status.success() {
             bail!(
                 "osascript failed: {}",

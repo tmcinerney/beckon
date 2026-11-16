@@ -57,9 +57,9 @@ impl FocusAdapter for CommandFocus<'_> {
         if let Some(handle) = context.terminal_handle {
             process.env("BECKON_TERMINAL_HANDLE", handle.as_str());
         }
-        let status = process
-            .status()
-            .with_context(|| format!("run focus command {program}"))?;
+        let status = crate::process_job::output(&mut process)
+            .with_context(|| format!("run focus command {program}"))?
+            .status;
         if !status.success() {
             bail!("focus command {program} exited with {status}");
         }

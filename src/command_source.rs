@@ -8,7 +8,7 @@
 //! still reacting to state changes within a second.
 
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     collections::{BTreeMap, BTreeSet},
     process::Command,
     time::{Duration, Instant},
@@ -37,6 +37,8 @@ struct AgentRecord {
     #[serde(default)]
     title: String,
     #[serde(default)]
+    scope_title: Option<String>,
+    #[serde(default)]
     focused: bool,
     /// Optional binding token the source already stores on the agent.
     #[serde(default)]
@@ -50,11 +52,14 @@ fn default_scope() -> String {
 struct Cache {
     at: Instant,
     agents: Vec<Agent>,
+    scope_titles: BTreeMap<AgentRef, String>,
 }
 
 pub struct CommandSource {
     config: AgentSourceConfig,
     cache: RefCell<Option<Cache>>,
+    invalidated: Cell<bool>,
+    last_failure: RefCell<Option<crate::display::TypedFailure>>,
 }
 
 impl CommandSource {
@@ -62,6 +67,8 @@ impl CommandSource {
         Self {
             config,
             cache: RefCell::new(None),
+            invalidated: Cell::new(false),
+            last_failure: RefCell::new(None),
         }
     }
 
@@ -71,19 +78,38 @@ impl CommandSource {
 
     fn snapshot(&self) -> Result<Vec<Agent>> {
         if let Some(cache) = self.cache.borrow().as_ref()
+            && !self.invalidated.get()
             && cache.at.elapsed() < self.ttl()
         {
             return Ok(cache.agents.clone());
         }
-        let agents = self.list()?;
-        *self.cache.borrow_mut() = Some(Cache {
-            at: Instant::now(),
-            agents: agents.clone(),
-        });
+        let cache = match self.list() {
+            Ok(cache) => cache,
+            Err(error) => {
+                *self.last_failure.borrow_mut() = Some(crate::display::TypedFailure {
+                    code: if error.downcast_ref::<serde_json::Error>().is_some() {
+                        crate::display::DiagnosticCode::SourceSnapshotInvalid
+                    } else {
+                        crate::display::DiagnosticCode::SourceUnavailable
+                    },
+                    at: Instant::now(),
+                    active: true,
+                    recovery: crate::display::Recovery::CheckSource,
+                });
+                self.invalidated.set(true);
+                return Err(error);
+            }
+        };
+        let agents = cache.agents.clone();
+        *self.cache.borrow_mut() = Some(cache);
+        self.invalidated.set(false);
+        if let Some(failure) = self.last_failure.borrow_mut().as_mut() {
+            failure.active = false;
+        }
         Ok(agents)
     }
 
-    fn list(&self) -> Result<Vec<Agent>> {
+    fn list(&self) -> Result<Cache> {
         let output = run(&self.config.list, &BTreeMap::new())
             .with_context(|| format!("sources.{} list command", self.config.id))?;
         let records: Vec<AgentRecord> = serde_json::from_slice(&output).with_context(|| {
@@ -92,9 +118,16 @@ impl CommandSource {
                 self.config.id
             )
         })?;
-        Ok(records
+        let mut scope_titles = BTreeMap::new();
+        let agents = records
             .into_iter()
             .map(|record| {
+                if let Some(title) = record.scope_title.filter(|title| !title.trim().is_empty()) {
+                    scope_titles.insert(
+                        AgentRef::for_source(&self.config.id, &record.scope, &record.id),
+                        title,
+                    );
+                }
                 let mut tokens = BTreeMap::new();
                 if let Some(token) = record.token {
                     tokens.insert("fkey".to_string(), token);
@@ -114,13 +147,68 @@ impl CommandSource {
                     tokens,
                 }
             })
-            .collect())
+            .collect();
+        Ok(Cache {
+            at: Instant::now(),
+            agents,
+            scope_titles,
+        })
     }
 }
 
 impl AgentSource for CommandSource {
     fn id(&self) -> &str {
         &self.config.id
+    }
+
+    fn observation(&self) -> crate::source_observation::SourceObservation {
+        use crate::source_observation::{AgentObservation, SourceAvailability, SourceObservation};
+        let failure = self.last_failure.borrow().clone();
+        let cache = self.cache.borrow();
+        let mut result = SourceObservation::unknown(&self.config.id);
+        result.last_failure = failure.clone();
+        result.observed_at = failure.as_ref().map(|failure| failure.at);
+        let failed = failure.as_ref().is_some_and(|failure| failure.active);
+        if failed {
+            result.availability = SourceAvailability::Unavailable;
+        }
+        if let Some(cache) = cache.as_ref() {
+            let available = !failed && !self.invalidated.get();
+            if available {
+                result.availability = SourceAvailability::Available;
+            }
+            result.observed_at = Some(if failed {
+                failure.as_ref().expect("active failure").at
+            } else {
+                cache.at
+            });
+            result.last_success = Some(cache.at);
+            if available {
+                result.observed_sessions = cache
+                    .agents
+                    .iter()
+                    .map(|agent| agent.session.clone())
+                    .collect();
+            }
+            result.agents = cache
+                .agents
+                .iter()
+                .map(|agent| {
+                    let scope_title = cache.scope_titles.get(&agent.reference()).cloned();
+                    let title = agent.label.clone();
+                    AgentObservation {
+                        agent: agent.clone(),
+                        available,
+                        observed_at: cache.at,
+                        title_at: title.as_ref().map(|_| cache.at),
+                        scope_title_at: scope_title.as_ref().map(|_| cache.at),
+                        title,
+                        scope_title,
+                    }
+                })
+                .collect();
+        }
+        result
     }
 
     fn current_identity(&self) -> Option<AgentRef> {
@@ -134,7 +222,7 @@ impl AgentSource for CommandSource {
     }
 
     fn refresh(&self) {
-        *self.cache.borrow_mut() = None;
+        self.invalidated.set(true);
     }
 
     fn panes(&self) -> Result<Vec<Agent>> {
@@ -196,7 +284,8 @@ fn run(argv: &[String], vars: &BTreeMap<String, String>) -> Result<Vec<u8>> {
     for argument in arguments {
         command.arg(expand(argument, vars));
     }
-    let output = command.output().with_context(|| format!("run {program}"))?;
+    let output =
+        crate::process_job::output(&mut command).with_context(|| format!("run {program}"))?;
     if !output.status.success() {
         bail!(
             "{program} exited with {}; stderr: {}",

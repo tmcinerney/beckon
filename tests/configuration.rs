@@ -114,6 +114,145 @@ fn synthesized_outputs_must_not_feed_back_into_registered_inputs() {
 }
 
 #[test]
+fn two_chord_parser_checks_both_outputs_against_every_registered_input() {
+    let fixture = Fixture::new();
+    fixture.device("pad", "adapter='hotkeys'\n[keys.send]\nmembers=['pad:F12']\naction='send'\n[actions.send]\nkind='tap-hold-chords'\ntap_keys=['enter']\nhold_keys=['shift','enter']\nhold_ms=300");
+    for shortcut in ["Enter", "Shift+Enter"] {
+        fixture.device(
+            "other",
+            &format!("adapter='hotkeys'\n[keys.loop]\nmembers=['other:{shortcut}']"),
+        );
+        assert!(format!("{:#}", fixture.load().unwrap_err()).contains("feedback loop"));
+    }
+    fixture.device(
+        "other",
+        "adapter='hotkeys'\n[keys.safe]\nmembers=['other:F11']",
+    );
+    let config = fixture.load().unwrap();
+    let action = serde_json::to_value(
+        &config
+            .devices
+            .iter()
+            .find(|d| d.id == "pad")
+            .unwrap()
+            .definition
+            .actions["send"],
+    )
+    .unwrap();
+    assert_eq!(
+        action,
+        serde_json::json!({"kind":"tap-hold-chords","tap_keys":["enter"],"hold_keys":["shift","enter"],"hold_ms":300})
+    );
+}
+
+#[test]
+fn two_chord_schema_rejects_missing_invalid_or_mixed_structural_fields() {
+    let fixture = Fixture::new();
+    let valid = "adapter='hotkeys'\n[actions.send]\nkind='tap-hold-chords'\ntap_keys=['enter']\nhold_keys=['shift','enter']\nhold_ms=300\n";
+    for invalid in [
+        valid.replace("hold_ms=300", ""),
+        valid.replace("hold_ms=300", "hold_ms=0"),
+        valid.replace("hold_ms=300", "hold_ms=-1"),
+        valid.replace("hold_ms=300", "hold_ms=18446744073709551616"),
+        valid.replace("hold_ms=300", "hold_ms=300\nmode='tap-hold'"),
+        valid.replace("hold_ms=300", "hold_ms=300\nkeys=['enter']"),
+        valid.replace("['shift','enter']", "['shift','typo']"),
+        valid.replace("['enter']", "[]"),
+    ] {
+        fixture.device("pad", &invalid);
+        assert!(fixture.load().is_err(), "accepted {invalid}");
+    }
+    fixture.device("pad", valid);
+    assert!(fixture.load().is_ok());
+}
+
+#[test]
+fn timed_feedback_states_are_explicit_and_strictly_presentation_only() {
+    let fixture = Fixture::new();
+    let text = "adapter='hotkeys'\n[keys.send]\nmembers=['pad:F12']\neffects='cue'\n[effects.cue]\npending={color='#FFFFFF',brightness=0.12,motion='steady'}\nhold_fired={color='#3388FF',brightness=0.45,motion='steady'}\nerror={treatment={color='#FFB000',brightness=0.5,motion='steady'},duration_ms=650}";
+    fixture.device("pad", text);
+    let config = fixture.load().unwrap();
+    let effects = serde_json::to_value(&config.devices[0].definition.effects["cue"]).unwrap();
+    assert_eq!(effects["error"]["duration_ms"], 650);
+    for invalid in [
+        text.replace("duration_ms=650", "duration_ms=0"),
+        text.replace(",duration_ms=650", ""),
+        text.replace("brightness=0.12", "brightness=1.2"),
+    ] {
+        fixture.device("pad", &invalid);
+        assert!(fixture.load().is_err());
+    }
+}
+
+#[test]
+fn actual_enter_candidate_loads_offline_and_legacy_effect_edit_cannot_erase_new_states() {
+    use beckon::{
+        device::{Effects, Treatment},
+        settings::PresentationChange,
+    };
+    let fixture = Fixture::new();
+    fixture.device(
+        "creator-micro",
+        include_str!("fixtures/creator-micro-enter.toml"),
+    );
+    let mut config = fixture.load().unwrap();
+    let action =
+        serde_json::to_value(&config.devices[0].definition.actions["send-or-newline"]).unwrap();
+    assert_eq!(action["hold_ms"], 300);
+    assert_eq!(
+        config.devices[0].definition.effects["enter-cue"]
+            .error
+            .unwrap()
+            .duration_ms,
+        650
+    );
+    let revision = config.model().unwrap().revision;
+    let treatment = Treatment {
+        color: "#112233".parse().unwrap(),
+        brightness: 0.25,
+        motion: beckon::render::Motion::Steady,
+    };
+    let legacy = PresentationChange::DeviceEffect {
+        device: "creator-micro".into(),
+        effect: "enter-cue".into(),
+        effects: Effects {
+            held: Some(treatment),
+            ..Default::default()
+        },
+    };
+    assert!(
+        format!(
+            "{:#}",
+            config.set_presentation(&revision, legacy).unwrap_err()
+        )
+        .contains("upgrade")
+    );
+    assert!(!fixture.0.join("settings.toml").exists());
+    let change: PresentationChange = serde_json::from_value(serde_json::json!({
+        "kind":"device_effect_v2", "device":"creator-micro", "effect":"enter-cue",
+        "effects":{"idle":null,"held":null,"latched":null,"pending":null,
+            "hold_fired":{"color":"#112233","brightness":0.25,"motion":"steady"},
+            "error":{"treatment":{"color":"#FFB000","brightness":0.5,"motion":"steady"},"duration_ms":650}}
+    })).unwrap();
+    let changed = config.set_presentation(&revision, change.clone()).unwrap();
+    assert_ne!(changed.revision, revision);
+    let bytes = fs::read(fixture.0.join("settings.toml")).unwrap();
+    assert!(config.set_presentation(&revision, change).is_err());
+    assert_eq!(fs::read(fixture.0.join("settings.toml")).unwrap(), bytes);
+    let reloaded = fixture.load().unwrap();
+    assert!(
+        reloaded.devices[0].definition.effects["enter-cue"]
+            .pending
+            .is_none()
+    );
+    assert_eq!(
+        reloaded.devices[0].definition.effects["enter-cue"].hold_fired,
+        Some(treatment)
+    );
+    assert_eq!(reloaded.model().unwrap().revision, changed.revision);
+}
+
+#[test]
 fn colour_mutations_are_revision_fenced_and_survive_reload_without_editing_structure() {
     use beckon::{
         render::{AgentState, Motion, StateTreatment},
@@ -176,6 +315,7 @@ fn device_feedback_and_channel_colours_are_typed_presentation_only() {
                     idle: None,
                     held: Some(treatment),
                     latched: Some(treatment),
+                    ..Default::default()
                 },
             },
         )

@@ -1,10 +1,14 @@
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     env, fs,
     io::{BufRead, BufReader, Write},
     os::unix::net::UnixStream,
     path::{Path, PathBuf},
     process::Command,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use anyhow::{Context, Result, bail};
@@ -114,7 +118,24 @@ fn collect_session_candidates(
 }
 
 fn socket_is_live(path: &Path) -> bool {
-    UnixStream::connect(path).is_ok()
+    crate::process_job::connect(path).is_ok()
+}
+
+#[cfg(test)]
+#[test]
+fn backend_review_r3_expired_discovery_probe_never_attempts_connection() {
+    let path = std::env::temp_dir().join(format!("bc-ds-{}", std::process::id()));
+    let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let live = crate::process_job::with_deadline(
+        std::time::Instant::now() - std::time::Duration::from_millis(1),
+        || socket_is_live(&path),
+    );
+    let accepted = listener.accept().is_ok();
+    drop(listener);
+    std::fs::remove_file(path).unwrap();
+    assert!(!live, "expired discovery has no new liveness evidence");
+    assert!(!accepted, "expired discovery must not start a probe");
 }
 
 /// Live read directory plus the existing, verified mutation commands for one
@@ -153,6 +174,9 @@ impl LivePaneDirectory {
 }
 
 impl AgentSource for LivePaneDirectory {
+    fn observation(&self) -> crate::source_observation::SourceObservation {
+        self.cache.observation()
+    }
     fn id(&self) -> &str {
         crate::core::DEFAULT_SOURCE
     }
@@ -191,11 +215,76 @@ impl AgentSource for LivePaneDirectory {
 #[derive(Clone, Debug)]
 pub struct HerdrSocket {
     path: PathBuf,
+    snapshot_unsupported: Arc<AtomicBool>,
 }
 
 impl HerdrSocket {
     pub fn new(path: PathBuf) -> Self {
-        Self { path }
+        Self {
+            path,
+            snapshot_unsupported: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// Used by normal background refresh, never a runtime read. Unsupported
+    /// method is latched across clones; other errors cannot fabricate labels.
+    pub fn labelled_panes(&self) -> Result<Vec<(Agent, Option<String>)>> {
+        if !self.snapshot_unsupported.load(Ordering::Relaxed) {
+            let response = self.request(
+                json!({"id":"beckond:session-snapshot","method":"session.snapshot","params":{}}),
+            )?;
+            if response.pointer("/error/code").and_then(Value::as_str) == Some("unknown_method") {
+                self.snapshot_unsupported.store(true, Ordering::Relaxed);
+            } else {
+                #[derive(Deserialize)]
+                struct Workspace {
+                    workspace_id: String,
+                    #[serde(default)]
+                    label: Option<String>,
+                }
+                #[derive(Deserialize)]
+                struct Pane {
+                    #[serde(flatten)]
+                    agent: Agent,
+                    #[serde(default)]
+                    workspace_id: Option<String>,
+                }
+                #[derive(Deserialize)]
+                struct Snapshot {
+                    workspaces: Vec<Workspace>,
+                    panes: Vec<Pane>,
+                }
+                let snapshot: Snapshot = serde_json::from_value(
+                    response
+                        .pointer("/result/snapshot")
+                        .cloned()
+                        .context("session.snapshot omitted snapshot")?,
+                )?;
+                let labels: BTreeMap<_, _> = snapshot
+                    .workspaces
+                    .into_iter()
+                    .filter_map(|workspace| {
+                        workspace
+                            .label
+                            .filter(|label| !label.trim().is_empty())
+                            .map(|label| (workspace.workspace_id, label))
+                    })
+                    .collect();
+                return Ok(snapshot
+                    .panes
+                    .into_iter()
+                    .map(|pane| {
+                        let title = pane
+                            .workspace_id
+                            .as_ref()
+                            .and_then(|id| labels.get(id))
+                            .cloned();
+                        (pane.agent, title)
+                    })
+                    .collect());
+            }
+        }
+        Ok(self.panes()?.into_iter().map(|pane| (pane, None)).collect())
     }
 
     pub fn panes(&self) -> Result<Vec<Agent>> {
@@ -270,15 +359,7 @@ impl HerdrSocket {
     }
 
     fn request(&self, request: Value) -> Result<Value> {
-        let mut stream = self.connect()?;
-        writeln!(stream, "{}", serde_json::to_string(&request)?)?;
-        stream.flush()?;
-        let mut response = String::new();
-        BufReader::new(stream).read_line(&mut response)?;
-        if response.trim().is_empty() {
-            bail!("Herdr closed request stream without a response");
-        }
-        serde_json::from_str(&response).context("decode Herdr response")
+        crate::process_job::request(&self.path, &request)
     }
 
     fn connect(&self) -> Result<UnixStream> {
@@ -365,10 +446,7 @@ impl AgentSource for HerdrCli {
     }
 
     fn panes(&self) -> Result<Vec<Agent>> {
-        let output = self
-            .command()
-            .args(["pane", "list"])
-            .output()
+        let output = crate::process_job::output(self.command().args(["pane", "list"]))
             .context("run herdr pane list")?;
         if !output.status.success() {
             bail!(
@@ -397,7 +475,7 @@ impl AgentSource for HerdrCli {
             Some(key) => command.arg("--token").arg(format!("fkey={key}")),
             None => command.arg("--clear-token").arg("fkey"),
         };
-        let output = command.output().context("write Herdr pane token")?;
+        let output = crate::process_job::output(&mut command).context("write Herdr pane token")?;
         if !output.status.success() {
             bail!(
                 "token update failed: {}",
@@ -413,15 +491,15 @@ impl AgentSource for HerdrCli {
         binding: &str,
     ) -> Result<PresentationTokenWrite> {
         self.ensure_same_session(pane)?;
-        let output = self
-            .command()
-            .args(["pane", "report-metadata", &pane.pane_id, "--source", SOURCE])
-            .arg("--token")
-            .arg(format!("beckon_binding={binding}"))
-            .arg("--token")
-            .arg(format!("beckon_pane_id={}", pane.pane_id))
-            .output()
-            .context("write Beckon presentation tokens")?;
+        let output = crate::process_job::output(
+            self.command()
+                .args(["pane", "report-metadata", &pane.pane_id, "--source", SOURCE])
+                .arg("--token")
+                .arg(format!("beckon_binding={binding}"))
+                .arg("--token")
+                .arg(format!("beckon_pane_id={}", pane.pane_id)),
+        )
+        .context("write Beckon presentation tokens")?;
         if output.status.success() {
             return Ok(PresentationTokenWrite::Written);
         }

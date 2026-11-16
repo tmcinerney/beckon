@@ -10,15 +10,13 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use beckon::{
-    action::RepeatPressConfirm,
     config::{self},
     core::{
-        AgentPresentation, AgentRef, AgentSource, BindingService, BindingState, BindingStore,
-        PresentationTokenWrite, STATE_VERSION,
+        AgentPresentation, AgentRef, AgentSource, BindingService, BindingStore,
+        PresentationTokenWrite,
     },
     display::{DeviceEvent, DisplaySet},
-    focus::{CommandFocus, FocusAdapter, FocusContext},
-    herdr::{HerdrCli, LivePaneDirectory, discover_sessions},
+    herdr::{HerdrCli, discover_sessions},
     hid::{self, Status, StatusSnapshot},
     input::ConfiguredInput,
     session::SessionRouter,
@@ -31,8 +29,10 @@ use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tao::event_loop::{ControlFlow, EventLoop, EventLoopBuilder};
-use tracing::{debug, info, info_span, warn};
+use tracing::{debug, info};
 use tracing_subscriber::EnvFilter;
+
+mod daemon_backend;
 
 #[derive(Parser)]
 #[command(
@@ -306,6 +306,9 @@ struct HidMalformedArgs {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 enum Request {
+    RuntimeSnapshot {
+        version: u32,
+    },
     ConfigModel {},
     SetPresentation {
         expected_revision: String,
@@ -808,14 +811,6 @@ fn key_event_line(key: &str, description: &str, source: &str) -> String {
     format!("{timestamp}\t{key}\t{}\t{source}\n", description)
 }
 
-fn focus_result_line(key: &str, result: &str) -> String {
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system clock is before Unix epoch")
-        .as_millis();
-    format!("{timestamp}\t{key}\tfocus-{result}\tdaemon\n")
-}
-
 fn append_key_event(line: &str) -> Result<()> {
     let path = key_event_log_path();
     let directory = path.parent().expect("key event log has a parent");
@@ -896,7 +891,7 @@ fn socket_path() -> PathBuf {
 }
 
 fn daemon() -> Result<()> {
-    let mut config = config::load()?;
+    let config = config::load()?;
     let path = socket_path();
     if let Some(directory) = path.parent()
         && directory == JsonBindingStore::from_environment().directory()
@@ -923,125 +918,80 @@ fn daemon() -> Result<()> {
 
     // AIDEV-NOTE: macOS requires global-hotkey and Tao's event loop on the main
     // thread. Socket polling keeps binding mutation serialized in this daemon.
-    let sources = build_sources(&config)?;
-    info!(
-        sources = %config.sources.iter().map(|s| s.id.as_str()).collect::<Vec<_>>().join(", "),
-        "daemon configured agent sources"
-    );
-    let terminal = terminal::from_config(&config.terminal)?;
-    if let Some(link) = &terminal {
-        info!(
-            backend = link.backend().id(),
-            "terminal surface backend configured"
-        );
-    }
-    let mut displays = DisplaySet::from_config(&config)?;
-    let mut switches = Switches::new(&config.devices, SystemEmitter::default())?;
-    let mut last_render_error = None;
-    let mut current_plan = beckon::render::render(&config.display, &[])?;
-    let mut presentation = PresentationPublisher::default();
-    let mut last_presentation_error = None;
+    let displays = DisplaySet::from_config(&config)?;
+    let switches: Switches<SystemEmitter> =
+        Switches::new(&config.devices, SystemEmitter::default())?;
     let event_loop = background_event_loop();
     let manager = GlobalHotKeyManager::new().context("initialize macOS global hotkeys")?;
     let input = ConfiguredInput::register(&config.devices, &manager)?;
     info!(devices = %config.devices.iter().map(|d| d.id.as_str()).collect::<Vec<_>>().join(", "), "configured devices");
     let receiver = GlobalHotKeyEvent::receiver();
-    let mut confirm = RepeatPressConfirm::default();
+    let jobs = beckon::slow_job::SourceJobs::spawn(|| {
+        let mut executor = beckon::source_jobs::SourceExecutor::default();
+        move |work, deadline| {
+            executor
+                .execute(work, deadline)
+                .map_err(|error| format!("{error:#}"))
+        }
+    })?;
+    let mut backend = daemon_backend::State::new(
+        config,
+        switches,
+        displays,
+        jobs,
+        JsonBindingStore::from_environment(),
+    )?;
+    // Listener/config/input ownership is established before explicit startup.
+    backend.start()?;
     let stopping = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let flag = stopping.clone();
     ctrlc::set_handler(move || flag.store(true, std::sync::atomic::Ordering::SeqCst))?;
-    event_loop.run(move |_event, _, control_flow| {
+    event_loop.run(move |event, _, control_flow| {
         if stopping.load(std::sync::atomic::Ordering::SeqCst) {
-            for device in &config.devices {
-                if let Err(error) = switches.reset_device(&device.id) {
-                    eprintln!("shutdown: {error:#}");
-                }
-            }
+            backend.stop();
             let _ = fs::remove_file(&path);
             *control_flow = ControlFlow::Exit;
             return;
         }
-        *control_flow =
-            ControlFlow::WaitUntil(std::time::Instant::now() + Duration::from_millis(50));
-        while let Ok((stream, _)) = listener.accept() {
-            if let Err(error) =
-                handle_connection(stream, &sources, &mut config, &mut switches, &mut displays)
+        if !matches!(event, tao::event::Event::MainEventsCleared) {
+            return;
+        }
+        let now = Instant::now();
+        let mut host: BTreeMap<_, Vec<_>> = backend
+            .config
+            .devices
+            .iter()
+            .filter(|device| matches!(device.definition.adapter.as_str(), "hotkeys" | "glove80"))
+            .map(|device| (device.id.clone(), Vec::new()))
+            .collect();
+        let mut raw = 0;
+        for _ in 0..128 {
+            let Ok(event) = receiver.try_recv() else {
+                break;
+            };
+            raw += 1;
+            if let Some((address, pressed)) = input.event(&event)
+                && let Some(events) = host.get_mut(&address.device)
             {
-                eprintln!("request failed: {error:#}");
+                events.push(DeviceEvent::Key { address, pressed });
             }
         }
-        while let Ok(event) = receiver.try_recv() {
-            debug!(hotkey_id = event.id, state = ?event.state, "received global hotkey event");
-            if let Some((address, pressed)) = input.event(&event) {
-                route_device_key(
-                    &address,
-                    pressed,
-                    &config,
-                    &sources,
-                    terminal.as_ref(),
-                    &mut confirm,
-                    &mut switches,
-                );
-            }
-        }
-        let (pad_events, pad_failures) = displays.poll_input();
-        for failure in pad_failures {
-            eprintln!("poll {} input: {}", failure.adapter, failure.message);
-        }
-        for event in pad_events {
-            match event {
-                DeviceEvent::Key { address, pressed } => route_device_key(
-                    &address,
-                    pressed,
-                    &config,
-                    &sources,
-                    terminal.as_ref(),
-                    &mut confirm,
-                    &mut switches,
-                ),
-                DeviceEvent::Reset { device } => {
-                    if let Err(error) = switches.reset_device(&device) {
-                        eprintln!("reset {device}: {error:#}");
-                    }
-                }
-            }
-        }
-        // AIDEV-NOTE: don't spawn periodic source/metadata commands while an
-        // output chord is down. Feedback uses the latest good plan and release
-        // events are drained before any background work can delay them.
-        if !switches.output_down() {
-            match render_snapshot(&config, &sources) {
-                Ok(plan) => {
-                    last_render_error = None;
-                    current_plan = plan;
-                }
-                Err(error) => {
-                    let error = format!("{error:#}");
-                    if last_render_error.as_deref() != Some(error.as_str()) {
-                        eprintln!("render: {error}");
-                        last_render_error = Some(error);
-                    }
-                }
-            }
-        }
-        for failure in displays.publish_feedback(&current_plan, &switches.treatments()) {
-            if let Err(error) = switches.reset_device(&failure.adapter) {
-                eprintln!("reset {}: {error:#}", failure.adapter);
-            }
-            eprintln!("update {} display: {}", failure.adapter, failure.message);
-        }
-        if !switches.output_down() {
-            match presentation.sync(&sources, &config.bindings) {
-                Ok(_) => last_presentation_error = None,
-                Err(error) => {
-                    let error = format!("{error:#}");
-                    if last_presentation_error.as_deref() != Some(error.as_str()) {
-                        eprintln!("update pane presentation: {error}");
-                        last_presentation_error = Some(error);
-                    }
-                }
-            }
-        }
+        let host = host
+            .into_iter()
+            .map(|(device, events)| beckon::display::DeviceInputBatch {
+                device,
+                completed_at: now,
+                failure: None,
+                batch: beckon::display::InputBatch {
+                    events,
+                    raw_frames: raw,
+                    drained: raw < 128,
+                    continuity: beckon::display::InputContinuity::Continuous,
+                    ..Default::default()
+                },
+            })
+            .collect();
+        *control_flow = ControlFlow::WaitUntil(backend.step(&listener, host));
         let _keep_manager_registered = &manager;
     })
 }
@@ -1055,12 +1005,6 @@ struct PresentationPublisher {
 }
 
 impl PresentationPublisher {
-    fn sync<D: AgentSource>(&mut self, panes: &D, keys: &[String]) -> Result<bool> {
-        let store = JsonBindingStore::from_environment();
-        let presentation = BindingService::new(&store, panes).with_keys(keys).panes()?;
-        self.publish(panes, presentation)
-    }
-
     fn publish<D: AgentSource>(
         &mut self,
         panes: &D,
@@ -1104,34 +1048,7 @@ fn pane_reference(pane: &AgentPresentation) -> AgentRef {
     )
 }
 
-/// Read the durable binding ledger without mutating it, combine it with the
-/// live pane cache, and send a new transport snapshot only when it matters.
-/// Binding reconciliation remains a CLI/request operation; polling it here
-/// would rewrite the state file and Herdr metadata on every event-loop tick.
-fn render_snapshot<D>(config: &config::Config, panes: &D) -> Result<beckon::render::RenderPlan>
-where
-    D: AgentSource,
-{
-    let store = JsonBindingStore::from_environment();
-    let state = store.load()?.unwrap_or(BindingState {
-        state_version: STATE_VERSION,
-        bindings: Vec::new(),
-    });
-    let panes_by_id = panes.panes()?;
-    let bindings = state
-        .bindings
-        .into_iter()
-        .filter_map(|binding| {
-            panes_by_id
-                .iter()
-                .find(|pane| binding.matches_agent(pane))
-                .cloned()
-                .map(|pane| (binding, pane))
-        })
-        .collect::<Vec<_>>();
-    beckon::render::render(&config.display, &bindings)
-}
-
+#[cfg(test)]
 fn handle_connection<D: AgentSource>(
     mut stream: UnixStream,
     panes: &D,
@@ -1182,6 +1099,7 @@ fn handle_connection<D: AgentSource>(
     Ok(())
 }
 
+#[cfg(test)]
 fn configure_client_stream(stream: &UnixStream) -> Result<()> {
     // AIDEV-NOTE: The nonblocking listener yields nonblocking accepted streams
     // on macOS. Large status responses otherwise stop at the socket buffer
@@ -1220,14 +1138,26 @@ fn client(request: Request) -> Result<()> {
     }
 }
 
+#[cfg(test)]
 fn dispatch_config<D: AgentSource>(
     request: Request,
     panes: &D,
     config: &mut config::Config,
 ) -> Result<Value> {
     let store = JsonBindingStore::from_environment();
-    let bindings = BindingService::new(&store, panes).with_keys(&config.bindings);
+    dispatch_config_with_store(request, panes, config, &store)
+}
+fn dispatch_config_with_store<D: AgentSource>(
+    request: Request,
+    panes: &D,
+    config: &mut config::Config,
+    store: &dyn BindingStore,
+) -> Result<Value> {
+    let bindings = BindingService::new(store, panes).with_keys(&config.bindings);
     match request {
+        Request::RuntimeSnapshot { .. } => {
+            bail!("runtime snapshot must use the cached daemon projection")
+        }
         Request::ConfigModel {} => Ok(serde_json::to_value(config.model()?)?),
         Request::SetPresentation {
             expected_revision,
@@ -1293,25 +1223,8 @@ fn dispatch_config<D: AgentSource>(
             panes.refresh();
             Ok(json!({ "refreshed": true }))
         }
-        Request::FocusKey { key } => {
-            let pane = bindings.pane_for_key(&key)?;
-            panes.focus_pane(&pane)?;
-            Ok(json!({
-                "key": key,
-                "source": pane.source,
-                "scope": pane.session,
-                "id": pane.pane_id,
-            }))
-        }
-        Request::Status {} => Ok(json!({
-            "bindings": bindings.status()?.into_iter().map(|(binding, pane)| json!({
-                "key": binding.key,
-                "source": binding.source,
-                "session": binding.session,
-                "pane": pane,
-            })).collect::<Vec<_>>(),
-            "panes": bindings.panes()?,
-        })),
+        Request::FocusKey { .. } => bail!("navigation must use the command-only daemon job"),
+        Request::Status {} => bail!("status must use the read-only cached daemon projection"),
     }
 }
 
@@ -1352,22 +1265,6 @@ fn resolve_pane<D: AgentSource>(
     }
 }
 
-/// Build every configured agent integration as one routing source set.
-/// Herdr is optional once at least one `[sources]` entry exists, so a Rex-only
-/// setup can still drive the pad when Herdr is not running.
-fn build_sources(config: &config::Config) -> Result<beckon::source_set::SourceSet> {
-    let mut sources: Vec<Box<dyn AgentSource>> = Vec::new();
-    if config.herdr.enabled {
-        sources.push(Box::new(live_directories(config)?));
-    }
-    for source in &config.sources {
-        sources.push(Box::new(beckon::command_source::CommandSource::new(
-            source.clone(),
-        )));
-    }
-    Ok(beckon::source_set::SourceSet::new(sources))
-}
-
 /// One-shot equivalent for read-only CLI commands such as `beckon preview`.
 fn cli_sources(config: &config::Config) -> Result<beckon::source_set::SourceSet> {
     let mut sources: Vec<Box<dyn AgentSource>> = Vec::new();
@@ -1380,32 +1277,6 @@ fn cli_sources(config: &config::Config) -> Result<beckon::source_set::SourceSet>
         )));
     }
     Ok(beckon::source_set::SourceSet::new(sources))
-}
-
-/// Build the live session router used by the daemon.
-fn live_directories(config: &config::Config) -> Result<SessionRouter<LivePaneDirectory>> {
-    let sessions = discover_sessions(
-        config.herdr.socket.as_deref(),
-        config.herdr.allowed_sessions(),
-    );
-    if sessions.is_empty() {
-        bail!("no reachable Herdr sessions; start Herdr or check the [herdr] configuration");
-    }
-    let mut directories = std::collections::BTreeMap::new();
-    for session in sessions {
-        match LivePaneDirectory::start(session.clone(), &config.herdr.cli) {
-            Ok(directory) => {
-                directories.insert(session.name.clone(), directory);
-            }
-            Err(error) => {
-                eprintln!("beckond: skipping session {}: {error:#}", session.name);
-            }
-        }
-    }
-    if directories.is_empty() {
-        bail!("no Herdr session accepted a connection; check the [herdr] configuration");
-    }
-    Ok(SessionRouter::new(directories))
 }
 
 /// Build the one-shot CLI session router used by read-only commands.
@@ -1435,184 +1306,6 @@ fn pad_key_for_slot(map: &[(u8, String)], slot: u8) -> Option<&str> {
     map.iter()
         .find(|(id, _)| *id == slot)
         .map(|(_, key)| key.as_str())
-}
-
-#[allow(clippy::too_many_arguments)]
-fn route_device_key<D: AgentSource>(
-    address: &beckon::device::Address,
-    pressed: bool,
-    config: &config::Config,
-    sources: &D,
-    terminal: Option<&TerminalLink>,
-    confirm: &mut RepeatPressConfirm,
-    switches: &mut Switches<SystemEmitter>,
-) {
-    let already_held = switches.held_for(address);
-    if let Err(error) = switches.event(address, pressed, Instant::now()) {
-        eprintln!("action {}:{}: {error:#}", address.device, address.address);
-        if let Err(error) = switches.reset_device(&address.device) {
-            eprintln!("release failed output: {error:#}");
-        }
-        return;
-    }
-    if !pressed || already_held {
-        return;
-    }
-    let key = config
-        .devices
-        .iter()
-        .filter(|device| device.id == address.device)
-        .flat_map(|device| device.definition.keys.values())
-        .find(|key| key.members.contains(address));
-    if let Some(binding) = key.and_then(|key| key.binding.as_deref()) {
-        route_key(
-            binding,
-            &address.address,
-            config,
-            sources,
-            terminal,
-            confirm,
-        );
-    }
-}
-
-/// Route one logical key activation from any physical input (a global hotkey
-/// or a Creator Micro AG press) through the same navigation/confirmation path.
-/// Physical adapters only resolve a key; they never decide what the key does.
-fn route_key<D: AgentSource>(
-    key: &str,
-    physical: &str,
-    config: &config::Config,
-    sources: &D,
-    terminal: Option<&TerminalLink>,
-    confirm: &mut RepeatPressConfirm,
-) {
-    info!(key, physical, "routed input to logical key");
-    if let Err(error) = append_key_event(&key_event_line(key, physical, "daemon")) {
-        eprintln!("record {key}: {error:#}");
-    }
-    let now = Instant::now();
-    let target = pane_for_key(key, sources, &config.bindings);
-    let confirmed = config.actions.confirm.enabled
-        && target.as_ref().is_ok_and(|pane| {
-            confirm.take_if_ready(key, pane, pane_is_focused(sources, pane), now)
-        });
-    if confirmed {
-        info!(key, "repeat press confirmed configured action");
-        let keys = config
-            .actions
-            .confirm
-            .keys
-            .iter()
-            .map(String::as_str)
-            .collect::<Vec<_>>();
-        let result = target.and_then(|pane| sources.send_keys(&pane, &keys));
-        match result {
-            Ok(()) => {
-                info!(key, "configured action completed");
-                if let Err(error) = append_key_event(&focus_result_line(key, "confirm-ok")) {
-                    eprintln!("record confirmation {key}: {error:#}");
-                }
-            }
-            Err(error) => {
-                warn!(key, error = %format!("{error:#}"), "configured action failed");
-                if let Err(record_error) =
-                    append_key_event(&focus_result_line(key, "confirm-error"))
-                {
-                    eprintln!("record confirmation {key}: {record_error:#}");
-                }
-                eprintln!("confirm {key}: {error:#}");
-            }
-        }
-    } else {
-        match focus_key(key, config, sources, terminal) {
-            Ok(()) => {
-                info!(key, "navigation completed");
-                if config.actions.confirm.enabled
-                    && let Ok(pane) = target
-                {
-                    confirm.arm(
-                        key,
-                        &pane,
-                        Duration::from_millis(config.actions.confirm.repeat_press_ms),
-                        now,
-                    );
-                }
-                if let Err(error) = append_key_event(&focus_result_line(key, "ok")) {
-                    eprintln!("record focus {key}: {error:#}");
-                }
-            }
-            Err(error) => {
-                warn!(key, error = %format!("{error:#}"), "navigation failed");
-                if let Err(record_error) = append_key_event(&focus_result_line(key, "error")) {
-                    eprintln!("record focus {key}: {record_error:#}");
-                }
-                eprintln!("focus {key}: {error:#}");
-            }
-        }
-    }
-}
-
-fn focus_key<D: AgentSource>(
-    key: &str,
-    config: &config::Config,
-    panes: &D,
-    terminal: Option<&TerminalLink>,
-) -> Result<()> {
-    let span = info_span!("focus_bound_pane", key);
-    let _entered = span.enter();
-    let pane = pane_for_key(key, panes, &config.bindings)?;
-    info!(session = %pane.session, pane_id = %pane.pane_id, "resolved bound pane");
-    // Raising the adopted surface is best effort: a missing record, a changed
-    // backend, or a stale handle warns and degrades to command + pane focus.
-    // Beckon never guesses a replacement surface.
-    // AIDEV-NOTE: the legacy [focus] command and adopted terminal surface are
-    // Herdr's window-manager integration. Other sources bring their own host
-    // forward through their configured `activate` command inside focus_pane,
-    // so running the Herdr path here would raise the wrong application.
-    let herdr = pane.source == beckon::core::DEFAULT_SOURCE;
-    let mut raised = None;
-    if herdr && let Some(link) = terminal {
-        match link.raise_for_session(&pane.session) {
-            Ok(outcome) => raised = outcome,
-            Err(error) => {
-                let error = format!("{error:#}");
-                warn!(session = %pane.session, error = %error, "adopted terminal surface not raised");
-                eprintln!("focus {key}: {error}");
-            }
-        }
-    }
-    if herdr {
-        let context = FocusContext {
-            key,
-            pane: &pane,
-            terminal_handle: raised.as_ref(),
-        };
-        CommandFocus::new(&config.focus).focus_terminal(&context)?;
-        info!("terminal focus integration completed");
-    }
-    debug!(pane = %pane, source = %pane.source, "requesting agent focus");
-    panes.focus_pane(&pane)?;
-    info!(pane = %pane, "agent focus completed");
-    Ok(())
-}
-
-fn pane_for_key<D: AgentSource>(key: &str, panes: &D, keys: &[String]) -> Result<AgentRef> {
-    let store = JsonBindingStore::from_environment();
-    BindingService::new(&store, panes)
-        .with_keys(keys)
-        .pane_for_key(key)
-}
-
-fn pane_is_focused<D: AgentSource>(panes: &D, pane: &AgentRef) -> bool {
-    panes
-        .panes()
-        .map(|panes| {
-            panes
-                .into_iter()
-                .any(|candidate| candidate.matches(pane) && candidate.focused)
-        })
-        .unwrap_or(false)
 }
 
 #[cfg(test)]

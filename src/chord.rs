@@ -1,6 +1,24 @@
 //! macOS event synthesis. No application names or device addresses live here.
 use anyhow::{Result, bail};
 
+/// Failures proven to precede posting; no receiving-app acknowledgement exists.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PostingError {
+    PermissionDenied,
+    EventCreation,
+}
+impl std::fmt::Display for PostingError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::PermissionDenied => {
+                "event posting denied; grant Accessibility to the Beckon process in System Settings"
+            }
+            Self::EventCreation => "could not create keyboard event/source",
+        })
+    }
+}
+impl std::error::Error for PostingError {}
+
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Chord {
     code: u16,
@@ -59,14 +77,12 @@ impl Chord {
         }
         // Do not prompt from a LaunchAgent or silently pretend synthesis worked.
         if !unsafe { CGPreflightPostEventAccess() } {
-            bail!(
-                "event posting denied; grant Accessibility to the Beckon process in System Settings"
-            );
+            return Err(PostingError::PermissionDenied.into());
         }
         let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
-            .map_err(|()| anyhow::anyhow!("create keyboard event source"))?;
+            .map_err(|()| PostingError::EventCreation)?;
         let event = CGEvent::new_keyboard_event(source, self.code, down)
-            .map_err(|()| anyhow::anyhow!("create keyboard event"))?;
+            .map_err(|()| PostingError::EventCreation)?;
         let mut flags = CGEventFlags::empty();
         for (mask, flag) in [
             (1, CGEventFlags::CGEventFlagControl),

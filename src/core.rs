@@ -238,6 +238,11 @@ pub enum PresentationTokenWrite {
 /// it does not have.
 pub trait AgentSource {
     fn id(&self) -> &str;
+    /// Cached evidence only; unsupported adapters must not fake live health by
+    /// invoking panes/observed_sessions or external commands in this accessor.
+    fn observation(&self) -> crate::source_observation::SourceObservation {
+        crate::source_observation::SourceObservation::unknown(self.id())
+    }
     fn panes(&self) -> Result<Vec<Agent>>;
     /// Scopes whose agent snapshot is currently authoritative.
     ///

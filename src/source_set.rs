@@ -14,6 +14,12 @@ pub struct SourceSet {
 }
 
 impl SourceSet {
+    pub fn observations(&self) -> Vec<crate::source_observation::SourceObservation> {
+        self.sources
+            .iter()
+            .map(|source| source.observation())
+            .collect()
+    }
     pub fn new(sources: Vec<Box<dyn AgentSource>>) -> Self {
         Self { sources }
     }

@@ -30,6 +30,10 @@ pub struct DisplayModel {
 }
 #[derive(Debug, Serialize)]
 pub struct ConfigurationCapabilities {
+    pub runtime_snapshot_versions: Vec<u32>,
+    pub status_read_only: bool,
+    pub action_kinds: Vec<&'static str>,
+    pub feedback_states: Vec<&'static str>,
     pub presentation_changes: Vec<&'static str>,
     pub binding_release_guard: bool,
     pub device_channels: std::collections::BTreeMap<String, Vec<&'static str>>,
@@ -362,7 +366,16 @@ impl Config {
                 themes: self.display.themes.clone(),
             },
             capabilities: ConfigurationCapabilities {
-                presentation_changes: vec!["theme_state", "device_effect", "device_channel"],
+                runtime_snapshot_versions: vec![1],
+                status_read_only: true,
+                action_kinds: vec!["chord", "tap-hold-chords"],
+                feedback_states: vec!["idle", "held", "latched", "pending", "hold_fired", "error"],
+                presentation_changes: vec![
+                    "theme_state",
+                    "device_effect",
+                    "device_effect_v2",
+                    "device_channel",
+                ],
                 binding_release_guard: true,
                 device_channels: self
                     .devices

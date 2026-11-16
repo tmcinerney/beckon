@@ -56,19 +56,51 @@ pub enum Action {
         /// Required for tap-hold, forbidden for the other modes. No hidden threshold.
         tap_ms: Option<u64>,
     },
+    TapHoldChords {
+        tap_keys: Vec<String>,
+        hold_keys: Vec<String>,
+        hold_ms: u64,
+    },
 }
 
 impl Action {
     pub fn validate(&self) -> Result<()> {
-        let Self::Chord { keys, mode, tap_ms } = self;
-        crate::chord::Chord::parse(keys)?;
-        match (mode, tap_ms) {
-            (Mode::TapHold, Some(ms)) if *ms > 0 => Ok(()),
-            (Mode::TapHold, _) => bail!("tap-hold requires an explicit positive tap_ms"),
-            (_, None) => Ok(()),
-            _ => bail!("tap_ms is only valid for tap-hold"),
+        for keys in self.output_chords() {
+            crate::chord::Chord::parse(keys)?;
+        }
+        match self {
+            Self::TapHoldChords { hold_ms, .. } => validate_duration(*hold_ms, "hold_ms"),
+            Self::Chord { mode, tap_ms, .. } => match (mode, tap_ms) {
+                (Mode::TapHold, Some(ms)) if *ms > 0 => Ok(()),
+                (Mode::TapHold, _) => bail!("tap-hold requires an explicit positive tap_ms"),
+                (_, None) => Ok(()),
+                _ => bail!("tap_ms is only valid for tap-hold"),
+            },
         }
     }
+
+    pub fn output_chords(&self) -> impl Iterator<Item = &[String]> {
+        let (first, second): (&[String], Option<&[String]>) = match self {
+            Self::Chord { keys, .. } => (keys, None),
+            Self::TapHoldChords {
+                tap_keys,
+                hold_keys,
+                ..
+            } => (tap_keys, Some(hold_keys)),
+        };
+        [Some(first), second].into_iter().flatten()
+    }
+}
+
+fn validate_duration(ms: u64, field: &str) -> Result<()> {
+    if ms == 0
+        || std::time::Instant::now()
+            .checked_add(std::time::Duration::from_millis(ms))
+            .is_none()
+    {
+        bail!("{field} requires an explicit positive representable duration");
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq)]
@@ -94,9 +126,43 @@ pub struct Effects {
     pub idle: Option<Treatment>,
     pub held: Option<Treatment>,
     pub latched: Option<Treatment>,
+    pub pending: Option<Treatment>,
+    pub hold_fired: Option<Treatment>,
+    pub error: Option<TimedTreatment>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct TimedTreatment {
+    pub treatment: Treatment,
+    pub duration_ms: u64,
 }
 
 impl Effects {
+    pub fn has_extended_states(&self) -> bool {
+        self.pending.is_some() || self.hold_fired.is_some() || self.error.is_some()
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        let treatments = [
+            self.idle,
+            self.held,
+            self.latched,
+            self.pending,
+            self.hold_fired,
+        ];
+        if treatments.iter().all(Option::is_none) && self.error.is_none() {
+            bail!("define at least one feedback state");
+        }
+        for treatment in treatments.into_iter().flatten() {
+            treatment.validate()?;
+        }
+        if let Some(error) = self.error {
+            error.treatment.validate()?;
+            validate_duration(error.duration_ms, "duration_ms")?;
+        }
+        Ok(())
+    }
     /// No treatment means return control to the normal binding/base rendering.
     pub fn for_press(&self, held: bool, latched: bool) -> Option<Treatment> {
         if held {
@@ -194,15 +260,9 @@ impl DeviceConfig {
             if !valid_id(name) {
                 bail!("effects.{name}: invalid name");
             }
-            let treatments = [effects.idle, effects.held, effects.latched];
-            if treatments.iter().all(Option::is_none) {
-                bail!("effects.{name}: define at least one state");
-            }
-            for treatment in treatments.into_iter().flatten() {
-                treatment
-                    .validate()
-                    .with_context(|| format!("effects.{name}"))?;
-            }
+            effects
+                .validate()
+                .with_context(|| format!("effects.{name}"))?;
         }
         Ok(())
     }
@@ -310,6 +370,27 @@ mod tests {
     }
     const ACTION: &str =
         "[actions.dictate]\nkind='chord'\nkeys=['ctrl','opt','d']\nmode='tap-hold'\ntap_ms=300\n";
+    #[test]
+    fn two_chord_action_requires_explicit_positive_timing_and_distinct_fields() {
+        let valid = "adapter='test'\n[actions.send]\nkind='tap-hold-chords'\ntap_keys=['enter']\nhold_keys=['shift','enter']\nhold_ms=300\n";
+        let file = parse(valid).unwrap();
+        let json = serde_json::to_value(&file.definition.actions["send"]).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({"kind":"tap-hold-chords","tap_keys":["enter"],"hold_keys":["shift","enter"],"hold_ms":300})
+        );
+        for invalid in [
+            valid.replace("hold_ms=300", ""),
+            valid.replace("hold_ms=300", "hold_ms=0"),
+            valid.replace("hold_ms=300", "hold_ms=-1"),
+            valid.replace("hold_ms=300", "hold_ms=18446744073709551616"),
+            valid.replace("hold_ms=300", "hold_ms=300\nmode='tap-hold'"),
+            valid.replace("['shift','enter']", "['shift','typo']"),
+            valid.replace("['enter']", "[]"),
+        ] {
+            assert!(parse(&invalid).is_err(), "accepted {invalid}");
+        }
+    }
     #[test]
     fn forward_references_and_explicit_grouping() {
         let text = format!(
