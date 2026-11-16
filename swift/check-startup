@@ -1,0 +1,45 @@
+#!/bin/bash
+# Native startup resource regression; requires an attended macOS GUI session.
+set -eu
+if (( $# != 2 )); then
+  echo "Usage: bash swift/check-startup /absolute/path/to/beckon-configuration /new/log-prefix" >&2
+  exit 2
+fi
+binary="$1"
+output="$2"
+if [[ ! -x "$binary" || "$binary" != /* || -e "$output.app.log" || -e "$output.metrics" ]]; then
+  echo "Expected an absolute executable path and unused log prefix" >&2
+  exit 2
+fi
+
+# AIDEV-NOTE: Unit tests missed a TimelineView/MenuBarExtra native startup loop.
+# Bound the real executable and signal only the child created by this invocation.
+"$binary" >"$output.app.log" 2>&1 &
+child=$!
+cleanup() {
+  kill -TERM "$child" 2>/dev/null || true
+  sleep 0.2
+  if kill -0 "$child" 2>/dev/null; then kill -KILL "$child" 2>/dev/null || true; fi
+  wait "$child" 2>/dev/null || true
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+echo "Startup probe child: $child"
+hot=0
+for ((i=0; i<60; i++)); do
+  if ! kill -0 "$child" 2>/dev/null; then echo "FAIL: early exit"; exit 1; fi
+  reading=$(/bin/ps -p "$child" -o %cpu=,rss=)
+  echo "$i $reading" >>"$output.metrics"
+  if /usr/bin/awk '{exit !($2 > 524288)}' <<<"$reading"; then
+    echo "FAIL: RSS exceeded 512 MiB"
+    exit 1
+  fi
+  if /usr/bin/awk '{exit !($1 > 70)}' <<<"$reading"; then hot=$((hot + 1)); else hot=0; fi
+  if ((hot >= 15)); then
+    echo "FAIL: sustained startup CPU >70%"
+    exit 1
+  fi
+  sleep 0.1
+done
+echo "PASS: bounded resource smoke only; window/menu visibility still requires manual acceptance"

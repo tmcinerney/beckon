@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 import BeckonConfiguration
 
 /// Read-only inspection. Lifecycle and polling belong to the single shared model, never a view task.
@@ -166,11 +167,16 @@ struct DiagnosticContent: View {
 
 @MainActor public struct MenuHealthView: View {
     @ObservedObject private var model: ConfigurationModel
-    public init(model: ConfigurationModel) { self.model = model }
+    private let openMainWindow: () -> Void
+    public init(model: ConfigurationModel, openMainWindow: @escaping () -> Void) {
+        self.model = model; self.openMainWindow = openMainWindow
+    }
     public var body: some View {
         TimelineView(.periodic(from: .now, by: 1)) { timeline in
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
+                    Button("Open Beckon…", action: openMainWindow)
+                        .help("Show the Beckon window with Devices and Configuration tabs.")
                     HealthSummaryContent(summary: model.healthSummary(at: timeline.date))
                     ConnectionButtons(model: model)
                     if let error = model.runtimeError { Text(error).font(.caption) }
@@ -187,13 +193,16 @@ struct DiagnosticContent: View {
 
 @MainActor public struct MenuHealthLabel: View {
     @ObservedObject private var model: ConfigurationModel
+    @State private var now = Date()
+    private let ticks = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
     public init(model: ConfigurationModel) { self.model = model }
     public var body: some View {
-        TimelineView(.periodic(from: .now, by: 1)) { timeline in
-            let health = model.healthSummary(at: timeline.date)
-            Label("Beckon: \(health.title)", systemImage: health.symbol)
-                .accessibilityLabel("Beckon health").accessibilityValue(health.text)
-                .help(health.text)
-        }
+        // AIDEV-NOTE: TimelineView in a MenuBarExtra label loops during native startup on macOS 27.
+        // A presentation-only tick keeps freshness current without rescheduling the label's view graph.
+        let health = model.healthSummary(at: now)
+        Label("Beckon: \(health.title)", systemImage: health.symbol)
+            .accessibilityLabel("Beckon health").accessibilityValue(health.text)
+            .help(health.text)
+            .onReceive(ticks) { now = $0 }
     }
 }

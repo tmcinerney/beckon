@@ -26,10 +26,74 @@ For an explicitly authorized interactive session:
 ./swift/run-swift run beckon-configuration
 ```
 
-`ConfigurationView(model:)`, `DeviceStatusView(model:)`, and `MenuHealthView(model:)`
+Before leaving a new build running, use the bounded native startup regression
+in an attended macOS GUI session (after `./swift/run-swift build`):
+
+```sh
+bash swift/check-startup "$PWD/swift/.build/out/Products/Debug/beckon-configuration" /absolute/path/to/new-log-prefix
+```
+
+This launches one disconnected instance for roughly 6–10 seconds, records CPU/RSS,
+fails on sustained CPU above 70% or RSS above 512 MiB, and stops only its own child.
+It never connects, clicks controls, or changes the daemon/device. Limits are sampled,
+not OS-enforced memory quotas. This catches the native `TimelineView`/`MenuBarExtra`
+label startup loop observed on macOS 27; the label now uses a presentation-only
+one-second timer. Unit tests alone do not exercise that native launch path.
+A passing resource probe is **not** proof of visible UI, VoiceOver, or live hardware
+acceptance; verify the window/menu and stable idle usage separately before rollout.
+
+`ConfigurationView(model:)`, `DeviceStatusView(model:)`, and
+`MenuHealthView(model:openMainWindow:)`
 are reusable views. The standalone app hosts native tabs and a window-style
 `MenuBarExtra` (macOS 13+, unchanged minimum OS). Views use labelled native
 pickers, text fields, sliders, colour pickers, disclosure groups and buttons.
+
+The primary scene is a value-presenting `WindowGroup` (`beckon-main`) containing
+Devices and Configuration. Its private `Codable, Hashable` token has one case,
+`main`, also supplied as the default value. The popup's **Open Beckon…** action
+passes that explicit value and ID: SwiftUI brings an existing equal-value window
+forward, or opens one if absent. The standard New command is removed. A constant
+default value alone is **not** a guarantee against duplicates from restoration or
+other window-creation routes; those remain native acceptance checks.
+
+WindowGroup-primary lifetime keeps the app running after all companion windows
+close. A binding-based `MenuBarExtra` uses app-local `@State menuInserted = true`;
+closing the window does not change that binding. If the user removes the menu
+extra, SwiftUI sets the binding to false. No insertion preference is persisted.
+This is not a menu-only/Dock-hiding or no-window-on-launch policy.
+
+The native development command launches an unbundled SwiftPM executable. A measured
+startup reported AppKit's `prohibited` activation policy even though the window
+rendered; Apple documents that policy as the unbundled/no-Info.plist default. The
+app delegate now requests `.regular` once before launch completes and reports a
+rejected policy change to stderr. The explicit Open action requests app activation
+after routing to the canonical window (`activate()` on macOS 14+, the legacy API on
+macOS 13). No periodic focus stealing, activation retry, other-app enumeration or
+window-manager configuration change is involved. Activation remains an OS request,
+not an immediate or guaranteed foreground result; attended confirmation is required.
+
+For an explicitly authorized diagnostic session, prefix the normal launch/probe
+command with `BECKON_FOREGROUND_DIAGNOSTICS=1`. Opt-in stderr lines tagged
+`[DEBUG-beckon-foreground-20261116]` report only event, this app's activation policy
+and `isActive` at launch, main-scene appearance, activation changes and Open events.
+They contain no endpoint, configuration, window contents or other-app data. The
+set-regular event records the returned Bool. Diagnostics are off by default and
+perform no activation themselves. A post-request inactive sample can precede a later
+activation notification; it is not by itself a foreground verdict.
+
+The app injects the open action into the menu view, so reusable UI code does not
+know the scene identifier or token. Both scenes retain the same app-owned model;
+opening/reopening the window never connects, starts another read loop, or changes
+daemon/device state. The action is available while disconnected or busy,
+independently of Connect. Window content may be recreated after closing; unsaved
+editor drafts are not promised to survive without specific evidence.
+
+In the next explicitly attended session, verify the main window, repeated opening,
+close/reopen with the menu/app still available, absence of standard New, restoration,
+keyboard access and VoiceOver label/help, plus menu open/closed timer freshness and
+stable idle usage. The lifecycle and same-value reuse above follow SwiftUI's documented
+contracts; these native behaviors are **not** established by the model unit tests or a
+successful build. No native acceptance is claimed here.
 
 ## Ownership and protocol
 
